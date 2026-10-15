@@ -1,0 +1,13 @@
+# /etc/airlock-envoy/site.conf: this host's listeners, beyond the built-in `anthropic`.
+# Each listener is a box socket, /run/airlock-envoy/<name>.sock, and a box gets one socket, so a
+# listener is a whole access profile. Apply with `sudo airlock-envoy-apply` (see --help).
+#
+#   <listener>  <destination>...      repeat the name to continue on another line
+#   host:port   only TLS for exactly this host (its SNI) passes
+#   IPv4:port   only TLS without a server name passes: for hosts you run, not shared edges
+#   @name       everything a listener defined above allows (anthropic is built in)
+
+# Claude, plus the monitoring stack and the cluster API.
+infra  @anthropic
+infra  metrics.example.net:443 logs.example.net:443
+infra  10.0.0.10:6443

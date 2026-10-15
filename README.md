@@ -7,16 +7,18 @@ decision.
 
 Two modes, both on sockets, neither decrypting TLS:
 
-- **CONNECT tunnel with a hostname allowlist.** For clients that must talk TLS end to end, such as
-  Claude Code (`HTTPS_PROXY`), whose login and Remote Control need the real Anthropic API. The proxy
-  sees host, TLS server name, bytes and timing, never content, and holds no secret.
+- **CONNECT tunnel with a hostname allowlist, one per socket.** For clients that must talk TLS end
+  to end, such as Claude Code (`HTTPS_PROXY`), whose login and Remote Control need the real
+  Anthropic API. The proxy sees host, TLS server name, bytes and timing, never content, and holds
+  no secret. The built-in `anthropic` socket allows Claude only; a host's site file adds more
+  sockets, each a whole access profile (see [Site listeners](#site-listeners)).
 - **Plain-HTTP injection** (planned). For clients that can be pointed at a plain-HTTP URL (`gh`,
   `git`, `kubectl`, `curl`): Envoy applies policy, adds the credential, and opens TLS upstream
   itself. Service-specific policy (for GitHub, per-repo tokens, no approvals, branch-only pushes)
   comes from an `ext_authz` decision service.
 
 Status: **spike**, with an install path tested on Ubuntu 22.04, 24.04 and 26.04, Debian 13 and
-Arch (systemd-booted containers). Not yet run as a service on a real host.
+Arch (systemd-booted containers), and run as a service on an Arch workstation.
 
 ## Install (Ubuntu, Debian, Arch, any systemd + glibc Linux)
 
@@ -37,7 +39,7 @@ install code, the release key and the egress allowlist from it; check `git statu
 
 ```
 sudo install/install-envoy.sh 1.39.4          # binary -> /usr/local/libexec/airlock-envoy/envoy-1.39.4
-sudo install/install-service.sh "$USER"       # system account, config, hardened systemd unit
+sudo install/install-service.sh "$USER"       # system account, units, airlock-envoy-apply, config
 ```
 
 - `install-envoy.sh` downloads the binary and the signed checksum list, verifies the
@@ -47,11 +49,15 @@ sudo install/install-service.sh "$USER"       # system account, config, hardened
   version, then `sudo systemctl restart airlock-envoy`; older versions stay in
   `/usr/local/libexec/airlock-envoy/` for rollback (`ln -sfn` the old one back).
 - `install-service.sh <user>` creates the `airlock-envoy` system account (sysusers; it refuses
-  an existing login account of that name), installs the config as
-  `/etc/airlock-envoy/tunnel-anthropic.yaml` (root:airlock-envoy 0640) and the units, and
-  starts them. `<user>` is the account whose boxes may connect: the box socket gets an ACL for
-  its numeric uid (rootless containers drop supplementary groups, so a group would not work).
-  Running it again, say to change the user, keeps the socket that running boxes hold.
+  an existing login account of that name), installs the units and
+  `/usr/local/sbin/airlock-envoy-apply`, and runs it: that renders the config,
+  `/etc/airlock-envoy/envoy.yaml` (root:airlock-envoy 0640), from the built-in `anthropic`
+  listener plus `/etc/airlock-envoy/site.conf` if there is one, and starts Envoy and a box
+  socket per listener. `<user>` is the account whose boxes may connect: each box socket gets an
+  ACL for its numeric uid (rootless containers drop supplementary groups, so a group would not
+  work). Running it again, say to change the user or to update the built-in list, keeps the
+  sockets that running boxes hold. An install from before site files is upgraded in place
+  (its `tunnel-anthropic.yaml` goes; the socket stays).
 - **Two layers of sockets.** Envoy cannot take a listening socket from systemd, so systemd
   creates each box socket (`airlock-envoy-proxy@<listener>.socket`) in the root-owned
   `/run/airlock-envoy/`, and `systemd-socket-proxyd` relays each connection to Envoy's own
@@ -76,32 +82,87 @@ What it sets up:
 
 | Path | Owner, mode | What |
 |---|---|---|
-| `/run/airlock-envoy/anthropic.sock` | airlock-envoy, ACL: owner and `<user>` rw | the socket a box gets |
+| `/run/airlock-envoy/<listener>.sock` | airlock-envoy, ACL: owner and `<user>` rw | the socket a box gets, one per listener |
 | `/run/airlock-envoy/` | root, 0755 | created by systemd for the box sockets |
+| `/etc/airlock-envoy/site.conf` | yours to write; root:airlock-envoy 0640 when installed by apply | this host's listeners |
+| `/etc/airlock-envoy/envoy.yaml`, `allowed` | root:airlock-envoy, 0640 | rendered config; what was last applied |
 | `/run/airlock-envoy-internal/` | airlock-envoy, 0700 | Envoy's own sockets, incl. admin; never given to anyone |
 | `/var/log/airlock-envoy/access.jsonl` | airlock-envoy, 0600 (dir 0750) | the audit log |
 
-Give a project's box the socket with `airlock socket add /run/airlock-envoy/anthropic.sock`.
+Put a project's box behind a socket with `airlock egress proxy /run/airlock-envoy/<listener>.sock`
+(claude-airlock's proxy posture: no network of its own, every connection through that socket).
 
 `test/install-test.sh ubuntu[-22.04|-24.04|-26.04]|debian|arch` runs the whole install in a
 systemd-booted container and checks the result: owners, modes and the ACL, the client's
 tunnel and refusals, that other users cannot reach either socket, that the log is private,
 that the box socket survives Envoy restarts (eight in a row too) and a reinstall, and (with
 `AIRLOCK_REPO=<claude-airlock checkout>`) that claude-airlock's own socket check accepts it.
+Then site listeners: one added gets its socket and ACL and reaches exactly its list while the
+`anthropic` socket is untouched; an unchanged apply does not restart Envoy; a bad site file
+changes nothing; a file from elsewhere needs a confirmation; a removed listener loses its
+socket; and a config Envoy will not start with is rolled back. With `OLD_REPO=<earlier
+checkout>` it installs that first and checks the upgrade keeps the socket.
 
-## How the Anthropic tunnel decides
+## Site listeners
 
-`configs/tunnel-anthropic.yaml`:
+A box has one `HTTPS_PROXY`, so it uses one socket, and a socket is one allowlist. So each
+listener is a whole access profile: `anthropic` (built in) for Claude alone, and whatever a
+host adds, say Claude plus the hosts one project's work needs. Keeping profiles apart is the
+point: a box that can read internal data should not also reach the open web.
 
-1. The HTTP listener on the socket accepts `CONNECT <host>:443` only for an exact, allowed
-   host (`api.anthropic.com`, `platform.claude.com`, `claude.ai`). Any other host, port, IP
-   address or spelling, and any other request, is refused: 403 from a deny route, or a 4xx
-   from the HTTP parser for a malformed one (`OPTIONS *` gets 404).
-2. An allowed tunnel goes to an internal listener for that host. It reads the TLS server name
-   (SNI) from the client's handshake without decrypting, and passes the connection on only if
-   the SNI equals the CONNECT host. Otherwise it closes the connection.
-3. The upstream is a fixed cluster per host, resolved by Envoy. The client never chooses an
-   address.
+`/etc/airlock-envoy/site.conf` (see `configs/site.conf.example`):
+
+```
+infra  @anthropic metrics.example.net:443 logs.example.net:443
+infra  10.0.0.10:6443
+```
+
+- `host:port`: CONNECT to exactly this host and port; only TLS whose server name (SNI) is that
+  host passes, so another site on the same address is out of reach, as for `anthropic`.
+- `IPv4:port`: CONNECT to exactly this address and port; only TLS that sends *no* server name
+  passes (clients send none for an address). Meant for hosts you run, such as a Kubernetes API
+  server addressed by IP: on a shared edge, the HTTP `Host` inside TLS could still pick
+  another site. Loopback, `0.0.0.0/8` and multicast addresses are refused.
+- `@name`: everything listener `name` allows, defined above (so no cycles; a listener cannot
+  be extended once included). Repeat a name to continue it on another line.
+- Strict syntax: lowercase names, explicit ports, no wildcards, URLs, IPv6 or Windows line
+  endings; `admin` and `anthropic` are reserved. A bad line stops the apply with its line number.
+
+`sudo airlock-envoy-apply` renders the config, checks it with `envoy --mode validate` (as the
+service account), prints the change in allowed destinations against the last apply, swaps the
+config in atomically and restarts Envoy (only if the config changed). Then it starts a socket
+for each new listener and removes the socket of each listener that is gone, so a box set to it
+no longer launches. If Envoy does not start with the new config, the previous one goes back.
+`--check` does all the checking and shows the change without applying; `--list` and
+`--render` work as any user.
+
+Keep the site file in version control. Two ways to land it:
+
+- **A config repo that deploys `/etc`** (rsync, Ansible, a deploy script): put it at
+  `etc/airlock-envoy/site.conf`, run `airlock-envoy-apply --check <repo file>` before
+  deploying, so a bad file never lands, and `airlock-envoy-apply` after it changes.
+- **A file kept elsewhere** (a dotfiles repo): `sudo airlock-envoy-apply ~/dotfiles/site.conf`
+  shows the change and asks before installing it as `/etc/airlock-envoy/site.conf`, since
+  anything running as you can edit that file. `--yes` skips the question.
+
+The built-in `anthropic` list lives in `airlock-envoy-apply`, so updating it is this repo's job:
+rerun `install-service.sh` from an updated clean clone.
+
+## How a tunnel decides
+
+The config `airlock-envoy-apply` renders (`--render` prints it):
+
+1. The HTTP listener on each socket accepts `CONNECT <host>:<port>` only for an exact entry
+   of its own list (for `anthropic`: `api.anthropic.com`, `platform.claude.com`, `claude.ai`, on
+   443). Any other host, port, IP address or spelling, another listener's entries, and any
+   other request are refused: 403 from a deny route, or a 4xx from the HTTP parser for a
+   malformed one (`OPTIONS *` gets 404).
+2. An allowed tunnel goes to an internal listener for that destination. It reads the TLS
+   server name (SNI) from the client's handshake without decrypting, and passes the connection
+   on only if the SNI equals the CONNECT host (for an address entry: only if there is no SNI).
+   Otherwise, or without TLS, it closes the connection.
+3. The upstream is fixed per destination, resolved by Envoy or a fixed address. The client
+   never chooses an address.
 
 Step 2 matters because the allowed names share their address with many other sites (other
 Anthropic properties on the same CDN edge). Without it, `CONNECT api.anthropic.com:443` with
@@ -136,7 +197,11 @@ box that keeps getting refused can grow it without bound (planned with the audit
   details, without a route. Long tunnels also log every 60 s while open.
 - the SNI listeners: one line per tunnel with the SNI the client sent, `sni-match` and the
   upstream, or flag `NR` and no upstream when the SNI does not match. A tunnel that never
-  sends a TLS handshake (nothing within 15 s, or closed first) logs no SNI and no route.
+  sends a TLS handshake (nothing within 15 s, or closed first, or not TLS) logs no SNI and no
+  route. For an address entry the route is `tls-no-sni`, and a tunnel that sent an SNI is
+  refused with `details` `rbac_access_denied_matched_policy[server-name-sent]` (flag `-`).
+- `listener` in HTTP lines is the box socket's listener, so each line says which profile it
+  came through.
 - Every SNI line carries the `connection` ID of the HTTP line that allowed its CONNECT, so a
   refused SNI joins to its tunnel exactly, also with many tunnels open at once (the ID is part
   of the internal connection's pool key; a 40-tunnel test checks it). On the HTTP side such a
@@ -178,12 +243,25 @@ exchange goes to `platform.claude.com`.
 Needs the `claude-airlock:dev` image locally (the test client builds on it).
 
 ```
-./test/run-envoy.sh tunnel-anthropic.yaml
+./test/run-envoy.sh                      # the built-in anthropic listener only
 podman build -t localhost/airlock-envoy-spike-client:test test/client
 ./test/t2-checks.sh
 jq . run/access.jsonl
 podman stop airlock-envoy-spike
+
+./test/run-envoy.sh test/site.conf       # plus two test listeners, public endpoints only
+./test/site-checks.sh                    # each listener reaches exactly its own list
+podman stop airlock-envoy-spike
+
+./test/apply-parse.sh                    # the site file parser, no Envoy needed
 ```
+
+`site-checks.sh` covers: the include, a host entry, an address entry and a host on another
+port pass; a listed host on an unlisted port, an unlisted address and the other listener's
+host are refused; a wrong SNI on a host entry, any SNI on an address entry, and plain HTTP
+inside an allowed tunnel are closed and logged, each joined to its CONNECT; and `anthropic` and
+the second listener each refuse the other's hosts. Weakening the renderer (no SNI rule on
+address entries, no TLS requirement, one shared route list) fails it.
 
 Against the installed service instead:
 
