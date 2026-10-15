@@ -1,0 +1,42 @@
+[Unit]
+Description=airlock box socket %i -> Envoy listener %i
+Documentation=https://github.com/appletalk/airlock-envoy
+Requires=airlock-envoy.service airlock-envoy-proxy@%i.socket
+After=airlock-envoy.service airlock-envoy-proxy@%i.socket
+
+[Service]
+# Envoy cannot take a listening socket from systemd, so this relays each box connection,
+# byte for byte, to Envoy's own socket for the same listener.
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=256 /run/airlock-envoy-internal/%i.sock
+User=airlock-envoy
+Group=airlock-envoy
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+LimitCORE=0

@@ -1,0 +1,61 @@
+[Unit]
+Description=airlock Envoy egress proxy (behind airlock-envoy-proxy@ sockets)
+Documentation=https://github.com/appletalk/airlock-envoy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=airlock-envoy
+Group=airlock-envoy
+ExecStart=/usr/local/bin/envoy -c /etc/airlock-envoy/tunnel-anthropic.yaml --disable-hot-restart --file-flush-interval-msec 1000 --log-level warn
+# Ready only once Envoy's sockets exist, so a start or restart returns when connections work
+# and the relays (ordered after this unit) never meet a missing socket.
+ExecStartPost=/bin/sh -c 'i=0; until [ -S /run/airlock-envoy-internal/anthropic.sock ] && [ -S /run/airlock-envoy-internal/admin.sock ]; do i=$$((i+1)); [ $$i -lt 200 ] || exit 1; sleep 0.05; done'
+Restart=on-failure
+RestartSec=2
+
+# Envoy's own sockets, reached only by airlock-envoy-proxy@ (same account). Boxes get the
+# sockets systemd creates in the root-owned /run/airlock-envoy/ instead: Envoy cannot
+# rename anything there, so it cannot swap what a box is given.
+RuntimeDirectory=airlock-envoy-internal
+RuntimeDirectoryMode=0700
+# The audit log: readable by root and this service only.
+LogsDirectory=airlock-envoy
+LogsDirectoryMode=0750
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Envoy's allocator (tcmalloc) calls mincore, which @system-service leaves out.
+SystemCallFilter=mincore
+SystemCallFilter=~@privileged @resources
+LimitCORE=0
+LimitNOFILE=65536
+MemorySwapMax=0
+
+[Install]
+WantedBy=multi-user.target

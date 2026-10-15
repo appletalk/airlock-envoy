@@ -1,5 +1,6 @@
 #!/bin/bash
-# Run Envoy for the spike: rootless podman, sockets, admin and access log in ./run.
+# Run Envoy for the spike: rootless podman; ./run stands in for both /run/airlock-envoy-internal
+# (sockets, admin) and /var/log/airlock-envoy (access log).
 # Usage: test/run-envoy.sh <config name in configs/>    stop: podman stop airlock-envoy-spike
 # The capture config listens on loopback TCP, so it gets the host network.
 set -euo pipefail
@@ -21,7 +22,7 @@ rm -f run/anthropic.sock run/admin.sock
 chmod 0600 run/access.jsonl
 podman run -d --rm --name airlock-envoy-spike --network "$net" \
   --cap-drop all --security-opt no-new-privileges --read-only \
-  -e ENVOY_UID=0 -v ./configs:/etc/envoy:ro,z -v ./run:/run/envoy:z \
+  -e ENVOY_UID=0 -v ./configs:/etc/envoy:ro,z -v ./run:/run/airlock-envoy-internal:z -v ./run:/var/log/airlock-envoy:z \
   "$image" -c "/etc/envoy/$cfg" --disable-hot-restart --file-flush-interval-msec 1000 --log-level warn >/dev/null
 for _ in $(seq 50); do
   [ -S run/admin.sock ] && exit 0

@@ -7,7 +7,7 @@
 admin:
   address:
     pipe:
-      path: /run/envoy/admin.sock
+      path: /run/airlock-envoy-internal/admin.sock
       mode: 0600
 
 static_resources:

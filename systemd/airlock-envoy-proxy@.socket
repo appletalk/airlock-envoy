@@ -1,0 +1,17 @@
+[Unit]
+Description=airlock box socket for Envoy listener %i
+Documentation=https://github.com/appletalk/airlock-envoy
+
+[Socket]
+# Created by systemd in a root-owned directory, so neither Envoy nor anything running as
+# the client can swap it for something else (claude-airlock requires exactly this). It
+# outlives Envoy restarts, so running boxes keep a working socket.
+ListenStream=/run/airlock-envoy/%i.sock
+DirectoryMode=0755
+SocketUser=airlock-envoy
+SocketGroup=airlock-envoy
+SocketMode=0600
+# install-service.sh adds the client's uid ACL in a drop-in (ExecStartPost=setfacl ...).
+
+[Install]
+WantedBy=sockets.target

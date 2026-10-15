@@ -20,7 +20,7 @@ overload_manager:
 admin:
   address:
     pipe:
-      path: /run/envoy/admin.sock
+      path: /run/airlock-envoy-internal/admin.sock
       mode: 0600
 
 static_resources:
@@ -28,7 +28,7 @@ static_resources:
   - name: anthropic
     address:
       pipe:
-        path: /run/envoy/anthropic.sock
+        path: /run/airlock-envoy-internal/anthropic.sock
         mode: 0600
     filter_chains:
     - filters:
@@ -47,7 +47,7 @@ static_resources:
           - name: envoy.access_loggers.file
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
-              path: /run/envoy/access.jsonl
+              path: /var/log/airlock-envoy/access.jsonl
               log_format:
                 json_format:
                   time: "%START_TIME%"
@@ -123,7 +123,7 @@ static_resources:
       name: envoy.access_loggers.file
       typed_config:
         "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
-        path: /run/envoy/access.jsonl
+        path: /var/log/airlock-envoy/access.jsonl
         log_format:
           json_format:
             time: "%START_TIME%"

@@ -1,16 +1,23 @@
 #!/bin/bash
 # Spike test 2: from a --network none client, the allowlist passes and everything else fails.
-# Needs Envoy running with tunnel-anthropic.yaml (test/run-envoy.sh). Each check has one exact
-# expectation, so a weaker allowlist fails a check instead of passing it by accident. Exits
-# non-zero if any check fails.
+# Needs Envoy running with tunnel-anthropic.yaml (test/run-envoy.sh, or the installed service).
+# Each check has one exact expectation, so a weaker allowlist fails a check instead of passing
+# it by accident. Exits non-zero if any check fails.
+#   SOCK  the proxy socket (default ./run/anthropic.sock; service: /run/airlock-envoy/anthropic.sock,
+#         with SOCK_MOUNT_OPTS= so a system socket is not SELinux-relabelled)
+#   LOG   a command printing the access log (default: cat run/access.jsonl;
+#         service: "sudo cat /var/log/airlock-envoy/access.jsonl")
 set -u
 cd "$(dirname "$0")/.."
+SOCK="${SOCK:-$PWD/run/anthropic.sock}"
+LOG="${LOG:-cat run/access.jsonl}"
+readlog() { bash -c "$LOG"; }
 # Only log lines written during this run count: the log appends across runs, and connection
 # IDs restart at 0 whenever Envoy starts.
-start=$(( $(wc -l < run/access.jsonl) + 1 ))
+start=$(( $(readlog | wc -l) + 1 ))
 tag="t2-$$-$(date +%s)"
 podman run --rm --network none --userns keep-id --user "$(id -u):$(id -g)" -e "TAG=$tag" \
-  -v ./run/anthropic.sock:/run/proxy/anthropic.sock:z \
+  -v "$SOCK:/run/proxy/anthropic.sock${SOCK_MOUNT_OPTS-:z}" \
   localhost/airlock-envoy-spike-client:test bash -c '
 fails=0
 p=(-x http://127.0.0.1:3128 -s -o /dev/null --max-time 10 -w "proxy=%{http_connect} http=%{http_code}")
@@ -62,7 +69,7 @@ fails=$?
 # The SNI refusals must be in the audit log: flag NR, the SNI the client sent, and the
 # connection ID of the HTTP line that allowed the CONNECT.
 sleep 1.5
-log() { tail -n "+$start" run/access.jsonl; }
+log() { readlog | tail -n "+$start"; }
 for sni in www.anthropic.com console.anthropic.com; do
   line="$(log | jq -c --arg s "$sni" 'select(.sni == $s and .flags == "NR")' | tail -1)"
   conn="$(jq -r '.connection' <<<"${line:-null}")"

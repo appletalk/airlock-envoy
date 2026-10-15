@@ -15,7 +15,76 @@ Two modes, both on sockets, neither decrypting TLS:
   itself. Service-specific policy (for GitHub, per-repo tokens, no approvals, branch-only pushes)
   comes from an `ext_authz` decision service.
 
-Status: **spike**. Nothing here is ready to deploy.
+Status: **spike**, with an install path tested on Ubuntu 22.04, 24.04 and 26.04, Debian 13 and
+Arch (systemd-booted containers). Not yet run as a service on a real host.
+
+## Install (Ubuntu, Debian, Arch, any systemd + glibc Linux)
+
+Envoy's apt repository is unmaintained, so this installs Envoy's official release binary on
+every distribution, after checking it against the Envoy maintainers' release key (pinned
+fingerprint `0AFC E836 BA4D 1D35 763C 8523 D8CD C375 0181 F31F`, the key behind every release
+from v1.25.0 in January 2023 to v1.39.4). Nothing comes from the AUR or a third-party repo.
+
+Prerequisites:
+
+```
+sudo apt install curl gpg acl                 # Ubuntu / Debian
+sudo pacman -S --needed curl gnupg acl        # Arch
+```
+
+As root, from a clean clone that **no airlock box mounts** (both scripts run as root and
+install code, the release key and the egress allowlist from it; check `git status` first):
+
+```
+sudo install/install-envoy.sh 1.39.4          # binary -> /usr/local/libexec/airlock-envoy/envoy-1.39.4
+sudo install/install-service.sh "$USER"       # system account, config, hardened systemd unit
+```
+
+- `install-envoy.sh` downloads the binary and the signed checksum list, verifies the
+  signature against the pinned key and the binary against the list, and switches
+  `/usr/local/bin/envoy` to the new version atomically. It refuses a changed binary, a broken
+  signature and any other key (tested). **Updating** is the same command with a newer
+  version, then `sudo systemctl restart airlock-envoy`; older versions stay in
+  `/usr/local/libexec/airlock-envoy/` for rollback (`ln -sfn` the old one back).
+- `install-service.sh <user>` creates the `airlock-envoy` system account (sysusers; it refuses
+  an existing login account of that name), installs the config as
+  `/etc/airlock-envoy/tunnel-anthropic.yaml` (root:airlock-envoy 0640) and the units, and
+  starts them. `<user>` is the account whose boxes may connect: the box socket gets an ACL for
+  its numeric uid (rootless containers drop supplementary groups, so a group would not work).
+  Running it again, say to change the user, keeps the socket that running boxes hold.
+- **Two layers of sockets.** Envoy cannot take a listening socket from systemd, so systemd
+  creates each box socket (`airlock-envoy-proxy@<listener>.socket`) in the root-owned
+  `/run/airlock-envoy/`, and `systemd-socket-proxyd` relays each connection to Envoy's own
+  socket in `/run/airlock-envoy-internal/` (0700). Only root can rename anything where the box
+  socket lives, so neither Envoy nor anything running as you can swap it for something else
+  (claude-airlock requires exactly that, and its own check accepts the socket; the install
+  test runs it). The box socket also outlives Envoy: restarts and updates drop open
+  connections, never the socket a running box holds.
+- **Cutting egress:** `systemctl stop 'airlock-envoy-proxy@*.socket' airlock-envoy`. Stopping
+  only `airlock-envoy` does not hold: the next box connection starts it again (that is how it
+  comes up at boot and recovers). Starting the sockets again makes new socket files, so boxes
+  need a relaunch afterwards.
+- Envoy and the relay run as `airlock-envoy` with no capabilities and systemd's sandboxing
+  (read-only system, no home, private /tmp and devices, a syscall allowlist, no core dumps,
+  no swap; the relay also has no network at all). Envoy's allocator needs `mincore`, the one
+  syscall added to `@system-service`.
+
+What it sets up:
+
+| Path | Owner, mode | What |
+|---|---|---|
+| `/run/airlock-envoy/anthropic.sock` | airlock-envoy, ACL: owner and `<user>` rw | the socket a box gets |
+| `/run/airlock-envoy/` | root, 0755 | created by systemd for the box sockets |
+| `/run/airlock-envoy-internal/` | airlock-envoy, 0700 | Envoy's own sockets, incl. admin; never given to anyone |
+| `/var/log/airlock-envoy/access.jsonl` | airlock-envoy, 0600 (dir 0750) | the audit log |
+
+Give a project's box the socket with `airlock socket add /run/airlock-envoy/anthropic.sock`.
+
+`test/install-test.sh ubuntu[-22.04|-24.04|-26.04]|debian|arch` runs the whole install in a
+systemd-booted container and checks the result: owners, modes and the ACL, the client's
+tunnel and refusals, that other users cannot reach either socket, that the log is private,
+that the box socket survives an Envoy restart and a reinstall, and (with
+`AIRLOCK_REPO=<claude-airlock checkout>`) that claude-airlock's own socket check accepts it.
 
 ## How the Anthropic tunnel decides
 
@@ -54,7 +123,9 @@ much sooner (about 15 s without a request).
 
 ## The audit log
 
-Envoy writes JSON lines to `run/access.jsonl` (flushed every second, kept when Envoy stops):
+Envoy writes JSON lines to `/var/log/airlock-envoy/access.jsonl` (`run/access.jsonl` in the
+spike), flushed every second and kept when Envoy stops. Nothing rotates or ships it yet, so a
+box that keeps getting refused can grow it without bound (planned with the audit pipeline):
 
 - the HTTP listener: one line per refused request with its route (`deny-connect`, `deny-http`),
   and two per allowed tunnel (`DownstreamTunnelSuccessfullyEstablished`, then `DownstreamEnd`
@@ -109,6 +180,12 @@ podman build -t localhost/airlock-envoy-spike-client:test test/client
 ./test/t2-checks.sh
 jq . run/access.jsonl
 podman stop airlock-envoy-spike
+```
+
+Against the installed service instead:
+
+```
+SOCK=/run/airlock-envoy/anthropic.sock SOCK_MOUNT_OPTS= LOG="sudo cat /var/log/airlock-envoy/access.jsonl" ./test/t2-checks.sh
 ```
 
 `run/` holds the sockets, the access log (mode 0600; it appends across runs) and the admin
