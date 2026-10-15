@@ -1,0 +1,6 @@
+# Spike test client: the airlock image plus socat, for --network none runs.
+FROM localhost/claude-airlock:dev
+RUN apt-get update && apt-get install -y --no-install-recommends socat && rm -rf /var/lib/apt/lists/*
+COPY entry.sh /usr/local/bin/spike-entry
+ENTRYPOINT ["/usr/local/bin/spike-entry"]
+CMD ["claude"]
