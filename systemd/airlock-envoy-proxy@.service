@@ -3,6 +3,10 @@ Description=airlock box socket %i -> Envoy listener %i
 Documentation=https://github.com/appletalk/airlock-envoy
 Requires=airlock-envoy.service airlock-envoy-proxy@%i.socket
 After=airlock-envoy.service airlock-envoy-proxy@%i.socket
+# Every Envoy restart restarts this relay too (Requires=). With systemd's default start-rate
+# limit, a few restarts in a row failed the relay, which failed the box socket: running boxes
+# were left holding a dead socket. The socket's own trigger limit still stops a busy loop.
+StartLimitIntervalSec=0
 
 [Service]
 # Envoy cannot take a listening socket from systemd, so this relays each box connection,

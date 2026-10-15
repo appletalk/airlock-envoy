@@ -70,6 +70,12 @@ ino="$(x stat -c %i "$S")"
 x systemctl restart airlock-envoy
 r="$(tunnel)"
 ck "envoy restart keeps the box socket (same inode) and it works at once: got '$r'" '[ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
+# The relay restarts with Envoy; a burst of restarts must not fail it, or the box socket.
+x runuser -u client -- sh -c "printf 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n' | timeout 2 socat - UNIX-CONNECT:$S >/dev/null" || true
+for _ in 1 2 3 4 5 6 7 8; do x systemctl reset-failed airlock-envoy; x systemctl restart airlock-envoy; done
+r="$(tunnel)"
+ck "8 Envoy restarts in a row with a relay running: same box socket, still works: got '$r'" \
+   '[ "$(x systemctl is-active airlock-envoy-proxy@anthropic.socket)" = active ] && [ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
 ck "running install-service.sh again keeps the socket and its ACL" \
    'x /repo/install/install-service.sh client >/dev/null && [ "$(x stat -c %i "$S")" = "$ino" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
 x systemctl restart airlock-envoy-proxy@anthropic.socket; sleep 0.5

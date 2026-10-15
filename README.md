@@ -68,6 +68,9 @@ sudo install/install-service.sh "$USER"       # system account, config, hardened
   (read-only system, no home, private /tmp and devices, a syscall allowlist, no core dumps,
   no swap; the relay also has no network at all). Envoy's allocator needs `mincore`, the one
   syscall added to `@system-service`.
+- The relay restarts with Envoy and has no start-rate limit: with systemd's default, a few
+  Envoy restarts in a row failed the relay and with it the box socket, leaving running boxes a
+  dead socket (tested: eight restarts in a row keep the socket working).
 
 What it sets up:
 
@@ -83,7 +86,7 @@ Give a project's box the socket with `airlock socket add /run/airlock-envoy/anth
 `test/install-test.sh ubuntu[-22.04|-24.04|-26.04]|debian|arch` runs the whole install in a
 systemd-booted container and checks the result: owners, modes and the ACL, the client's
 tunnel and refusals, that other users cannot reach either socket, that the log is private,
-that the box socket survives an Envoy restart and a reinstall, and (with
+that the box socket survives Envoy restarts (eight in a row too) and a reinstall, and (with
 `AIRLOCK_REPO=<claude-airlock checkout>`) that claude-airlock's own socket check accepts it.
 
 ## How the Anthropic tunnel decides
