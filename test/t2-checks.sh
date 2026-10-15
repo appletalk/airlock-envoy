@@ -1,6 +1,6 @@
 #!/bin/bash
 # Spike test 2: from a --network none client, the allowlist passes and everything else fails.
-# Needs Envoy running with tunnel-anthropic.yaml (test/run-envoy.sh, or the installed service).
+# Needs Envoy running with the built-in config (test/run-envoy.sh, or the installed service).
 # Each check has one exact expectation, so a weaker allowlist fails a check instead of passing
 # it by accident. Exits non-zero if any check fails.
 #   SOCK  the proxy socket (default ./run/anthropic.sock; service: /run/airlock-envoy/anthropic.sock,
@@ -8,7 +8,7 @@
 #   LOG   a command printing the access log (default: cat run/access.jsonl;
 #         service: "sudo cat /var/log/airlock-envoy/access.jsonl")
 set -u
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit
 SOCK="${SOCK:-$PWD/run/anthropic.sock}"
 LOG="${LOG:-cat run/access.jsonl}"
 readlog() { bash -c "$LOG"; }

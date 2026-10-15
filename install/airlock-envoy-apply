@@ -1,0 +1,462 @@
+#!/bin/bash
+# airlock-envoy-apply: build Envoy's config from the site file, check it, and apply it.
+#
+#   airlock-envoy-apply [--yes] [SITE]   as root: apply /etc/airlock-envoy/site.conf, or SITE, a
+#                                        site file kept elsewhere (say, a dotfiles repo): that
+#                                        one is shown, confirmed (--yes skips) and installed as
+#                                        /etc/airlock-envoy/site.conf first
+#   airlock-envoy-apply --check [SITE]   parse, render and validate; show what would change
+#   airlock-envoy-apply --list [SITE]    print each listener's destinations (any user)
+#   airlock-envoy-apply --render [SITE]  print the Envoy config (any user)
+#
+# The site file names listeners and what each may reach. A listener is a box socket,
+# /run/airlock-envoy/<name>.sock, and a box gets one, so a listener is a whole access profile.
+# Repeat a name to continue it on another line; # starts a comment.
+#
+#   glz-infra  @anthropic  metrics.example.net:443  10.0.0.10:6443
+#
+#   host:port   CONNECT to exactly this host and port, and only TLS whose server name (SNI) is
+#               that host passes: another site on the same address is not reachable
+#   IPv4:port   CONNECT to exactly this address and port, and only TLS without a server name
+#               passes (clients send none for an address). For hosts you run, not shared edges.
+#   @name       everything listener <name> allows; it must be defined above. Built in:
+#               anthropic, the hosts Claude Code needs (this file keeps them current).
+set -euo pipefail
+umask 077
+export LC_ALL=C
+
+ETC=/etc/airlock-envoy
+ENVOY=/usr/local/bin/envoy
+LOG=/var/log/airlock-envoy/access.jsonl
+BUILTIN='anthropic api.anthropic.com:443 platform.claude.com:443 claude.ai:443'
+
+die() { echo "airlock-envoy-apply: $*" >&2; exit 1; }
+
+mode=apply yes=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check|--list|--render) mode=${1#--} ;;
+    --yes) yes=1 ;;
+    --restart) mode=apply restart=1 ;;   # install-service.sh: the unit may have changed
+    -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+    -*) die "unknown option $1 (see --help)" ;;
+    *) break ;;
+  esac
+  shift
+done
+[ $# -le 1 ] || die "one site file at most"
+site_arg="${1:-}"
+restart="${restart:-0}"
+
+# ---- parse ----------------------------------------------------------------------------------
+
+declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=()
+LISTENERS=() ALL=()
+
+valid_dest() {
+  local h p o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+  [[ "$1" =~ ^([a-z0-9.-]+):([0-9]+)$ ]] || return 1
+  h=${BASH_REMATCH[1]} p=${BASH_REMATCH[2]}
+  [[ "$p" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$p" -le 65535 ] || return 1
+  if [[ "$h" =~ ^[0-9.]+$ ]]; then
+    [[ "$h" =~ ^$o\.$o\.$o\.$o$ ]] || return 1
+    # The host's own loopback, "this network" and multicast/reserved: never a destination.
+    case "$h" in 0.*|127.*) return 1 ;; esac
+    [ "${h%%.*}" -lt 224 ]
+  else
+    [ "${#h}" -le 253 ] && [[ "$h" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
+  fi
+}
+
+add_dest() {
+  case " ${DESTS[$1]} " in *" $2 "*) return ;; esac
+  DESTS[$1]="${DESTS[$1]:+${DESTS[$1]} }$2"
+  [ -n "${IN_ALL[$2]:-}" ] || { IN_ALL[$2]=1; ALL+=("$2"); }
+}
+
+parse() {  # parse <source label>, text on stdin
+  local src=$1 n=0 line name w d
+  local -a words
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=${line%%#*}
+    [[ "$line" =~ ^[a-z0-9.:@[:blank:]-]*$ ]] \
+      || die "$src:$n: only lowercase listener names, host:port, IPv4:port and @listener may appear"
+    read -ra words <<< "$line"
+    [ "${#words[@]}" -gt 0 ] || continue
+    name=${words[0]}
+    [[ "$name" =~ ^[a-z][a-z0-9-]{0,31}$ ]] \
+      || die "$src:$n: bad listener name '$name' (a-z, 0-9 and -, starting with a letter, up to 32)"
+    [ "$name" != admin ] || die "$src:$n: 'admin' is reserved (Envoy's admin socket)"
+    [ -z "${BUILT[$name]:-}" ] || die "$src:$n: $name is built in; include it with @$name instead"
+    [ -z "${INCLUDED_BY[$name]:-}" ] \
+      || die "$src:$n: $name is already included by ${INCLUDED_BY[$name]}; keep all of $name's lines above that"
+    [ "${#words[@]}" -gt 1 ] || die "$src:$n: listener $name lists nothing"
+    [ -n "${DESTS[$name]+x}" ] || { LISTENERS+=("$name"); DESTS[$name]=; }
+    for w in "${words[@]:1}"; do
+      if [[ "$w" == @* ]]; then
+        w=${w#@}
+        [ "$w" != "$name" ] || die "$src:$n: $name includes itself"
+        [ -n "${DESTS[$w]+x}" ] || die "$src:$n: @$w is not a listener defined above"
+        INCLUDED_BY[$w]=$name
+        for d in ${DESTS[$w]}; do add_dest "$name" "$d"; done
+      else
+        valid_dest "$w" || die "$src:$n: bad destination '$w' (want host:port or IPv4:port)"
+        add_dest "$name" "$w"
+      fi
+    done
+  done
+}
+
+# Read the site file once, as root too, and use only that copy from here on.
+site_src="$ETC/site.conf" site_text="" from_elsewhere=0
+if [ -n "$site_arg" ]; then
+  if ! [ -r "$site_arg" ] || [ -d "$site_arg" ]; then die "cannot read $site_arg"; fi
+  site_src="$site_arg"
+  [ "$(realpath -- "$site_arg")" = "$ETC/site.conf" ] || from_elsewhere=1
+fi
+if [ -z "$site_arg" ] && [ -d "$ETC" ] && ! [ -x "$ETC" ]; then
+  die "cannot read $ETC as $(id -un): run as root, or name a site file"
+fi
+if [ -n "$site_arg" ] || [ -e "$ETC/site.conf" ]; then
+  site_text="$(cat -- "$site_src")" || die "cannot read $site_src"
+fi
+parse built-in <<< "$BUILTIN"
+for l in "${LISTENERS[@]}"; do BUILT[$l]=1; done
+parse "$site_src" <<< "$site_text"
+
+listing() {
+  local l d
+  for l in "${LISTENERS[@]}"; do for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done; done
+}
+
+# ---- render ---------------------------------------------------------------------------------
+
+key() { if [[ "$1" == *:443 ]]; then printf '%s' "${1%:443}"; else printf '%s' "$1"; fi; }
+is_ip() { [[ "${1%:*}" =~ ^[0-9.]+$ ]]; }
+
+render() {  # render <access log path>
+  local log=$1 l d k first=1
+  cat <<EOF
+# Rendered by airlock-envoy-apply from the site file. Edit the site file, not this.
+#
+# One HTTP listener per box socket accepts CONNECT only to that listener's exact host:port
+# entries. Each allowed tunnel goes to an internal listener for its destination that reads the
+# TLS server name without decrypting: a host entry passes only its own name, an address entry
+# only TLS with no name. The upstream is fixed per destination, never chosen by the client.
+bootstrap_extensions:
+- name: envoy.bootstrap.internal_listener
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.bootstrap.internal_listener.v3.InternalListener
+
+overload_manager:
+  resource_monitors:
+  - name: envoy.resource_monitors.global_downstream_max_connections
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+      max_active_downstream_connections: 256
+
+admin:
+  address:
+    pipe:
+      path: /run/airlock-envoy-internal/admin.sock
+      mode: 0600
+
+static_resources:
+  listeners:
+EOF
+  for l in "${LISTENERS[@]}"; do
+    cat <<EOF
+  - name: "$l"
+    address:
+      pipe:
+        path: /run/airlock-envoy-internal/$l.sock
+        mode: 0600
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: "$l"
+          codec_type: HTTP1
+          request_headers_timeout: 10s
+          # Idle tunnels are cut by tcp_proxy's idle_timeout (1 h, on the SNI listeners), not here.
+          stream_idle_timeout: 0s
+          access_log_options:
+            flush_log_on_tunnel_successfully_established: true
+            access_log_flush_interval: 60s
+          access_log:
+          - name: envoy.access_loggers.file
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+              path: $log
+              log_format:
+                json_format:
+                  time: "%START_TIME%"
+                  listener: "$l"
+                  connection: "%CONNECTION_ID%"
+                  method: "%REQ(:METHOD)%"
+                  authority: "%REQ(:AUTHORITY)%"
+                  route: "%ROUTE_NAME%"
+                  status: "%RESPONSE_CODE%"
+                  flags: "%RESPONSE_FLAGS%"
+                  details: "%RESPONSE_CODE_DETAILS%"
+                  upstream: "%UPSTREAM_HOST%"
+                  bytes_in: "%BYTES_RECEIVED%"
+                  bytes_out: "%BYTES_SENT%"
+                  duration_ms: "%DURATION%"
+                  log_type: "%ACCESS_LOG_TYPE%"
+          upgrade_configs:
+          - upgrade_type: CONNECT
+          route_config:
+            name: "$l"
+            virtual_hosts:
+            - name: "$l"
+              domains: ["*"]
+              routes:
+EOF
+    for d in ${DESTS[$l]}; do
+      k=$(key "$d")
+      cat <<EOF
+              - name: "allow-$k"
+                match:
+                  connect_matcher: {}
+                  headers: [{ name: ":authority", string_match: { exact: "$d" } }]
+                route: { cluster: "sni-$k", upgrade_configs: [{ upgrade_type: CONNECT, connect_config: {} }] }
+EOF
+    done
+    cat <<'EOF'
+              - name: deny-connect
+                match: { connect_matcher: {} }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: host not in allowlist\n" } }
+              - name: deny-http
+                match: { prefix: "/" }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: CONNECT only\n" } }
+          http_filters:
+          # The tunnel's connection ID travels to the SNI listener, so its log lines join this one.
+          # hashable_string makes it part of the upstream pool key, so each tunnel gets its own
+          # internal connection; a plain string let pooled connections carry another tunnel's ID.
+          - name: envoy.filters.http.set_filter_state
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.set_filter_state.v3.Config
+              on_request_headers:
+              - object_key: airlock.connection
+                factory_key: envoy.hashable_string
+                format_string: { text_format_source: { inline_string: "%CONNECTION_ID%" } }
+                shared_with_upstream: ONCE
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+EOF
+  done
+
+  echo
+  echo "  # One internal listener per destination, shared by every box listener that allows it."
+  echo "  # A connection that matches no filter chain is closed, logged with flag NR."
+  for d in "${ALL[@]}"; do
+    k=$(key "$d")
+    cat <<EOF
+  - name: "sni-$k"
+    internal_listener: {}
+    listener_filters: [{ name: envoy.filters.listener.tls_inspector, typed_config: { "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector } }]
+EOF
+    if [ "$first" = 1 ]; then
+      first=0
+      cat <<EOF
+    access_log:
+    - &sni_log
+      name: envoy.access_loggers.file
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+        path: $log
+        log_format:
+          json_format:
+            time: "%START_TIME%"
+            listener: "%DOWNSTREAM_LOCAL_ADDRESS%"
+            connection: "%FILTER_STATE(airlock.connection:PLAIN)%"
+            sni: "%REQUESTED_SERVER_NAME%"
+            route: "%FILTER_CHAIN_NAME%"
+            flags: "%RESPONSE_FLAGS%"
+            details: "%CONNECTION_TERMINATION_DETAILS%"
+            upstream: "%UPSTREAM_HOST%"
+            bytes_in: "%BYTES_RECEIVED%"
+            bytes_out: "%BYTES_SENT%"
+            duration_ms: "%DURATION%"
+            log_type: "%ACCESS_LOG_TYPE%"
+EOF
+    else
+      echo "    access_log: [*sni_log]"
+    fi
+    echo "    filter_chains:"
+    if is_ip "$d"; then
+      cat <<EOF
+    - name: tls-no-sni
+      filter_chain_match: { transport_protocol: tls }
+      filters:
+      - name: envoy.filters.network.rbac
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.rbac.v3.RBAC
+          stat_prefix: "sni-$k"
+          rules:
+            action: DENY
+            policies:
+              server-name-sent:
+                permissions: [{ requested_server_name: { safe_regex: { regex: ".+" } } }]
+                principals: [{ any: true }]
+EOF
+    else
+      cat <<EOF
+    - name: sni-match
+      filter_chain_match: { server_names: ["${d%:*}"] }
+      filters:
+EOF
+    fi
+    cat <<EOF
+      - name: envoy.filters.network.tcp_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+          stat_prefix: "sni-$k"
+          idle_timeout: 3600s
+          cluster: "upstream-$k"
+EOF
+  done
+
+  echo
+  echo "  clusters:"
+  echo "  # Where the HTTP routes send allowed tunnels: the destination's internal listener."
+  for d in "${ALL[@]}"; do
+    k=$(key "$d")
+    cat <<EOF
+  - name: "sni-$k"
+    transport_socket:
+      name: envoy.transport_sockets.internal_upstream
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.internal_upstream.v3.InternalUpstreamTransport
+        transport_socket:
+          name: envoy.transport_sockets.raw_buffer
+          typed_config: { "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer }
+    load_assignment:
+      cluster_name: "sni-$k"
+      endpoints: [{ lb_endpoints: [{ endpoint: { address: { envoy_internal_address: { server_listener_name: "sni-$k" } } } }] }]
+EOF
+  done
+  echo "  # The real upstreams: names resolved by Envoy, or a fixed address."
+  for d in "${ALL[@]}"; do
+    k=$(key "$d")
+    if is_ip "$d"; then
+      echo "  - name: \"upstream-$k\""
+      echo "    type: STATIC"
+    else
+      echo "  - name: \"upstream-$k\""
+      echo "    type: LOGICAL_DNS"
+      echo "    dns_lookup_family: ALL"
+    fi
+    cat <<EOF
+    load_assignment:
+      cluster_name: "upstream-$k"
+      endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: "${d%:*}", port_value: ${d##*:} } } } }] }]
+EOF
+  done
+}
+
+case "$mode" in
+  list) listing; exit 0 ;;
+  render) render "$LOG"; exit 0 ;;
+esac
+
+# ---- check and apply ------------------------------------------------------------------------
+
+[ -x "$ENVOY" ] || die "no Envoy at $ENVOY (install/install-envoy.sh)"
+if [ "$mode" = apply ]; then
+  [ "$(id -u)" = 0 ] || die "run as root (or --check / --list / --render)"
+  getent passwd airlock-envoy >/dev/null || die "no airlock-envoy account: run install/install-service.sh first"
+fi
+unset TMPDIR
+work="$(mktemp -d /tmp/airlock-envoy-apply.XXXXXX)"
+trap 'rm -rf "$work"' EXIT
+
+# Envoy's validate mode opens the access log, so the copy it checks logs to /dev/null; it is
+# otherwise the config that gets installed. As root it runs as the service account.
+render /dev/null > "$work/validate.yaml"
+run_as=()
+if [ "$(id -u)" = 0 ]; then
+  if getent passwd airlock-envoy >/dev/null; then u=airlock-envoy; else u=nobody; fi
+  g="$(id -g "$u")"
+  chgrp "$g" "$work" "$work/validate.yaml"
+  chmod 0750 "$work"; chmod 0640 "$work/validate.yaml"
+  run_as=(setpriv --reuid="$(id -u "$u")" --regid="$g" --clear-groups --no-new-privs)
+fi
+if ! out="$(cd / && "${run_as[@]}" "$ENVOY" --mode validate -c "$work/validate.yaml" 2>&1)"; then
+  printf '%s\n' "$out" | grep -E 'critical|error' >&2 || printf '%s\n' "$out" >&2
+  die "Envoy rejected the rendered config; nothing was changed"
+fi
+
+# What changes, against what was last applied.
+listing | sort > "$work/new"
+if [ -r "$ETC/allowed" ]; then grep -v '^#' "$ETC/allowed" | sort > "$work/old"; else : > "$work/old"; fi
+changes="$(comm -3 "$work/old" "$work/new" | awk -F'\t' '{ if ($1 != "") print "  - " $1; else print "  + " $2 }')"
+echo "==> Listeners: ${LISTENERS[*]}"
+if [ -n "$changes" ]; then echo "==> Allowed destinations (+ added, - removed):"; printf '%s\n' "$changes"
+elif [ -r "$ETC/allowed" ]; then echo "==> Allowed destinations: no change"
+else echo "==> Allowed destinations (nothing applied yet):"; sed 's/^/  + /' "$work/new"; fi
+[ "$mode" = check ] && { echo "==> Config valid (envoy --mode validate)"; exit 0; }
+
+if [ "$from_elsewhere" = 1 ] && [ "$yes" = 0 ] && [ -n "$changes" ]; then
+  # The file may be writable by more than root (a dotfiles repo), so a person confirms it.
+  { exec 3</dev/tty; } 2>/dev/null || die "no terminal to confirm on; check the change above, then rerun with --yes"
+  read -r -u 3 -p "Install $site_src as $ETC/site.conf and apply? [y/N] " a || a=
+  [[ "$a" == [yY]* ]] || die "not applied"
+fi
+
+grp="$(id -g airlock-envoy)"
+inst() {  # inst <src> <dest>: root:airlock-envoy 0640, swapped in atomically
+  install -m 0640 -o root -g "$grp" "$1" "$2.new" && mv -f "$2.new" "$2"
+}
+install -d -m 0750 -o root -g "$grp" "$ETC"
+render "$LOG" > "$work/envoy.yaml"
+{ echo "# listener destination, as last applied by airlock-envoy-apply"; cat "$work/new"; } > "$work/allowed"
+
+changed=1
+same() { [ "$(sha256sum < "$1")" = "$(sha256sum < "$2")" ]; }   # no cmp on minimal systems
+if [ -f "$ETC/envoy.yaml" ] && same "$work/envoy.yaml" "$ETC/envoy.yaml"; then changed=0; fi
+[ -f "$ETC/envoy.yaml" ] && cp -p "$ETC/envoy.yaml" "$work/envoy.yaml.prev"
+inst "$work/envoy.yaml" "$ETC/envoy.yaml"
+if [ "$changed" = 1 ] || [ "$restart" = 1 ] || ! systemctl is-active --quiet airlock-envoy; then
+  echo "==> Restarting airlock-envoy (open tunnels drop; box sockets stay)"
+  # A deliberate restart: clear systemd's start-rate count, which a few applies in a row
+  # would otherwise exhaust, leaving Envoy down and the rollback below unable to start it.
+  # Crash loops (Restart=on-failure) stay rate-limited.
+  restart_envoy() { systemctl reset-failed airlock-envoy 2>/dev/null || true; systemctl restart airlock-envoy; }
+  if ! restart_envoy; then
+    if [ -f "$work/envoy.yaml.prev" ]; then
+      inst "$work/envoy.yaml.prev" "$ETC/envoy.yaml"
+      restart_envoy || true
+      die "airlock-envoy did not start with the new config; the previous one is back (journalctl -u airlock-envoy)"
+    fi
+    die "airlock-envoy did not start (journalctl -u airlock-envoy)"
+  fi
+fi
+inst "$work/allowed" "$ETC/allowed"
+# Only now, so a config Envoy would not start with never lands in /etc as the site file.
+if [ "$from_elsewhere" = 1 ]; then printf '%s\n' "$site_text" > "$work/site.conf"; inst "$work/site.conf" "$ETC/site.conf"; fi
+
+# A box socket per listener; the client's ACL comes from the unit's drop-in.
+for l in "${LISTENERS[@]}"; do
+  systemctl enable --quiet "airlock-envoy-proxy@$l.socket"
+  systemctl start "airlock-envoy-proxy@$l.socket"
+done
+# Listeners no longer in the site file: their sockets go, so a box set to one fails to launch.
+declare -A keep=()
+for l in "${LISTENERS[@]}"; do keep[$l]=1; done
+mapfile -t current < <({
+  systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' | awk '{ print $1 }'
+  ls /etc/systemd/system/sockets.target.wants/ 2>/dev/null
+} | sed -n 's/^airlock-envoy-proxy@\([a-z][a-z0-9-]*\)\.socket$/\1/p' | sort -u)
+for l in "${current[@]}"; do
+  [ -n "${keep[$l]:-}" ] && continue
+  echo "==> Removing listener $l (its socket goes; boxes set to it no longer launch)"
+  systemctl disable --quiet --now "airlock-envoy-proxy@$l.socket" || true
+  systemctl stop "airlock-envoy-proxy@$l.service" 2>/dev/null || true
+  rm -f "/run/airlock-envoy/$l.sock"
+done
+for l in "${LISTENERS[@]}"; do echo "    /run/airlock-envoy/$l.sock"; done
