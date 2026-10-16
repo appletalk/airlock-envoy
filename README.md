@@ -168,8 +168,10 @@ Step 2 matters because the allowed names share their address with many other sit
 Anthropic properties on the same CDN edge). Without it, `CONNECT api.anthropic.com:443` with
 another SNI reached those sites.
 
-Limits: 256 connections from boxes at once (refusals over the limit show only in Envoy's
-stats, `downstream_global_cx_overflow`, not in the access log), 10 s to send request headers,
+Limits: 128 connections from boxes at once per listener, so a profile at its cap does not
+starve another (refusals over the cap show only in Envoy's stats,
+`connection_limit.<listener>.limited_connections`, not in the access log; `site-checks.sh`
+tests it), 10 s to send request headers,
 and a tunnel is cut after 1 h without bytes. In practice the CDN closes an idle TLS connection
 much sooner (about 15 s without a request).
 

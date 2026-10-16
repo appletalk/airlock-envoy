@@ -50,6 +50,13 @@ echo "== t-other: example.org only"
 check 3130 "example.org"                         "$OK" https://example.org/
 check 3130 "api.anthropic.com (not included)"    "$NO" https://api.anthropic.com/
 check 3130 "example.com (t-site only)"           "$NO" https://example.com/
+echo "== connection caps: one listener at its cap does not starve another"
+fds=()
+for _ in $(seq 128); do exec {fd}<>/dev/tcp/127.0.0.1/3130 && fds+=("$fd"); done
+sleep 1
+check 3130 "t-other, 129th connection while 128 are open" "proxy=000 http=000 exit=56" https://example.org/
+check 3129 "anthropic, meanwhile"                        "$OK" https://api.anthropic.com/
+for fd in "${fds[@]}"; do exec {fd}>&-; done
 exit "$fails"
 '
 fails=$?
