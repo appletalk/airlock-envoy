@@ -42,6 +42,33 @@ check 3128 "CONNECT example.com, SNI www.example.com"   "proxy=200 http=000 exit
 check 3128 "CONNECT 1.1.1.1, SNI one.one.one.one"       "proxy=200 http=000 exit=35" --connect-to one.one.one.one:443:1.1.1.1:443 https://one.one.one.one/
 check 3128 "CONNECT 1.1.1.1, plain HTTP inside"         "proxy=200 http=000 exit=52" -p http://1.1.1.1:443/
 check 3128 "CONNECT example.com, plain HTTP inside"     "proxy=200 http=000 exit=52" -p http://example.com:443/
+# TLS with no SNI to a host entry: closed by the SNI listener. This server would accept it
+# (1.1.1.1, the same server, does above), so a missing SNI rule shows as a handshake.
+check 3128 "one.one.one.one with its SNI"                "$OK" https://one.one.one.one/
+tls() {  # tls <sni or ""> : CONNECT one.one.one.one:443 (HTTP/1.1), then a TLS handshake
+  python3 -I - "$1" <<"PY"
+import socket, ssl, sys
+s = socket.create_connection(("127.0.0.1", 3128), timeout=10)
+s.sendall(b"CONNECT one.one.one.one:443 HTTP/1.1\r\nHost: one.one.one.one:443\r\n\r\n")
+head = b""
+while b"\r\n\r\n" not in head:
+    c = s.recv(1)
+    if not c: break
+    head += c
+status = head.split(b"\r\n")[0].decode(errors="replace")
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+try:
+    ctx.wrap_socket(s, server_hostname=sys.argv[1] or None); print(status, "handshake")
+except (OSError, ssl.SSLError):
+    print(status, "closed")
+PY
+}
+r="$(tls one.one.one.one)"
+if [ "$r" = "HTTP/1.1 200 OK handshake" ]; then echo "ok   CONNECT one.one.one.one, TLS with its SNI (control): $r"
+else echo "FAIL CONNECT one.one.one.one, TLS with its SNI (control): $r"; fails=$((fails+1)); fi
+r="$(tls "")"
+if [ "$r" = "HTTP/1.1 200 OK closed" ]; then echo "ok   CONNECT one.one.one.one, TLS without SNI: $r"
+else echo "FAIL CONNECT one.one.one.one, TLS without SNI: $r"; fails=$((fails+1)); fi
 echo "== anthropic: built in only"
 check 3129 "api.anthropic.com"                   "$OK" https://api.anthropic.com/
 check 3129 "example.com (t-site only)"           "$NO" https://example.com/
@@ -75,9 +102,9 @@ lc "wrong SNI on a host entry: NR, with the SNI" '.sni == "www.example.com" and 
 # Each refused tunnel joins to the t-site CONNECT that opened it.
 n=$(log | jq -s -r '
   (map(select(.listener == "t-site" and .log_type == "DownstreamEnd")) | map({ key: (.connection | tostring), value: .route }) | from_entries) as $http
-  | [ .[] | select(.sni == "one.one.one.one" or .sni == "www.example.com" or (.flags == "NR" and .sni == null))
-      | $http[.connection] ] | map(select(. == "allow-1.1.1.1" or . == "allow-example.com")) | length')
-if [ "$n" -eq 4 ]; then echo "ok   log: the 4 refused tunnels (2 SNI, 2 no TLS) each join to their t-site CONNECT"
-else echo "FAIL log: $n of 4 refused tunnels joined to a t-site CONNECT"; fails=$((fails+1)); fi
+  | [ .[] | select((.sni == "one.one.one.one" and .route == "tls-no-sni") or .sni == "www.example.com" or (.flags == "NR" and .sni == null))
+      | $http[.connection] ] | map(select(. == "allow-1.1.1.1" or . == "allow-example.com" or . == "allow-one.one.one.one")) | length')
+if [ "$n" -eq 5 ]; then echo "ok   log: the 5 refused tunnels (2 SNI, 2 no TLS, 1 no SNI) each join to their t-site CONNECT"
+else echo "FAIL log: $n of 5 refused tunnels joined to a t-site CONNECT"; fails=$((fails+1)); fi
 echo "failures: $fails"
 exit "$fails"

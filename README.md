@@ -266,10 +266,13 @@ podman stop airlock-envoy-spike
 
 `site-checks.sh` covers: the include, a host entry, an address entry and a host on another
 port pass; a listed host on an unlisted port, an unlisted address and the other listener's
-host are refused; a wrong SNI on a host entry, any SNI on an address entry, and plain HTTP
-inside an allowed tunnel are closed and logged, each joined to its CONNECT; and `anthropic` and
+host are refused; a wrong SNI or no SNI on a host entry (to a server that would accept a
+handshake without one), any SNI on an address entry, and plain HTTP inside an allowed tunnel
+are closed and logged, each joined to its CONNECT; one listener at its connection cap does not
+starve another; and `anthropic` and
 the second listener each refuse the other's hosts. Weakening the renderer (no SNI rule on
-address entries, no TLS requirement, one shared route list) fails it.
+address entries, no TLS requirement, one shared route list, a no-SNI chain on host entries,
+a global-only connection cap) fails it.
 
 Against the installed service instead:
 
