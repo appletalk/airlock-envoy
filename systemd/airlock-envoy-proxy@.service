@@ -1,11 +1,16 @@
 [Unit]
 Description=airlock box socket %i -> Envoy listener %i
 Documentation=https://github.com/appletalk/airlock-envoy
-Requires=airlock-envoy.service airlock-envoy-proxy@%i.socket
+# Wants=, not Requires=: the relay starts Envoy when it starts, but does not stop, restart or
+# fail with it. It connects to Envoy's socket afresh for each box connection, so while Envoy
+# is down a box connection is just closed, and once Envoy is back the same box socket works:
+# running boxes need no relaunch. (With Requires=, a box connection while Envoy was down
+# failed the relay, and a burst of them failed the box socket for good.)
+Wants=airlock-envoy.service
+Requires=airlock-envoy-proxy@%i.socket
 After=airlock-envoy.service airlock-envoy-proxy@%i.socket
-# Every Envoy restart restarts this relay too (Requires=). With systemd's default start-rate
-# limit, a few restarts in a row failed the relay, which failed the box socket: running boxes
-# were left holding a dead socket. The socket's own trigger limit still stops a busy loop.
+# No start-rate limit: a relay that is stopped or exits is started again by the next box
+# connection, however often. The socket's own trigger limit still stops a busy loop.
 StartLimitIntervalSec=0
 
 [Service]
