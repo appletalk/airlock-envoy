@@ -122,9 +122,12 @@ infra  10.0.0.10:6443
 - `host:port`: CONNECT to exactly this host and port; only TLS whose server name (SNI) is that
   host passes, so another site on the same address is out of reach, as for `anthropic`.
 - `IPv4:port`: CONNECT to exactly this address and port; only TLS that sends *no* server name
-  passes (clients send none for an address). Meant for hosts you run, such as a Kubernetes API
-  server addressed by IP: on a shared edge, the HTTP `Host` inside TLS could still pick
-  another site. Loopback, `0.0.0.0/8` and multicast addresses are refused.
+  passes (clients send none for an address: checked for curl, Python and Go, which kubectl
+  uses). A kubeconfig with `tls-server-name` set does send one and is refused. Meant for hosts
+  you run, such as a Kubernetes API server addressed by IP: on a shared edge, the HTTP `Host`
+  inside TLS could still pick another site. Loopback, `0.0.0.0/8`, link-local and multicast
+  addresses are refused; a host name is not checked for what it resolves to, so a name that
+  resolves to the host itself or its LAN reaches it.
 - `@name`: everything listener `name` allows, defined above (so no cycles; a listener cannot
   be extended once included). Repeat a name to continue it on another line.
 - Strict syntax: lowercase names, explicit ports, no wildcards, URLs, IPv6 or Windows line
