@@ -105,6 +105,15 @@ Then site listeners: one added gets its socket and ACL and reaches exactly its l
 changes nothing; a file from elsewhere needs a confirmation; a removed listener loses its
 socket; and a config Envoy will not start with is rolled back. With `OLD_REPO=<earlier
 checkout>` it installs that first and checks the upgrade keeps the socket.
+`install-envoy.sh` runs in the test image's build, so the download repeats only when the
+script, the release key or the version changes. The test runs inside one `podman unshare` and
+enters the container with `nsenter` (about 2 ms a command, against about 160 ms for
+`podman exec`); about 20 s a distribution.
+
+**All the tests at once:** `test/run-all.sh [distro...]` runs the install test on Arch, Debian
+13 and Ubuntu 26.04 (the default; name others to change it) in parallel, and alongside them the
+parser, t2 and the site checks, then prints each suite's result and time (about 20 s in all on
+a 20-thread workstation, from about 115 s). `OLD_REPO` and `AIRLOCK_REPO` pass through.
 
 ## Site listeners
 
