@@ -70,6 +70,9 @@ sudo install/install-service.sh "$USER"       # system account, units, airlock-e
   closed, and once it is back the same socket works again, with no relaunch (tested with a
   burst of connections over systemd's socket trigger limit while Envoy is down). A box
   connection to an idle socket starts the relay, and the relay starts Envoy if it is stopped.
+  Envoy itself is restarted after failures with no start limit, backing off from 2 s to a
+  minute between tries, so after a crash loop it comes back by itself once the cause is gone;
+  an apply also restarts it at once.
 - **Cutting egress (the kill switch):** `sudo airlock-envoy-apply --stop` stops Envoy and every
   box socket and writes `/etc/airlock-envoy/stopped`; while that exists the units do not start
   (not at boot, not by a box connection, not by `systemctl start`), and an apply or
