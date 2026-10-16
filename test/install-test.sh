@@ -133,7 +133,17 @@ ck "applying again with no change leaves Envoy running (no restart)" '[ "$(pid)"
 cfg="$(x sha256sum /etc/airlock-envoy/envoy.yaml)"
 x sh -c 'echo "extra Example.com:443" > /etc/airlock-envoy/site.conf'
 ck "a bad site file is refused and changes nothing" '! x airlock-envoy-apply >/dev/null 2>&1 && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ] && [ "$(pid)" = "$p" ]'
-x sh -c 'printf "%s\n" "extra @anthropic example.org:443" > /home/client/site.conf'
+x sh -c 'printf "%s\n" "extra @anthropic example.org:443" > /home/client/site.conf && chown client /home/client/site.conf'
+# A valid site.conf, the one already applied, so only the file's ownership can refuse it.
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
+x airlock-envoy-apply >/dev/null
+x cp -p /etc/airlock-envoy/site.conf /root/site.conf.keep
+x ln -sf /home/client/site.conf /etc/airlock-envoy/site.conf
+ck "site.conf as a symlink to a file the client can edit is refused, by default and by name" \
+   '! x airlock-envoy-apply >/dev/null 2>&1 && ! x airlock-envoy-apply /etc/airlock-envoy/site.conf >/dev/null 2>&1 && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ]'
+x sh -c 'rm /etc/airlock-envoy/site.conf && cp -p /root/site.conf.keep /etc/airlock-envoy/site.conf && chmod 0664 /etc/airlock-envoy/site.conf'
+ck "a group-writable site.conf is refused" '! x airlock-envoy-apply >/dev/null 2>&1 && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ]'
+x chmod 0640 /etc/airlock-envoy/site.conf
 ck "a site file from elsewhere needs a confirmation (no terminal, no --yes: refused)" \
    '! x airlock-envoy-apply /home/client/site.conf >/dev/null 2>&1 && ! x grep -q example.org /etc/airlock-envoy/site.conf'
 x airlock-envoy-apply --yes /home/client/site.conf >/dev/null

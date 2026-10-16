@@ -119,6 +119,17 @@ fi
 if [ -z "$site_arg" ] && [ -d "$ETC" ] && ! [ -x "$ETC" ]; then
   die "cannot read $ETC as $(id -un): run as root, or name a site file"
 fi
+# The site file in /etc is applied without asking, so it must be root's alone: a symlink to a
+# file you can edit (a dotfiles repo) would skip the confirmation a file from elsewhere gets.
+root_only() { [ "$(stat -c %u "$1")" = 0 ] && (( (8#$(stat -c %a "$1") & 022) == 0 )); }
+if [ "$from_elsewhere" = 0 ] && { [ -e "$ETC/site.conf" ] || [ -L "$ETC/site.conf" ]; }; then
+  [ ! -L "$ETC/site.conf" ] \
+    || die "$ETC/site.conf is a symlink: keep the file elsewhere and name it (airlock-envoy-apply FILE asks before installing it)"
+  [ -f "$ETC/site.conf" ] || die "$ETC/site.conf is not a regular file"
+  if ! { root_only "$ETC" && root_only "$ETC/site.conf"; }; then
+    die "$ETC/site.conf and $ETC must be owned by root and writable only by root"
+  fi
+fi
 if [ -n "$site_arg" ] || [ -e "$ETC/site.conf" ]; then
   site_text="$(cat -- "$site_src")" || die "cannot read $site_src"
 fi
