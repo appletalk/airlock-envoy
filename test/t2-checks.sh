@@ -21,7 +21,8 @@ podman run --rm --network none --userns keep-id --user "$(id -u):$(id -g)" -e "T
   localhost/airlock-envoy-spike-client:test bash -c '
 fails=0
 p=(-x http://127.0.0.1:3128 -s -o /dev/null --max-time 10 -w "proxy=%{http_connect} http=%{http_code}")
-# The checks run concurrently; results are printed in the order they were declared.
+# The curl checks run concurrently; their results are printed, in the order they were
+# declared, after the few that run inline (environment, direct connect, DNS).
 res=/tmp/checks n=0 pids=()
 mkdir -p "$res"
 check() {  # check <name> <expected result pattern> <curl args...>
