@@ -1,6 +1,7 @@
 #!/bin/bash
-# End-to-end install test in a systemd-booted container: install-envoy.sh and
-# install-service.sh run as root inside it, then an unprivileged client tunnels through the
+# End-to-end install test in a systemd-booted container: install-envoy.sh (in the image build,
+# re-run whenever it, the release key or the version changes) and install-service.sh run as
+# root inside it, then an unprivileged client tunnels through the
 # socket, then site listeners are added, changed and removed with airlock-envoy-apply.
 # Usage: test/install-test.sh ubuntu[-22.04|-24.04|-26.04]|debian|arch [envoy version]
 # (rootless podman; plain ubuntu = 24.04)
@@ -8,6 +9,9 @@
 # ck takes its condition as a string to eval, so single quotes and later-used variables are meant.
 # shellcheck disable=SC2016,SC2034
 set -euo pipefail
+# One user namespace for the whole run: podman works inside it, and entering the container
+# with nsenter takes ~2 ms where each podman exec takes ~160 ms (the test makes ~130 calls).
+[ -n "${_CONTAINERS_USERNS_CONFIGURED:-}" ] || exec podman unshare "$0" "$@"
 cd "$(dirname "$0")/.."
 distro="${1:?ubuntu[-VERSION], debian or arch}"
 ver="${2:-1.39.4}"
@@ -24,9 +28,13 @@ case "$distro" in
 esac
 img="localhost/airlock-envoy-install-test:$distro"
 name="airlock-envoy-install-test-$distro"
+# install-envoy.sh runs in the build: a cached layer until the script, the key or the version
+# changes, so the ~60 MB download is not repeated on every run.
 podman build -q -t "$img" -f - . >/dev/null <<EOF
 FROM $base
 RUN $prep && useradd -m client
+COPY install/install-envoy.sh install/envoy-release-key.asc /tmp/install-envoy/
+RUN /tmp/install-envoy/install-envoy.sh $ver && rm -r /tmp/install-envoy
 CMD ["$init"]
 EOF
 podman rm -f "$name" >/dev/null 2>&1 || true
@@ -44,23 +52,29 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
-for _ in $(seq 50); do
-  podman exec "$name" systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
-  sleep 0.2
+pid="$(podman inspect -f '{{.State.Pid}}' "$name")"
+# Root in the container (all its namespaces, no supplementary groups, a clean environment).
+x() {
+  nsenter -t "$pid" -m -u -i -n -p -C -r -w setpriv --clear-groups \
+    env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 "$@"
+}
+for _ in $(seq 100); do
+  # is-system-running exits non-zero for "degraded" (a container always has some failed
+  # unit), so match its output, not its status (pipefail made this wait out every time).
+  case "$(x systemctl is-system-running 2>/dev/null || true)" in running|degraded) break ;; esac
+  sleep 0.05
 done
-x() { podman exec "$name" "$@"; }
-
-echo "== $distro: install-envoy.sh $ver"
-x /repo/install/install-envoy.sh "$ver"
+echo "== $distro: Envoy $ver installed by install-envoy.sh in the image build: $(x envoy --version | grep -o '/[0-9.]*/' | tr -d /)"
 fails=0
 ck() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fails=$((fails+1)); fi; }
 S=/run/airlock-envoy/anthropic.sock
 tunnel() {  # tunnel [socket [host...]]: through a box socket as the client, each CONNECT's status
   local sock="${1:-$S}"; shift || true
   [ $# -gt 0 ] || set -- api.anthropic.com example.com
-  x runuser -u client -- bash -c 'socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:"$0" & sleep 0.3
+  x runuser -u client -- bash -c 'socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:"$0" &
+    until grep -q ":0C38 00000000:0000 0A" /proc/net/tcp; do sleep 0.01; done   # 127.0.0.1:3128 listening
     r=; for h in "$@"; do r="$r $(curl -s -o /dev/null -w "%{http_connect}" -x http://127.0.0.1:3128 "https://$h/")"; done
-    kill %1; echo ${r# }' "$sock" "$@" 2>/dev/null
+    kill %1; wait; echo ${r# }' "$sock" "$@" 2>/dev/null
 }
 if [ -n "${OLD_REPO:-}" ]; then
   echo "== $distro: the earlier install (OLD_REPO)"
@@ -103,7 +117,8 @@ ck "access log not readable by client" '! x runuser -u client -- cat /var/log/ai
 r="$(tunnel)"
 ck "client tunnels to api.anthropic.com (200), example.com refused (403): got '$r'" '[ "$r" = "200 403" ]'
 ck "another user cannot connect" '! x runuser -u nobody -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null'
-sleep 1.5
+# Envoy flushes the log every second: wait for both decisions rather than a fixed time.
+x sh -c 'for _ in $(seq 60); do grep -q allow-api.anthropic.com "$0" && grep -q deny-connect "$0" && exit 0; sleep 0.05; done' /var/log/airlock-envoy/access.jsonl || true
 ck "decisions in the access log" '[ "$(x grep -c "allow-api.anthropic.com" /var/log/airlock-envoy/access.jsonl)" -ge 1 ] && [ "$(x grep -c "deny-connect" /var/log/airlock-envoy/access.jsonl)" -ge 1 ]'
 ino="$(x stat -c %i "$S")"
 x systemctl restart airlock-envoy
@@ -117,12 +132,13 @@ ck "8 Envoy restarts in a row with a relay running: same box socket, still works
    '[ "$(x systemctl is-active airlock-envoy-proxy@anthropic.socket)" = active ] && [ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
 ck "running install-service.sh again keeps the socket and its ACL" \
    'x /repo/install/install-service.sh client >/dev/null && [ "$(x stat -c %i "$S")" = "$ino" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
-x systemctl restart airlock-envoy-proxy@anthropic.socket; sleep 0.5
+x systemctl restart airlock-envoy-proxy@anthropic.socket   # returns after the ACL's ExecStartPost
 ck "recreating the box socket re-applies the ACL" 'x getfacl -p "$S" | grep -q "^user:client:rw"'
 # --stop takes no lock: an apply holding it (say, waiting at its prompt) does not delay it.
-x sh -c 'flock /run/airlock-envoy-apply.lock sleep 3 & sleep 0.5; airlock-envoy-apply --stop >/dev/null; echo "rc=$?" > /root/stop.rc; wait'
+x sh -c 'flock /run/airlock-envoy-apply.lock sh -c "touch /root/held; sleep 1" & until [ -e /root/held ]; do sleep 0.01; done
+  airlock-envoy-apply --stop >/dev/null; echo "rc=$?" > /root/stop.rc; rm -f /root/held; wait'
 ck "--stop works while another apply holds the lock" '[ "$(x cat /root/stop.rc)" = rc=0 ]'
-ck "the kill switch, --stop, cuts egress (no connect, Envoy down)" '! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null && sleep 1 && [ "$(x systemctl is-active airlock-envoy)" != active ]'
+ck "the kill switch, --stop, cuts egress (no connect, Envoy down)" '! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null && sleep 0.3 && [ "$(x systemctl is-active airlock-envoy)" != active ]'
 x airlock-envoy-apply >/dev/null
 x systemctl start airlock-envoy-proxy@anthropic.socket airlock-envoy 2>/dev/null || true
 # As after a reboot with the switch on: no socket was ever made, so no /run/airlock-envoy.
@@ -136,8 +152,10 @@ ck "--start brings it back with the ACL: got '$r'" '[ "$r" = "200 403" ] && x ge
 # Not the kill switch: a crash. Envoy cannot start, a box connects, and its socket fails.
 x mv /etc/airlock-envoy/envoy.yaml /etc/airlock-envoy/envoy.yaml.away
 x systemctl restart airlock-envoy 2>/dev/null || true
-for _ in 1 2 3 4 5; do x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null || true; done
-sleep 1
+x runuser -u client -- sh -c 'for _ in 1 2 3 4 5; do socat -u /dev/null UNIX-CONNECT:"$0" 2>/dev/null; done; sleep 0.3' "$S" || true
+# The socket's trigger limit (20 in 2 s) outlasts reset-failed: a recovery inside that window
+# trips it again on the first connection. A real recovery comes later; wait the window out.
+sleep 2
 crashed="$(x systemctl is-failed airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " " || true)"
 x mv /etc/airlock-envoy/envoy.yaml.away /etc/airlock-envoy/envoy.yaml
 x airlock-envoy-apply >/dev/null
@@ -164,7 +182,8 @@ ck "its socket has the client's ACL, in the root-owned directory" \
    '[ "$(x getfacl -cp "$E" | grep -E "^(user|group|other)" | LC_ALL=C sort | tr "\n" " ")" = "group::--- other::--- user::rw- user:client:rw- " ]'
 r="$(tunnel)"
 ck "the anthropic socket is unchanged (same inode) and still refuses example.com: got '$r'" '[ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
-x sh -c 'flock /run/airlock-envoy-apply.lock sleep 3 & sleep 0.5; airlock-envoy-apply >/dev/null 2>&1; echo "rc=$?" > /root/lock.rc; wait'
+x sh -c 'flock /run/airlock-envoy-apply.lock sh -c "touch /root/held; sleep 1" & until [ -e /root/held ]; do sleep 0.01; done
+  airlock-envoy-apply >/dev/null 2>&1; echo "rc=$?" > /root/lock.rc; rm -f /root/held; wait'
 ck "a second apply while one runs is refused" '[ "$(x cat /root/lock.rc)" = rc=1 ]'
 p="$(pid)"
 out="$(x airlock-envoy-apply)"
