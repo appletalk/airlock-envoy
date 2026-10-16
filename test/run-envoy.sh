@@ -6,6 +6,7 @@
 # Stop: podman stop airlock-envoy-spike
 # The capture config listens on loopback TCP, so it gets the host network.
 set -euo pipefail
+# The log flushes every 100 ms here (1 s in the service), so the checks need not wait long.
 cd "$(dirname "$0")/.."
 image=docker.io/envoyproxy/envoy:v1.39.4@sha256:63dd445d23d7d419d1bba8b2b9b1b8fdb80f38ae1516fb5d2dcd8856713b7eac
 
@@ -27,7 +28,7 @@ chmod 0600 run/access.jsonl
 podman run -d --rm --name airlock-envoy-spike --network "$net" \
   --cap-drop all --security-opt no-new-privileges --read-only \
   -e ENVOY_UID=0 -v ./run:/run/airlock-envoy-internal:z -v ./run:/var/log/airlock-envoy:z \
-  "$image" -c /run/airlock-envoy-internal/envoy.yaml --disable-hot-restart --file-flush-interval-msec 1000 --log-level warn >/dev/null
+  "$image" -c /run/airlock-envoy-internal/envoy.yaml --disable-hot-restart --file-flush-interval-msec 100 --log-level warn >/dev/null
 for _ in $(seq 50); do
   [ -S run/admin.sock ] && exit 0
   sleep 0.1
