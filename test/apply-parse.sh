@@ -23,7 +23,7 @@ lists() {  # lists <name> <expected --list lines for the site's own listeners> <
   else echo "FAIL $1: got:"; echo "$out"; fails=$((fails+1)); fi
 }
 
-A='a api.anthropic.com:443\na platform.claude.com:443\na claude.ai:443'
+A='a api.anthropic.com:443\na platform.claude.com:443'
 refuses "uppercase host"               "only lowercase"        'a Example.com:443\n'
 refuses "wildcard"                     "only lowercase"        'a *.example.com:443\n'
 refuses "CRLF line ending"             "only lowercase"        'a example.com:443\r\n'
@@ -62,7 +62,7 @@ refuses "line number in the message"   "site:3:"               '# c\na example.c
 lists "comments, blanks, tabs, no final newline" 'a example.com:443\na 10.0.0.1:6443' \
   '# a comment\n\n a\texample.com:443   # trailing\na 10.0.0.1:6443'
 lists "include expands, duplicates collapse" \
-  "$A\na example.com:443\nb example.com:443\nb example.org:443\nc api.anthropic.com:443\nc platform.claude.com:443\nc claude.ai:443\nc example.com:443\nc example.org:443" \
+  "$A\na example.com:443\nb example.com:443\nb example.org:443\nc api.anthropic.com:443\nc platform.claude.com:443\nc example.com:443\nc example.org:443" \
   'a @anthropic example.com:443 example.com:443\nb example.com:443 example.org:443\nc @a @b\n'
 lists "highest port, IPv4 edges"       'a example.com:65535\na 1.0.0.0:1\na 223.255.255.255:443' \
   'a example.com:65535 1.0.0.0:1 223.255.255.255:443\n'
