@@ -154,7 +154,9 @@ kill switch on, nothing is started). Then it starts a socket
 for each new listener and removes the socket of each listener that is gone, so a box set to it
 no longer launches. If Envoy does not start with the new config, the previous one goes back.
 `--check` does all the checking and shows the change without applying; `--list` and
-`--render` work as any user. Any site file named on the command line other than the literal
+`--render` work as any user. `--status` shows Envoy, the kill switch and each box socket with
+its state and who may connect (any user; as root also whether the running config is the site
+file's, which it is not after a failed apply). Any site file named on the command line other than the literal
 `/etc/airlock-envoy/site.conf` counts as from elsewhere, symlinks into `/etc` included.
 
 Keep the site file in version control. Two ways to land it:

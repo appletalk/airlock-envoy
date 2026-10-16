@@ -192,6 +192,15 @@ ck "a second apply while one runs is refused" '[ "$(x cat /root/lock.rc)" = rc=1
 p="$(pid)"
 out="$(x airlock-envoy-apply)"
 ck "applying again with no change leaves Envoy running (no restart)" '[ "$(pid)" = "$p" ] && [[ "$out" == *"no change"* ]]'
+out="$(x airlock-envoy-apply --status)"
+ck "--status: Envoy active, kill switch off, the extra socket for the client, applied" \
+   '[[ "$out" == *"Envoy: active"* && "$out" == *"Kill switch: off"* && "$out" == *"/run/airlock-envoy/extra.sock"*"for: client"* && "$out" == *"Applied: yes"* ]]'
+out="$(x runuser -u client -- airlock-envoy-apply --status 2>&1)"
+ck "--status as the client: sockets shown, the rest needs root" '[[ "$out" == *"/run/airlock-envoy/extra.sock"* && "$out" == *"Kill switch: unknown (run as root)"* && "$out" != *"Applied"* ]]'
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443 example.net:443" > /etc/airlock-envoy/site.conf'
+out="$(x airlock-envoy-apply --status)"
+ck "--status: a site file changed but not applied shows as not applied" '[[ "$out" == *"Applied: NO"* ]]'
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
 cfg="$(x sha256sum /etc/airlock-envoy/envoy.yaml)"
 x sh -c 'echo "extra Example.com:443" > /etc/airlock-envoy/site.conf'
 ck "a bad site file is refused and changes nothing" '! x airlock-envoy-apply >/dev/null 2>&1 && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ] && [ "$(pid)" = "$p" ]'
