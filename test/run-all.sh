@@ -28,7 +28,7 @@ for d in "${distros[@]}"; do run "install-$d" test/install-test.sh "$d" & order+
 # shellcheck disable=SC2329  # run via run()
 lint() {
   local sc="${SHELLCHECK:-$(command -v shellcheck)}"
-  [ -n "$sc" ] || { echo "skipped: no shellcheck (set SHELLCHECK=)"; return 0; }
+  [ -n "$sc" ] || { echo "skipped: no shellcheck (set SHELLCHECK=)"; return 3; }
   "$sc" install/*.sh install/airlock-envoy-apply test/*.sh test/client/entry.sh && echo "ok   shellcheck"
 }
 { run shellcheck lint
@@ -41,9 +41,10 @@ wait
 failed=0
 for name in "${order[@]}"; do
   read -r rc s < "$logs/$name.result" || { rc=1 s='?'; }
-  if [ "$rc" = 0 ]; then st=ok; else st=FAIL; failed=1; fi
+  case "$rc" in 0) st=ok ;; 3) st=skip ;; *) st=FAIL; failed=1 ;; esac   # 3: lint skipped
   printf '%-4s %-24s %6s s  %s\n' "$st" "$name" "$s" "$(grep -c '^ok' "$logs/$name.log") checks ok"
-  [ "$rc" = 0 ] || grep -E '^FAIL' "$logs/$name.log" | sed 's/^/       /'
+  case "$rc" in 0|3) ;; *) grep -E '^FAIL' "$logs/$name.log" | sed 's/^/       /' ;; esac
+  [ "$rc" = 0 ] || [ "$rc" = 3 ] || grep -q '^FAIL' "$logs/$name.log" || tail -3 "$logs/$name.log" | sed 's/^/       /'
 done
 echo "total $(secs "$t0") s; logs: $logs"
 exit "$failed"
