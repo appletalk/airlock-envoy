@@ -173,10 +173,14 @@ down="$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket
 ck "Envoy down (Envoy, box socket: $down): box connections are closed ($r), the box socket stays up" \
    '[[ "$down" != "active "* ]] && [[ "$down" == *" active " ]] && [ "$r" = "000 000" ]'
 x mv /etc/airlock-envoy/envoy.yaml.away /etc/airlock-envoy/envoy.yaml
-x airlock-envoy-apply >/dev/null
+# Envoy keeps retrying (with back-off, no start limit), so it comes back by itself. Within
+# this test it would also come back under the default limit, so check the setting too.
+ck "Envoy has no start limit (StartLimitIntervalUSec=$(x systemctl show -p StartLimitIntervalUSec --value airlock-envoy))" \
+   '[ "$(x systemctl show -p StartLimitIntervalUSec --value airlock-envoy)" = 0 ]'
+for _ in $(seq 150); do [ "$(x systemctl is-active airlock-envoy || true)" = active ] && break; sleep 0.1; done
 r="$(tunnel)"
-ck "...an apply brings Envoy back and the same box socket works (no relaunch): got '$r'" \
-   '[ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
+ck "...Envoy comes back by itself and the same box socket works (no relaunch): got '$r'" \
+   '[ "$(x systemctl is-active airlock-envoy)" = active ] && [ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
 # Envoy and the relay stopped (not the kill switch): a box connection starts both.
 x systemctl stop airlock-envoy airlock-envoy-proxy@anthropic.service
 r="$(tunnel)"
