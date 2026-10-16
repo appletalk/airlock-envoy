@@ -13,7 +13,7 @@
 # /run/airlock-envoy/<name>.sock, and a box gets one, so a listener is a whole access profile.
 # Repeat a name to continue it on another line; # starts a comment.
 #
-#   example-infra  @anthropic  metrics.example.net:443  10.0.0.10:6443
+#   infra  @anthropic  metrics.example.net:443  10.0.0.10:6443
 #
 #   host:port   CONNECT to exactly this host and port, and only TLS whose server name (SNI) is
 #               that host passes: another site on the same address is not reachable
@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --check|--list|--render) mode=${1#--} ;;
     --yes) yes=1 ;;
-    --restart) mode=apply restart=1 ;;   # install-service.sh: the unit may have changed
+    --restart) restart=1 ;;   # install-service.sh: the unit may have changed; start egress
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1 (see --help)" ;;
     *) break ;;
@@ -61,8 +61,9 @@ valid_dest() {
   [[ "$p" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$p" -le 65535 ] || return 1
   if [[ "$h" =~ ^[0-9.]+$ ]]; then
     [[ "$h" =~ ^$o\.$o\.$o\.$o$ ]] || return 1
-    # The host's own loopback, "this network" and multicast/reserved: never a destination.
-    case "$h" in 0.*|127.*) return 1 ;; esac
+    # The host's own loopback, "this network", link-local (cloud metadata lives there) and
+    # multicast/reserved: never a destination.
+    case "$h" in 0.*|127.*|169.254.*) return 1 ;; esac
     [ "${h%%.*}" -lt 224 ]
   else
     [ "${#h}" -le 253 ] && [[ "$h" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
@@ -97,6 +98,7 @@ parse() {  # parse <source label>, text on stdin
     for w in "${words[@]:1}"; do
       if [[ "$w" == @* ]]; then
         w=${w#@}
+        [[ "$w" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die "$src:$n: bad include '@$w' (want @listener)"
         [ "$w" != "$name" ] || die "$src:$n: $name includes itself"
         [ -n "${DESTS[$w]+x}" ] || die "$src:$n: @$w is not a listener defined above"
         INCLUDED_BY[$w]=$name
@@ -389,6 +391,9 @@ esac
 if [ "$mode" = apply ]; then
   [ "$(id -u)" = 0 ] || die "run as root (or --check / --list / --render)"
   getent passwd airlock-envoy >/dev/null || die "no airlock-envoy account: run install/install-service.sh first"
+  # One apply at a time: two would interleave the .new files and the rollback copy.
+  exec 9>>/run/airlock-envoy-apply.lock
+  flock -n 9 || die "another airlock-envoy-apply is running"
 fi
 unset TMPDIR
 work="$(mktemp -d /tmp/airlock-envoy-apply.XXXXXX)"
@@ -460,8 +465,10 @@ elif [ "$changed" = 1 ] || [ "$restart" = 1 ] || ! systemctl is-active --quiet a
   if ! restart_envoy; then
     if [ -f "$work/envoy.yaml.prev" ]; then
       inst "$work/envoy.yaml.prev" "$ETC/envoy.yaml"
-      restart_envoy || true
-      die "airlock-envoy did not start with the new config; the previous one is back (journalctl -u airlock-envoy)"
+      if restart_envoy; then
+        die "airlock-envoy did not start with the new config; the previous one is back and running (journalctl -u airlock-envoy)"
+      fi
+      die "airlock-envoy did not start with the new config, nor with the previous one put back: egress is down (journalctl -u airlock-envoy)"
     fi
     die "airlock-envoy did not start (journalctl -u airlock-envoy)"
   fi
@@ -487,6 +494,8 @@ for l in "${current[@]}"; do
   echo "==> Removing listener $l (its socket goes; boxes set to it no longer launch)"
   systemctl disable --quiet --now "airlock-envoy-proxy@$l.socket" || true
   systemctl stop "airlock-envoy-proxy@$l.service" 2>/dev/null || true
+  # A failed unit stays loaded (and would be "removed" again by every apply) until reset.
+  systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
   rm -f "/run/airlock-envoy/$l.sock"
 done
 for l in "${LISTENERS[@]}"; do echo "    /run/airlock-envoy/$l.sock"; done

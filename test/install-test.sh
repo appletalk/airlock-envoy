@@ -140,6 +140,8 @@ ck "its socket has the client's ACL, in the root-owned directory" \
    '[ "$(x getfacl -cp "$E" | grep -E "^(user|group|other)" | LC_ALL=C sort | tr "\n" " ")" = "group::--- other::--- user::rw- user:client:rw- " ]'
 r="$(tunnel)"
 ck "the anthropic socket is unchanged (same inode) and still refuses example.com: got '$r'" '[ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
+x sh -c 'flock /run/airlock-envoy-apply.lock sleep 3 & sleep 0.5; airlock-envoy-apply >/dev/null 2>&1; echo "rc=$?" > /root/lock.rc; wait'
+ck "a second apply while one runs is refused" '[ "$(x cat /root/lock.rc)" = rc=1 ]'
 p="$(pid)"
 out="$(x airlock-envoy-apply)"
 ck "applying again with no change leaves Envoy running (no restart)" '[ "$(pid)" = "$p" ] && [[ "$out" == *"no change"* ]]'
