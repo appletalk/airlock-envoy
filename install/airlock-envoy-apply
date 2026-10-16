@@ -160,7 +160,7 @@ status_units() {  # what systemd and /run say; needs no access to $ETC (nor, as 
   while read -r l; do
     st="$(systemctl is-active "airlock-envoy-proxy@$l.socket" 2>/dev/null || true)"
     [ -S "/run/airlock-envoy/$l.sock" ] || st="${st:-gone} (no socket file)"
-    acl="$(getfacl -cp "/run/airlock-envoy/$l.sock" 2>/dev/null | sed -n 's/^user:\([^:][^:]*\):rw-$/\1/p' | tr "\n" " ")"
+    acl="$(getfacl -cp "/run/airlock-envoy/$l.sock" 2>/dev/null | sed -n 's/^user:\([^:][^:]*\):rw-$/\1/p' | tr "\n" " " || true)"
     printf '    %-36s %-10s %s\n' "/run/airlock-envoy/$l.sock" "${st:-unknown}" "${acl:+for: $acl}"
   done < <({
     systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' 2>/dev/null | awk '{ print $1 }' || true
@@ -440,7 +440,7 @@ case "$mode" in
     echo "==> Listeners in $site_src (and built in): ${LISTENERS[*]}"
     if [ -r "$ETC/envoy.yaml" ]; then
       if [ "$(render "$LOG" | sha256sum)" = "$(sha256sum < "$ETC/envoy.yaml")" ]; then
-        echo "==> Applied: yes (the running config is this site file's)"
+        echo "==> Applied: yes ($ETC/envoy.yaml is this site file's)"
       else
         echo "==> Applied: NO, the site file differs from the running config (--check shows how)"
       fi
