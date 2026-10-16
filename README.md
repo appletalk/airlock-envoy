@@ -66,12 +66,13 @@ sudo install/install-service.sh "$USER"       # system account, units, airlock-e
   (claude-airlock requires exactly that, and its own check accepts the socket; the install
   test runs it). The box socket also outlives Envoy: restarts and updates drop open
   connections, never the socket a running box holds.
-- **Cutting egress:** `systemctl stop 'airlock-envoy-proxy@*.socket' airlock-envoy`. Stopping
-  only `airlock-envoy` does not hold: the next box connection starts it again (that is how it
-  comes up at boot and recovers). Starting the sockets again makes new socket files, so boxes
-  need a relaunch afterwards. `airlock-envoy-apply` (and so a deploy that applies a site file)
-  leaves the switch in place: it updates the config without starting anything.
-  `install-service.sh` starts egress again.
+- **Cutting egress (the kill switch):** `sudo airlock-envoy-apply --stop` stops Envoy and every
+  box socket and writes `/etc/airlock-envoy/stopped`; while that exists the units do not start
+  (not at boot, not by a box connection, not by `systemctl start`), and an apply or
+  `install-service.sh` updates the config without starting anything. `sudo airlock-envoy-apply
+  --start` lifts it. Starting makes new socket files, so boxes need a relaunch afterwards.
+  Stopping units by hand also cuts egress, but only until the next apply, which treats a
+  stopped or failed Envoy or box socket as something to recover (a crash looks the same).
 - Envoy and the relay run as `airlock-envoy` with no capabilities and systemd's sandboxing
   (read-only system, no home, private /tmp and devices, a syscall allowlist, no core dumps,
   no swap; the relay also has no network at all). Envoy's allocator needs `mincore`, the one

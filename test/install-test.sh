@@ -119,14 +119,31 @@ ck "running install-service.sh again keeps the socket and its ACL" \
    'x /repo/install/install-service.sh client >/dev/null && [ "$(x stat -c %i "$S")" = "$ino" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
 x systemctl restart airlock-envoy-proxy@anthropic.socket; sleep 0.5
 ck "recreating the box socket re-applies the ACL" 'x getfacl -p "$S" | grep -q "^user:client:rw"'
-x systemctl stop 'airlock-envoy-proxy@*.socket' airlock-envoy
-ck "documented kill switch cuts egress (no connect, envoy stays down)" '! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null && sleep 1 && [ "$(x systemctl is-active airlock-envoy)" != active ]'
+x airlock-envoy-apply --stop >/dev/null
+ck "the kill switch, --stop, cuts egress (no connect, Envoy down)" '! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null && sleep 1 && [ "$(x systemctl is-active airlock-envoy)" != active ]'
 x airlock-envoy-apply >/dev/null
-ck "an apply leaves the kill switch in place (Envoy and the box socket stay stopped)" \
-   '[ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " ")" = "inactive inactive " ]'
-x systemctl start airlock-envoy-proxy@anthropic.socket
+x systemctl start airlock-envoy-proxy@anthropic.socket airlock-envoy 2>/dev/null || true
+x /repo/install/install-service.sh client >/dev/null 2>&1
+ck "while it is on: an apply, a systemctl start (as at boot) and install-service.sh start nothing" \
+   '[ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " ")" = "inactive inactive " ] && ! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null'
+x airlock-envoy-apply --start >/dev/null
 r="$(tunnel)"
-ck "starting the socket again brings it back with the ACL: got '$r'" '[ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
+ck "--start brings it back with the ACL: got '$r'" '[ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw" && ! x test -e /etc/airlock-envoy/stopped'
+# Not the kill switch: a crash. Envoy cannot start, a box connects, and its socket fails.
+x mv /etc/airlock-envoy/envoy.yaml /etc/airlock-envoy/envoy.yaml.away
+x systemctl restart airlock-envoy 2>/dev/null || true
+for _ in 1 2 3 4 5; do x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null || true; done
+sleep 1
+crashed="$(x systemctl is-failed airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " ")"
+x mv /etc/airlock-envoy/envoy.yaml.away /etc/airlock-envoy/envoy.yaml
+x airlock-envoy-apply >/dev/null
+r="$(tunnel)"
+ck "after a crash that failed Envoy and the box socket ($crashed), an apply recovers both: got '$r'" \
+   '[ "$crashed" = "failed failed " ] && [ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
+x systemctl stop airlock-envoy-proxy@anthropic.socket
+x airlock-envoy-apply >/dev/null
+r="$(tunnel)"
+ck "a box socket stopped by hand is not the kill switch: an apply starts it again: got '$r'" '[ "$r" = "200 403" ]'
 
 echo "== $distro: site listeners"
 E=/run/airlock-envoy/extra.sock

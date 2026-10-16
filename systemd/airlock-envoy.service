@@ -3,6 +3,8 @@ Description=airlock Envoy egress proxy (behind airlock-envoy-proxy@ sockets)
 Documentation=https://github.com/appletalk/airlock-envoy
 Wants=network-online.target
 After=network-online.target
+# The kill switch (airlock-envoy-apply --stop): not even a box connection starts it.
+ConditionPathExists=!/etc/airlock-envoy/stopped
 
 [Service]
 Type=simple

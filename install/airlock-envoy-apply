@@ -8,6 +8,9 @@
 #   airlock-envoy-apply --check [SITE]   parse, render and validate; show what would change
 #   airlock-envoy-apply --list [SITE]    print each listener's destinations (any user)
 #   airlock-envoy-apply --render [SITE]  print the Envoy config (any user)
+#   airlock-envoy-apply --stop           as root: cut all box egress and keep it cut, across
+#                                        applies and reboots (the kill switch)
+#   airlock-envoy-apply --start          as root: lift it, apply, and start everything
 #
 # The site file names listeners and what each may reach. A listener is a box socket,
 # /run/airlock-envoy/<name>.sock, and a box gets one, so a listener is a whole access profile.
@@ -33,10 +36,11 @@ PER_LISTENER=128   # connections from boxes at once, per listener (so per profil
 
 die() { echo "airlock-envoy-apply: $*" >&2; exit 1; }
 
-mode=apply yes=0
+mode=apply yes=0 start=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --check|--list|--render) mode=${1#--} ;;
+    --check|--list|--render|--stop) mode=${1#--} ;;
+    --start) mode=apply start=1 restart=1 ;;
     --yes) yes=1 ;;
     --restart) restart=1 ;;   # install-service.sh: the unit may have changed; start egress
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
@@ -48,6 +52,24 @@ done
 [ $# -le 1 ] || die "one site file at most"
 site_arg="${1:-}"
 restart="${restart:-0}"
+STOPPED="$ETC/stopped"   # the kill switch; the units do not start while it exists
+
+lock() {  # one apply at a time: two would interleave the .new files and the rollback copy
+  [ "$(id -u)" = 0 ] || die "run as root (or --check / --list / --render)"
+  exec 9>>/run/airlock-envoy-apply.lock
+  flock -n 9 || die "another airlock-envoy-apply is running"
+}
+if [ "$mode" = stop ]; then
+  [ $# = 0 ] || die "--stop takes no site file"
+  lock
+  [ -d "$ETC" ] || die "$ETC does not exist: nothing installed"
+  install -m 0644 -o root -g root /dev/null "$STOPPED"
+  systemctl stop 'airlock-envoy-proxy@*.socket' 'airlock-envoy-proxy@*.service' airlock-envoy
+  echo "==> Box egress stopped: Envoy and every box socket are down, and stay down across applies,"
+  echo "    deploys and reboots ($STOPPED). Resume: airlock-envoy-apply --start"
+  echo "    (new socket files, so running boxes need a relaunch)"
+  exit 0
+fi
 
 # ---- parse ----------------------------------------------------------------------------------
 
@@ -389,11 +411,8 @@ esac
 
 [ -x "$ENVOY" ] || die "no Envoy at $ENVOY (install/install-envoy.sh)"
 if [ "$mode" = apply ]; then
-  [ "$(id -u)" = 0 ] || die "run as root (or --check / --list / --render)"
+  lock
   getent passwd airlock-envoy >/dev/null || die "no airlock-envoy account: run install/install-service.sh first"
-  # One apply at a time: two would interleave the .new files and the rollback copy.
-  exec 9>>/run/airlock-envoy-apply.lock
-  flock -n 9 || die "another airlock-envoy-apply is running"
 fi
 unset TMPDIR
 work="$(mktemp -d /tmp/airlock-envoy-apply.XXXXXX)"
@@ -410,7 +429,7 @@ if [ "$(id -u)" = 0 ]; then
   chmod 0750 "$work"; chmod 0640 "$work/validate.yaml"
   run_as=(setpriv --reuid="$(id -u "$u")" --regid="$g" --clear-groups --no-new-privs)
 fi
-if ! out="$(cd / && "${run_as[@]}" "$ENVOY" --mode validate -c "$work/validate.yaml" 2>&1)"; then
+if ! out="$(cd / && "${run_as[@]}" "$ENVOY" --mode validate -c "$work/validate.yaml" 2>&1 9>&-)"; then
   printf '%s\n' "$out" | grep -E 'critical|error' >&2 || printf '%s\n' "$out" >&2
   die "Envoy rejected the rendered config; nothing was changed"
 fi
@@ -440,13 +459,13 @@ install -d -m 0750 -o root -g "$grp" "$ETC"
 render "$LOG" > "$work/envoy.yaml"
 { echo "# listener destination, as last applied by airlock-envoy-apply"; cat "$work/new"; } > "$work/allowed"
 
-# The kill switch (README): Envoy and every box socket stopped. An apply then updates the
-# config and which sockets come up at boot, but starts nothing; install-service.sh does.
+# The kill switch (--stop) is explicit state, never inferred from units: a crash looks like a
+# stop. While it is on, an apply updates the config (validated, not start-tested) and which
+# sockets exist at boot, but starts nothing; only --start lifts it. Otherwise an apply also
+# recovers: a failed or stopped Envoy or box socket is started again.
 held=0
-if [ "$restart" = 0 ] && [ -r "$ETC/allowed" ] && ! systemctl is-active --quiet airlock-envoy \
-   && ! systemctl list-units --state=active --plain --no-legend 'airlock-envoy-proxy@*.socket' | grep -q .; then
-  held=1
-fi
+if [ "$start" = 1 ]; then rm -f "$STOPPED"
+elif [ -e "$STOPPED" ]; then held=1; fi
 
 changed=1
 same() { [ "$(sha256sum < "$1")" = "$(sha256sum < "$2")" ]; }   # no cmp on minimal systems
@@ -454,8 +473,8 @@ if [ -f "$ETC/envoy.yaml" ] && same "$work/envoy.yaml" "$ETC/envoy.yaml"; then c
 [ -f "$ETC/envoy.yaml" ] && cp -p "$ETC/envoy.yaml" "$work/envoy.yaml.prev"
 inst "$work/envoy.yaml" "$ETC/envoy.yaml"
 if [ "$held" = 1 ]; then
-  echo "==> Egress is stopped (Envoy and every box socket): config updated, nothing started"
-  echo "    To resume: systemctl start airlock-envoy-proxy@<listener>.socket ... (or rerun install-service.sh)"
+  echo "==> Box egress is stopped ($STOPPED): config updated, nothing started"
+  echo "    Resume: airlock-envoy-apply --start"
 elif [ "$changed" = 1 ] || [ "$restart" = 1 ] || ! systemctl is-active --quiet airlock-envoy; then
   echo "==> Restarting airlock-envoy (open tunnels drop; box sockets stay)"
   # A deliberate restart: clear systemd's start-rate count, which a few applies in a row
@@ -480,7 +499,12 @@ if [ "$from_elsewhere" = 1 ]; then printf '%s\n' "$site_text" > "$work/site.conf
 # A box socket per listener; the client's ACL comes from the unit's drop-in.
 for l in "${LISTENERS[@]}"; do
   systemctl enable --quiet "airlock-envoy-proxy@$l.socket"
-  [ "$held" = 1 ] || systemctl start "airlock-envoy-proxy@$l.socket"
+  [ "$held" = 0 ] || continue
+  # A socket fails if its relay cannot start (Envoy down): recover it, as a new socket file.
+  if systemctl is-failed --quiet "airlock-envoy-proxy@$l.socket"; then
+    systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
+  fi
+  systemctl start "airlock-envoy-proxy@$l.socket"
 done
 # Listeners no longer in the site file: their sockets go, so a box set to one fails to launch.
 declare -A keep=()
@@ -498,4 +522,5 @@ for l in "${current[@]}"; do
   systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
   rm -f "/run/airlock-envoy/$l.sock"
 done
-for l in "${LISTENERS[@]}"; do echo "    /run/airlock-envoy/$l.sock"; done
+if [ "$held" = 1 ]; then echo "    listeners (stopped): ${LISTENERS[*]}"
+else for l in "${LISTENERS[@]}"; do echo "    /run/airlock-envoy/$l.sock"; done; fi
