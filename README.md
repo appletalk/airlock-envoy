@@ -136,8 +136,8 @@ infra  10.0.0.10:6443
 
 `sudo airlock-envoy-apply` renders the config, checks it with `envoy --mode validate` (as the
 service account), prints the change in allowed destinations against the last apply, swaps the
-config in atomically and restarts Envoy (only if the config changed, or Envoy is down while box
-sockets are up; with the kill switch on, nothing is started). Then it starts a socket
+config in atomically and restarts Envoy (only if the config changed or Envoy is down; with the
+kill switch on, nothing is started). Then it starts a socket
 for each new listener and removes the socket of each listener that is gone, so a box set to it
 no longer launches. If Envoy does not start with the new config, the previous one goes back.
 `--check` does all the checking and shows the change without applying; `--list` and
