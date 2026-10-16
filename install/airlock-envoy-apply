@@ -138,7 +138,9 @@ site_src="$ETC/site.conf" site_text="" from_elsewhere=0
 if [ -n "$site_arg" ]; then
   if ! [ -r "$site_arg" ] || [ -d "$site_arg" ]; then die "cannot read $site_arg"; fi
   site_src="$site_arg"
-  [ "$(realpath -- "$site_arg")" = "$ETC/site.conf" ] || from_elsewhere=1
+  # Only the literal /etc path counts as /etc: a path that merely resolves there (a symlink
+  # someone else can repoint between this check and the read) is from elsewhere.
+  [ "$site_arg" = "$ETC/site.conf" ] || from_elsewhere=1
 fi
 if [ -z "$site_arg" ] && [ -d "$ETC" ] && ! [ -x "$ETC" ]; then
   die "cannot read $ETC as $(id -un): run as root, or name a site file"
