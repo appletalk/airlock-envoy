@@ -29,6 +29,7 @@ ETC=/etc/airlock-envoy
 ENVOY=/usr/local/bin/envoy
 LOG=/var/log/airlock-envoy/access.jsonl
 BUILTIN='anthropic api.anthropic.com:443 platform.claude.com:443 claude.ai:443'
+PER_LISTENER=128   # connections from boxes at once, per listener (so per profile)
 
 die() { echo "airlock-envoy-apply: $*" >&2; exit 1; }
 
@@ -154,7 +155,9 @@ overload_manager:
   - name: envoy.resource_monitors.global_downstream_max_connections
     typed_config:
       "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
-      max_active_downstream_connections: 256
+      # Each listener has its own cap (connection_limit below), so one profile cannot starve
+      # another; this total is just their sum.
+      max_active_downstream_connections: $(( PER_LISTENER * ${#LISTENERS[@]} ))
 
 admin:
   address:
@@ -174,6 +177,11 @@ EOF
         mode: 0600
     filter_chains:
     - filters:
+      - name: envoy.filters.network.connection_limit
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.connection_limit.v3.ConnectionLimit
+          stat_prefix: "$l"
+          max_connections: $PER_LISTENER
       - name: envoy.filters.network.http_connection_manager
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
