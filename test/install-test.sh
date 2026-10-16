@@ -134,12 +134,14 @@ x mv /etc/airlock-envoy/envoy.yaml /etc/airlock-envoy/envoy.yaml.away
 x systemctl restart airlock-envoy 2>/dev/null || true
 for _ in 1 2 3 4 5; do x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null || true; done
 sleep 1
-crashed="$(x systemctl is-failed airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " ")"
+crashed="$(x systemctl is-failed airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " " || true)"
 x mv /etc/airlock-envoy/envoy.yaml.away /etc/airlock-envoy/envoy.yaml
 x airlock-envoy-apply >/dev/null
 r="$(tunnel)"
-ck "after a crash that failed Envoy and the box socket ($crashed), an apply recovers both: got '$r'" \
-   '[ "$crashed" = "failed failed " ] && [ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
+# Before systemd 255 Envoy is still in its restart loop (activating) and the socket stays up;
+# from 255 both have failed. Either way Envoy is down, and an apply must bring it all back.
+ck "after a crash (Envoy, box socket: $crashed), an apply recovers: got '$r'" \
+   '[[ "$crashed" != "active "* ]] && [ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
 x systemctl stop airlock-envoy-proxy@anthropic.socket
 x airlock-envoy-apply >/dev/null
 r="$(tunnel)"
