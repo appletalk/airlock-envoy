@@ -21,11 +21,15 @@ podman run --rm --network none --userns keep-id --user "$(id -u):$(id -g)" -e "T
   localhost/airlock-envoy-spike-client:test bash -c '
 fails=0
 p=(-x http://127.0.0.1:3128 -s -o /dev/null --max-time 10 -w "proxy=%{http_connect} http=%{http_code}")
+# The checks run concurrently; results are printed in the order they were declared.
+res=/tmp/checks n=0 pids=()
+mkdir -p "$res"
 check() {  # check <name> <expected result pattern> <curl args...>
-  local name=$1 want=$2; shift 2
-  r="$(curl "${p[@]}" "$@") exit=$?"
-  if [[ "$r" == $want ]]; then echo "ok   $name: $r"
-  else echo "FAIL $name: $r (wanted $want)"; fails=$((fails+1)); fi
+  local name=$1 want=$2 f; shift 2
+  n=$((n + 1)); printf -v f "%s/%03d" "$res" "$n"
+  { r="$(curl "${p[@]}" "$@") exit=$?"
+    if [[ "$r" == $want ]]; then echo "ok   $name: $r"; else echo "FAIL $name: $r (wanted $want)"; fi > "$f"; } &
+  pids+=($!)
 }
 echo "uid $(id -u); interfaces: $(ls /sys/class/net | tr "\n" " ")"
 # Allowed: the proxy answers 200 and TLS completes (the HTTP status is the site'"'"'s own).
@@ -58,8 +62,10 @@ else echo "ok   DNS: no answer"; fi
 for i in $(seq 40); do
   h="$TAG-$(head -c "$i" /dev/zero | tr "\0" x).invalid"
   { curl "${p[@]}" --connect-to "$h:443:api.anthropic.com:443" "https://$h/"; echo " exit=$?"; } > "/tmp/c$i" &
+  pids+=($!)
 done
-wait
+wait "${pids[@]}"
+cat "$res"/*; fails=$((fails + $(cat "$res"/* | grep -c "^FAIL")))
 n=$(cat /tmp/c[0-9]* | grep -c "^proxy=200 http=000 exit=35$")
 if [ "$n" -eq 40 ]; then echo "ok   40 concurrent wrong-SNI tunnels all refused"
 else echo "FAIL concurrent wrong-SNI tunnels: $n of 40 refused as expected"; fails=$((fails+1)); fi
@@ -68,33 +74,39 @@ exit "$fails"
 fails=$?
 # The SNI refusals must be in the audit log: flag NR, the SNI the client sent, and the
 # connection ID of the HTTP line that allowed the CONNECT.
-sleep 1.5
-log() { readlog | tail -n "+$start"; }
-for sni in www.anthropic.com console.anthropic.com; do
-  line="$(log | jq -c --arg s "$sni" 'select(.sni == $s and .flags == "NR")' | tail -1)"
-  conn="$(jq -r '.connection' <<<"${line:-null}")"
-  if [ -n "$line" ] && log | jq -e --arg c "$conn" 'select(.listener == "anthropic" and (.connection | tostring) == $c and .route == "allow-api.anthropic.com")' >/dev/null; then
-    echo "ok   log: SNI $sni refused (NR), joined to HTTP connection $conn"
+logchecks() {
+  log() { readlog | tail -n "+$start"; }
+  for sni in www.anthropic.com console.anthropic.com; do
+    line="$(log | jq -c --arg s "$sni" 'select(.sni == $s and .flags == "NR")' | tail -1)"
+    conn="$(jq -r '.connection' <<<"${line:-null}")"
+    if [ -n "$line" ] && log | jq -e --arg c "$conn" 'select(.listener == "anthropic" and (.connection | tostring) == $c and .route == "allow-api.anthropic.com")' >/dev/null; then
+      echo "ok   log: SNI $sni refused (NR), joined to HTTP connection $conn"
+    else
+      echo "FAIL log: no NR line for SNI $sni joined to its CONNECT"
+    fi
+  done
+  # Concurrent tunnels: 40 NR lines with this run's SNIs, 40 distinct connection IDs, each ID an
+  # allowed CONNECT of this run, and the CONNECT's bytes_in (the ClientHello, which grows with
+  # the SNI) minus the SNI's length the same for every pair. A shared, reused or swapped ID
+  # breaks one of these.
+  read -r nlines nids nmatched nsizes < <(log | jq -s -r --arg t "$tag-" '
+    (map(select(.listener == "anthropic" and .route == "allow-api.anthropic.com" and .log_type == "DownstreamEnd"))
+      | map({ key: (.connection | tostring), value: .bytes_in }) | from_entries) as $http
+    | [ .[] | select((.sni // "") | startswith($t)) | select(.flags == "NR") ] as $sni
+    | [ $sni[] | select($http[.connection] != null) ] as $joined
+    | [ ($sni | length), ([ $sni[].connection ] | unique | length), ($joined | length),
+        ([ $joined[] | $http[.connection] - (.sni | length) ] | unique | length) ]
+    | @tsv')
+  if [ "$nlines" -eq 40 ] && [ "$nids" -eq 40 ] && [ "$nmatched" -eq 40 ] && [ "$nsizes" -eq 1 ]; then
+    echo "ok   log: 40 concurrent SNI refusals, each joined to its own CONNECT (IDs and ClientHello sizes agree)"
   else
-    echo "FAIL log: no NR line for SNI $sni joined to its CONNECT"; fails=$((fails+1))
+    echo "FAIL log: concurrent SNI lines=$nlines distinct IDs=$nids joined=$nmatched size offsets=$nsizes (want 40/40/40/1)"
   fi
-done
-# Concurrent tunnels: 40 NR lines with this run's SNIs, 40 distinct connection IDs, each ID an
-# allowed CONNECT of this run, and the CONNECT's bytes_in (the ClientHello, which grows with
-# the SNI) minus the SNI's length the same for every pair. A shared, reused or swapped ID
-# breaks one of these.
-read -r nlines nids nmatched nsizes < <(log | jq -s -r --arg t "$tag-" '
-  (map(select(.listener == "anthropic" and .route == "allow-api.anthropic.com" and .log_type == "DownstreamEnd"))
-    | map({ key: (.connection | tostring), value: .bytes_in }) | from_entries) as $http
-  | [ .[] | select((.sni // "") | startswith($t)) | select(.flags == "NR") ] as $sni
-  | [ $sni[] | select($http[.connection] != null) ] as $joined
-  | [ ($sni | length), ([ $sni[].connection ] | unique | length), ($joined | length),
-      ([ $joined[] | $http[.connection] - (.sni | length) ] | unique | length) ]
-  | @tsv')
-if [ "$nlines" -eq 40 ] && [ "$nids" -eq 40 ] && [ "$nmatched" -eq 40 ] && [ "$nsizes" -eq 1 ]; then
-  echo "ok   log: 40 concurrent SNI refusals, each joined to its own CONNECT (IDs and ClientHello sizes agree)"
-else
-  echo "FAIL log: concurrent SNI lines=$nlines distinct IDs=$nids joined=$nmatched size offsets=$nsizes (want 40/40/40/1)"; fails=$((fails+1))
-fi
+}
+# The log is flushed periodically (every 100 ms under run-envoy.sh, every second in the
+# service): retry the log checks until all pass or 4 s have gone by; report the last attempt.
+deadline=$((SECONDS + 4))
+until out="$(logchecks)"; ! grep -q "^FAIL" <<<"$out" || [ "$SECONDS" -ge "$deadline" ]; do sleep 0.1; done
+printf '%s\n' "$out"; fails=$((fails + $(grep -c "^FAIL" <<<"$out")))
 echo "failures: $fails"
 exit "$fails"
