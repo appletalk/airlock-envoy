@@ -68,11 +68,13 @@ done
 shopt -u nullglob
 # The box sockets' directory must belong to root (claude-airlock refuses it otherwise, and
 # rightly: its owner could swap the socket). systemd does not re-own an existing directory.
-d="$(stat -c %U:%G:%a /run/airlock-envoy)"
-[ "$d" = root:root:755 ] || { echo "/run/airlock-envoy is $d, not root:root:755; remove it and rerun" >&2; exit 1; }
+# With the kill switch on since boot, no socket has made it yet: nothing to check.
+if [ -e /run/airlock-envoy ] || [ ! -e /etc/airlock-envoy/stopped ]; then
+  d="$(stat -c %U:%G:%a /run/airlock-envoy)"
+  [ "$d" = root:root:755 ] || { echo "/run/airlock-envoy is $d, not root:root:755; remove it and rerun" >&2; exit 1; }
+fi
 systemctl --no-pager --lines=0 status airlock-envoy.service || true
 echo "==> For a box: airlock egress proxy /run/airlock-envoy/<listener>.sock   (as uid $uid, in the project)"
 echo "    More listeners: /etc/airlock-envoy/site.conf, then airlock-envoy-apply (see --help)."
 echo "    Envoy restarts and updates keep the sockets; only open connections drop."
-echo "    To cut egress: systemctl stop 'airlock-envoy-proxy@*.socket' airlock-envoy"
-echo "    (stopping Envoy alone is undone by the next box connection; boxes need a relaunch after)"
+echo "    To cut egress: airlock-envoy-apply --stop (holds across applies and reboots; --start lifts it)"
