@@ -146,10 +146,19 @@ x rm -rf /run/airlock-envoy
 rc=0; x /repo/install/install-service.sh client >/dev/null 2>&1 || rc=$?
 ck "while it is on: an apply, a systemctl start (as at boot) and install-service.sh (rc=$rc, after a reboot) start nothing" \
    '[ "$rc" = 0 ] && [ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " ")" = "inactive inactive " ] && ! x test -e "$S"'
+# A --start that fails after Envoy is up (here: a directory where the box socket goes)
+# also leaves the switch on.
+x mkdir -p /run/airlock-envoy/anthropic.sock
+ck "a --start that fails after Envoy started keeps the switch on: marker back, Envoy down" \
+   '! x airlock-envoy-apply --start >/dev/null 2>&1 && x test -e /etc/airlock-envoy/stopped && [ "$(x systemctl is-active airlock-envoy)" = inactive ]'
+x rm -rf /run/airlock-envoy
 rc=0; out="$(x airlock-envoy-apply --status 2>&1)" || rc=$?
 ck "--status with the switch on and no socket files: rc=$rc, says so, lists the socket as gone" \
    '[ "$rc" = 0 ] && [[ "$out" == *"Kill switch: ON"* && "$out" == *"anthropic.sock"*"(no socket file)"* ]]'
 x airlock-envoy-apply --start >/dev/null
+p="$(x systemctl show -p MainPID --value airlock-envoy)"
+x airlock-envoy-apply --start >/dev/null
+ck "--start with the switch already off restarts nothing" '[ "$(x systemctl show -p MainPID --value airlock-envoy)" = "$p" ]'
 r="$(tunnel)"
 ck "--start brings it back with the ACL: got '$r'" '[ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw" && ! x test -e /etc/airlock-envoy/stopped'
 # Not the kill switch: a crash. Envoy cannot start; a burst of box connections (more than the
@@ -258,8 +267,10 @@ ck "...and the previous config, site file and running Envoy are back: got '$r'" 
 # A --start that fails (same wrapper) leaves the kill switch on, nothing half started.
 x airlock-envoy-apply --stop >/dev/null
 x sh -c 'printf "%s\n" "nostart @anthropic example.org:443" > /etc/airlock-envoy/site.conf'
+t0=$SECONDS
 ck "a failed --start keeps the kill switch on: marker back, Envoy and every box socket down" \
    '! x airlock-envoy-apply --start >/dev/null 2>&1 && x test -e /etc/airlock-envoy/stopped && [ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket airlock-envoy-proxy@extra.socket | tr "\n" " ")" = "inactive inactive inactive " ]'
+ck "...and it failed fast ($((SECONDS - t0)) s): the socket wait stops when Envoy exits" '[ $((SECONDS - t0)) -lt 8 ]'
 x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
 x mv -f /usr/local/bin/envoy.real /usr/local/bin/envoy
 x airlock-envoy-apply --start >/dev/null
