@@ -56,7 +56,7 @@ for s in /run/airlock-envoy/*.sock; do
 done
 shopt -u nullglob
 # Renders the config (the built-in anthropic listener, plus the site file's), restarts Envoy,
-# and starts or removes the box sockets.
+# and starts or removes the box sockets; with the kill switch on, it starts nothing.
 /usr/local/sbin/airlock-envoy-apply --restart
 # The hand-written config from before site files.
 rm -f /etc/airlock-envoy/tunnel-anthropic.yaml

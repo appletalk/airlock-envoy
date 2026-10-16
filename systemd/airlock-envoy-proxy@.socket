@@ -1,6 +1,8 @@
 [Unit]
 Description=airlock box socket for Envoy listener %i
 Documentation=https://github.com/appletalk/airlock-envoy
+# The kill switch (airlock-envoy-apply --stop): no box socket at boot or by hand.
+ConditionPathExists=!/etc/airlock-envoy/stopped
 
 [Socket]
 # Created by systemd in a root-owned directory, so neither Envoy nor anything running as
