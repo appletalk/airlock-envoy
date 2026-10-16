@@ -11,6 +11,8 @@
 #   airlock-envoy-apply --stop           as root: cut all box egress and keep it cut, across
 #                                        applies and reboots (the kill switch)
 #   airlock-envoy-apply --start          as root: lift it, apply, and start everything
+#   airlock-envoy-apply --status         Envoy, the kill switch and each box socket (any user;
+#                                        as root also whether the site file is applied)
 #
 # The site file names listeners and what each may reach. A listener is a box socket,
 # /run/airlock-envoy/<name>.sock, and a box gets one, so a listener is a whole access profile.
@@ -39,7 +41,7 @@ die() { echo "airlock-envoy-apply: $*" >&2; exit 1; }
 mode=apply yes=0 start=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --check|--list|--render|--stop) mode=${1#--} ;;
+    --check|--list|--render|--stop|--status) mode=${1#--} ;;
     --start) mode=apply start=1 ;;
     --yes) yes=1 ;;
     --restart) restart=1 ;;   # install-service.sh: the unit may have changed; start egress
@@ -143,6 +145,31 @@ if [ -n "$site_arg" ]; then
   # Only the literal /etc path counts as /etc: a path that merely resolves there (a symlink
   # someone else can repoint between this check and the read) is from elsewhere.
   [ "$site_arg" = "$ETC/site.conf" ] || from_elsewhere=1
+fi
+status_units() {  # what systemd and /run say; needs no access to $ETC (nor, as root, D-Bus)
+  local l st acl
+  st="$(systemctl is-active airlock-envoy 2>/dev/null || true)"
+  echo "==> Envoy: ${st:-unknown (systemd not reachable as $(id -un))}"
+  if [ -x "$ETC" ]; then
+    if [ -e "$STOPPED" ]; then echo "==> Kill switch: ON ($STOPPED; airlock-envoy-apply --start lifts it)"
+    else echo "==> Kill switch: off"; fi
+  else echo "==> Kill switch: unknown (run as root)"; fi
+  echo "==> Box sockets:"
+  # The socket units systemd knows, and the socket files there are (a non-root user without
+  # D-Bus sees only the files).
+  while read -r l; do
+    st="$(systemctl is-active "airlock-envoy-proxy@$l.socket" 2>/dev/null || true)"
+    [ -S "/run/airlock-envoy/$l.sock" ] || st="${st:-gone} (no socket file)"
+    acl="$(getfacl -cp "/run/airlock-envoy/$l.sock" 2>/dev/null | sed -n 's/^user:\([^:][^:]*\):rw-$/\1/p' | tr "\n" " ")"
+    printf '    %-36s %-10s %s\n' "/run/airlock-envoy/$l.sock" "${st:-unknown}" "${acl:+for: $acl}"
+  done < <({
+    systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' 2>/dev/null | awk '{ print $1 }' || true
+    for f in /run/airlock-envoy/*.sock; do [ -S "$f" ] && echo "airlock-envoy-proxy@$(basename "$f" .sock).socket"; done
+  } | sed -n 's/^airlock-envoy-proxy@\([a-z][a-z0-9-]*\)\.socket$/\1/p' | sort -u)
+}
+if [ "$mode" = status ]; then
+  status_units   # first, so it shows even if the site file then fails to parse
+  [ -n "$site_arg" ] || { [ -x "$ETC" ] && [ -r "$ETC" ]; } || exit 0
 fi
 if [ -z "$site_arg" ] && [ -d "$ETC" ] && ! [ -x "$ETC" ]; then
   die "cannot read $ETC as $(id -un): run as root, or name a site file"
@@ -409,6 +436,16 @@ EOF
 case "$mode" in
   list) listing; exit 0 ;;
   render) render "$LOG"; exit 0 ;;
+  status)
+    echo "==> Listeners in $site_src (and built in): ${LISTENERS[*]}"
+    if [ -r "$ETC/envoy.yaml" ]; then
+      if [ "$(render "$LOG" | sha256sum)" = "$(sha256sum < "$ETC/envoy.yaml")" ]; then
+        echo "==> Applied: yes (the running config is this site file's)"
+      else
+        echo "==> Applied: NO, the site file differs from the running config (--check shows how)"
+      fi
+    fi
+    exit 0 ;;
 esac
 
 # ---- check and apply ------------------------------------------------------------------------
@@ -524,7 +561,7 @@ done
 declare -A keep=()
 for l in "${LISTENERS[@]}"; do keep[$l]=1; done
 mapfile -t current < <({
-  systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' | awk '{ print $1 }'
+  systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' | awk '{ print $1 }' || true
   ls /etc/systemd/system/sockets.target.wants/ 2>/dev/null
 } | sed -n 's/^airlock-envoy-proxy@\([a-z][a-z0-9-]*\)\.socket$/\1/p' | sort -u)
 for l in "${current[@]}"; do
