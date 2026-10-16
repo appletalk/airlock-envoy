@@ -119,7 +119,9 @@ ck "running install-service.sh again keeps the socket and its ACL" \
    'x /repo/install/install-service.sh client >/dev/null && [ "$(x stat -c %i "$S")" = "$ino" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
 x systemctl restart airlock-envoy-proxy@anthropic.socket; sleep 0.5
 ck "recreating the box socket re-applies the ACL" 'x getfacl -p "$S" | grep -q "^user:client:rw"'
-x airlock-envoy-apply --stop >/dev/null
+# --stop takes no lock: an apply holding it (say, waiting at its prompt) does not delay it.
+x sh -c 'flock /run/airlock-envoy-apply.lock sleep 3 & sleep 0.5; airlock-envoy-apply --stop >/dev/null; echo "rc=$?" > /root/stop.rc; wait'
+ck "--stop works while another apply holds the lock" '[ "$(x cat /root/stop.rc)" = rc=0 ]'
 ck "the kill switch, --stop, cuts egress (no connect, Envoy down)" '! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null && sleep 1 && [ "$(x systemctl is-active airlock-envoy)" != active ]'
 x airlock-envoy-apply >/dev/null
 x systemctl start airlock-envoy-proxy@anthropic.socket airlock-envoy 2>/dev/null || true
@@ -140,6 +142,7 @@ x airlock-envoy-apply >/dev/null
 r="$(tunnel)"
 # Before systemd 255 Envoy is still in its restart loop (activating) and the socket stays up;
 # from 255 both have failed. Either way Envoy is down, and an apply must bring it all back.
+# (Only the 255+ case tells the explicit kill switch from the old inferred one.)
 ck "after a crash (Envoy, box socket: $crashed), an apply recovers: got '$r'" \
    '[[ "$crashed" != "active "* ]] && [ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
 x systemctl stop airlock-envoy-proxy@anthropic.socket
@@ -215,7 +218,16 @@ ck "a config Envoy will not start with: apply fails and says so" '! x airlock-en
 r="$(tunnel "$E" example.com)"
 ck "...and the previous config, site file and running Envoy are back: got '$r'" \
    '[ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ] && [ "$(x sha256sum /etc/airlock-envoy/site.conf)" = "$site" ] && [ "$(x systemctl is-active airlock-envoy)" = active ] && [ "$r" = 200 ] && ! x test -e /run/airlock-envoy/nostart.sock'
+# A --start that fails (same wrapper) leaves the kill switch on, nothing half started.
+x airlock-envoy-apply --stop >/dev/null
+x sh -c 'printf "%s\n" "nostart @anthropic example.org:443" > /etc/airlock-envoy/site.conf'
+ck "a failed --start keeps the kill switch on: marker back, Envoy and every box socket down" \
+   '! x airlock-envoy-apply --start >/dev/null 2>&1 && x test -e /etc/airlock-envoy/stopped && [ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket airlock-envoy-proxy@extra.socket | tr "\n" " ")" = "inactive inactive inactive " ]'
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
 x mv -f /usr/local/bin/envoy.real /usr/local/bin/envoy
+x airlock-envoy-apply --start >/dev/null
+r="$(tunnel "$E" example.com)"
+ck "...and a good --start then brings it all back: got '$r'" '[ "$r" = 200 ] && ! x test -e /etc/airlock-envoy/stopped'
 
 if [ -n "${AIRLOCK_REPO:-}" ]; then
   # claude-airlock's own socket check, extracted from the checkout and run as the client.
