@@ -143,9 +143,12 @@ x airlock-envoy-apply >/dev/null
 x systemctl start airlock-envoy-proxy@anthropic.socket airlock-envoy 2>/dev/null || true
 # As after a reboot with the switch on: no socket was ever made, so no /run/airlock-envoy.
 x rm -rf /run/airlock-envoy
-x /repo/install/install-service.sh client >/dev/null 2>&1; rc=$?
+rc=0; x /repo/install/install-service.sh client >/dev/null 2>&1 || rc=$?
 ck "while it is on: an apply, a systemctl start (as at boot) and install-service.sh (rc=$rc, after a reboot) start nothing" \
    '[ "$rc" = 0 ] && [ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " ")" = "inactive inactive " ] && ! x test -e "$S"'
+rc=0; out="$(x airlock-envoy-apply --status 2>&1)" || rc=$?
+ck "--status with the switch on and no socket files: rc=$rc, says so, lists the socket as gone" \
+   '[ "$rc" = 0 ] && [[ "$out" == *"Kill switch: ON"* && "$out" == *"anthropic.sock"*"(no socket file)"* ]]'
 x airlock-envoy-apply --start >/dev/null
 r="$(tunnel)"
 ck "--start brings it back with the ACL: got '$r'" '[ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw" && ! x test -e /etc/airlock-envoy/stopped'
