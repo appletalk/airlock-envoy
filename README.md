@@ -146,7 +146,10 @@ Keep the site file in version control. Two ways to land it:
   deploying, so a bad file never lands, and `airlock-envoy-apply` after it changes.
 - **A file kept elsewhere** (a dotfiles repo): `sudo airlock-envoy-apply ~/dotfiles/site.conf`
   shows the change and asks before installing it as `/etc/airlock-envoy/site.conf`, since
-  anything running as you can edit that file. `--yes` skips the question.
+  anything running as you can edit that file. `--yes` skips the question. Do not symlink it
+  into place instead: `/etc/airlock-envoy/site.conf` is applied without asking, so apply
+  refuses it unless it is a regular file owned and writable only by root (and so is the
+  directory).
 
 The built-in `anthropic` list lives in `airlock-envoy-apply`, so updating it is this repo's job:
 rerun `install-service.sh` from an updated clean clone.
