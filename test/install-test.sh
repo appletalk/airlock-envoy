@@ -125,9 +125,11 @@ ck "--stop works while another apply holds the lock" '[ "$(x cat /root/stop.rc)"
 ck "the kill switch, --stop, cuts egress (no connect, Envoy down)" '! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null && sleep 1 && [ "$(x systemctl is-active airlock-envoy)" != active ]'
 x airlock-envoy-apply >/dev/null
 x systemctl start airlock-envoy-proxy@anthropic.socket airlock-envoy 2>/dev/null || true
-x /repo/install/install-service.sh client >/dev/null 2>&1
-ck "while it is on: an apply, a systemctl start (as at boot) and install-service.sh start nothing" \
-   '[ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " ")" = "inactive inactive " ] && ! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null'
+# As after a reboot with the switch on: no socket was ever made, so no /run/airlock-envoy.
+x rm -rf /run/airlock-envoy
+x /repo/install/install-service.sh client >/dev/null 2>&1; rc=$?
+ck "while it is on: an apply, a systemctl start (as at boot) and install-service.sh (rc=$rc, after a reboot) start nothing" \
+   '[ "$rc" = 0 ] && [ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " ")" = "inactive inactive " ] && ! x test -e "$S"'
 x airlock-envoy-apply --start >/dev/null
 r="$(tunnel)"
 ck "--start brings it back with the ACL: got '$r'" '[ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw" && ! x test -e /etc/airlock-envoy/stopped'
