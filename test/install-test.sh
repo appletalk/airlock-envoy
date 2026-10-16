@@ -178,6 +178,12 @@ ck "a group-writable site.conf is refused" '! x airlock-envoy-apply >/dev/null 2
 x chmod 0640 /etc/airlock-envoy/site.conf
 ck "a site file from elsewhere needs a confirmation (no terminal, no --yes: refused)" \
    '! x airlock-envoy-apply /home/client/site.conf >/dev/null 2>&1 && ! x grep -q example.org /etc/airlock-envoy/site.conf'
+# A named path that only resolves to /etc (a symlink its owner could repoint) is from elsewhere.
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443 example.net:443" > /etc/airlock-envoy/site.conf'
+x runuser -u client -- ln -sf /etc/airlock-envoy/site.conf /home/client/link
+ck "a symlink to the /etc site file, named, still needs the confirmation" \
+   '! x airlock-envoy-apply /home/client/link >/dev/null 2>&1 && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ]'
+x cp -p /root/site.conf.keep /etc/airlock-envoy/site.conf
 x airlock-envoy-apply --yes /home/client/site.conf >/dev/null
 r="$(tunnel "$E" example.org example.com)"
 ck "with --yes it is installed as site.conf (root:airlock-envoy 0640) and applied: got '$r'" \
