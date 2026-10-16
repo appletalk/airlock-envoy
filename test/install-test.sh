@@ -149,22 +149,26 @@ ck "while it is on: an apply, a systemctl start (as at boot) and install-service
 x airlock-envoy-apply --start >/dev/null
 r="$(tunnel)"
 ck "--start brings it back with the ACL: got '$r'" '[ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw" && ! x test -e /etc/airlock-envoy/stopped'
-# Not the kill switch: a crash. Envoy cannot start, a box connects, and its socket fails.
+# Not the kill switch: a crash. Envoy cannot start; a burst of box connections (more than the
+# socket's trigger limit, 20 in 2 s) is closed, and the box socket stays up: the relay only
+# Wants= Envoy. Once Envoy is back the same socket works, so running boxes need no relaunch.
+ino="$(x stat -c %i "$S")"
 x mv /etc/airlock-envoy/envoy.yaml /etc/airlock-envoy/envoy.yaml.away
 x systemctl restart airlock-envoy 2>/dev/null || true
-x runuser -u client -- sh -c 'for _ in 1 2 3 4 5; do socat -u /dev/null UNIX-CONNECT:"$0" 2>/dev/null; done; sleep 0.3' "$S" || true
-# The socket's trigger limit (20 in 2 s) outlasts reset-failed: a recovery inside that window
-# trips it again on the first connection. A real recovery comes later; wait the window out.
-sleep 2
-crashed="$(x systemctl is-failed airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " " || true)"
+x runuser -u client -- sh -c 'for _ in $(seq 25); do socat -u /dev/null UNIX-CONNECT:"$0" 2>/dev/null; done' "$S" || true
+r="$(tunnel)"
+down="$(x systemctl is-active airlock-envoy airlock-envoy-proxy@anthropic.socket | tr "\n" " " || true)"
+ck "Envoy down (Envoy, box socket: $down): box connections are closed ($r), the box socket stays up" \
+   '[[ "$down" != "active "* ]] && [[ "$down" == *" active " ]] && [ "$r" = "000 000" ]'
 x mv /etc/airlock-envoy/envoy.yaml.away /etc/airlock-envoy/envoy.yaml
 x airlock-envoy-apply >/dev/null
 r="$(tunnel)"
-# Before systemd 255 Envoy is still in its restart loop (activating) and the socket stays up;
-# from 255 both have failed. Either way Envoy is down, and an apply must bring it all back.
-# (Only the 255+ case tells the explicit kill switch from the old inferred one.)
-ck "after a crash (Envoy, box socket: $crashed), an apply recovers: got '$r'" \
-   '[[ "$crashed" != "active "* ]] && [ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
+ck "...an apply brings Envoy back and the same box socket works (no relaunch): got '$r'" \
+   '[ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
+# Envoy and the relay stopped (not the kill switch): a box connection starts both.
+x systemctl stop airlock-envoy airlock-envoy-proxy@anthropic.service
+r="$(tunnel)"
+ck "a box connection starts a stopped Envoy through the relay: got '$r'" '[ "$r" = "200 403" ] && [ "$(x systemctl is-active airlock-envoy)" = active ]'
 x systemctl stop airlock-envoy-proxy@anthropic.socket
 x airlock-envoy-apply >/dev/null
 r="$(tunnel)"

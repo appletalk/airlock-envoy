@@ -64,8 +64,12 @@ sudo install/install-service.sh "$USER"       # system account, units, airlock-e
   socket in `/run/airlock-envoy-internal/` (0700). Only root can rename anything where the box
   socket lives, so neither Envoy nor anything running as you can swap it for something else
   (claude-airlock requires exactly that, and its own check accepts the socket; the install
-  test runs it). The box socket also outlives Envoy: restarts and updates drop open
-  connections, never the socket a running box holds.
+  test runs it). The box socket also outlives Envoy: restarts, updates and crashes drop open
+  connections, never the socket a running box holds. The relay only `Wants=` Envoy and
+  connects to it afresh for each box connection, so while Envoy is down box connections are
+  closed, and once it is back the same socket works again, with no relaunch (tested with a
+  burst of connections over systemd's socket trigger limit while Envoy is down). A box
+  connection to an idle socket starts the relay, and the relay starts Envoy if it is stopped.
 - **Cutting egress (the kill switch):** `sudo airlock-envoy-apply --stop` stops Envoy and every
   box socket and writes `/etc/airlock-envoy/stopped`; while that exists the units do not start
   (not at boot, not by a box connection, not by `systemctl start`), and an apply or
@@ -77,9 +81,9 @@ sudo install/install-service.sh "$USER"       # system account, units, airlock-e
   (read-only system, no home, private /tmp and devices, a syscall allowlist, no core dumps,
   no swap; the relay also has no network at all). Envoy's allocator needs `mincore`, the one
   syscall added to `@system-service`.
-- The relay restarts with Envoy and has no start-rate limit: with systemd's default, a few
-  Envoy restarts in a row failed the relay and with it the box socket, leaving running boxes a
-  dead socket (tested: eight restarts in a row keep the socket working).
+- The relay has no start-rate limit, so however often it stops it is started again by the next
+  box connection (tested: eight Envoy restarts in a row with a relay running keep the socket
+  working).
 
 What it sets up:
 
