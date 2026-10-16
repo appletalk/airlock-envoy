@@ -28,6 +28,11 @@ uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
 [ "$(id -u airlock-envoy)" -lt "${uid_min:-1000}" ] \
   || { echo "airlock-envoy exists as a login account (uid $(id -u airlock-envoy)); remove it or rename it" >&2; exit 1; }
 
+# Check the site file, if there is one, with this repo's airlock-envoy-apply before anything
+# else is installed: a file it rejects then leaves the running install as it was.
+"$repo/install/airlock-envoy-apply" --check >/dev/null \
+  || { echo "the site file was rejected (above); the installed service is unchanged" >&2; exit 1; }
+
 install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy
 install -m 0755 -o root -g root "$repo/install/airlock-envoy-apply" /usr/local/sbin/airlock-envoy-apply.new
 mv -f /usr/local/sbin/airlock-envoy-apply.new /usr/local/sbin/airlock-envoy-apply

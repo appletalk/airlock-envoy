@@ -68,6 +68,15 @@ if [ -n "${OLD_REPO:-}" ]; then
   r="$(tunnel)"
   ck "the earlier install works: got '$r'" '[ "$r" = "200 403" ]'
   old_ino="$(x stat -c %i "$S")"
+  # A site file the new version rejects: the upgrade stops before changing anything.
+  x sh -c 'echo "bad Example.com:443" > /etc/airlock-envoy/site.conf && chmod 0640 /etc/airlock-envoy/site.conf'
+  unit="$(x sha256sum /etc/systemd/system/airlock-envoy.service)"
+  ck "an upgrade with a rejected site file fails and leaves the earlier install as it was" \
+     '! x /repo/install/install-service.sh client >/dev/null 2>&1 && [ "$(x sha256sum /etc/systemd/system/airlock-envoy.service)" = "$unit" ] && ! x test -e /usr/local/sbin/airlock-envoy-apply'
+  x systemctl restart airlock-envoy
+  r="$(tunnel)"
+  ck "...and it still works after an Envoy restart: got '$r'" '[ "$r" = "200 403" ]'
+  x rm /etc/airlock-envoy/site.conf
 fi
 echo "== $distro: install-service.sh client"
 x /repo/install/install-service.sh client
@@ -85,6 +94,10 @@ ck "envoy's own dir airlock-envoy 0700" '[ "$(x stat -c %U:%a /run/airlock-envoy
 ck "client cannot reach envoy's own socket" '! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:/run/airlock-envoy-internal/anthropic.sock 2>/dev/null'
 ck "airlock-envoy is a system account (uid < 1000)" '[ "$(x id -u airlock-envoy)" -lt 1000 ]'
 ck "config and applied list root:airlock-envoy 0640" '[ "$(x stat -c %U:%G:%a /etc/airlock-envoy/envoy.yaml /etc/airlock-envoy/allowed | tr "\n" " ")" = "root:airlock-envoy:640 root:airlock-envoy:640 " ]'
+x mv /etc/airlock-envoy/envoy.yaml /etc/airlock-envoy/envoy.yaml.away
+ck "Envoy fails to start without its config (the socket wait does not pass on nothing)" '! x systemctl restart airlock-envoy 2>/dev/null'
+x mv /etc/airlock-envoy/envoy.yaml.away /etc/airlock-envoy/envoy.yaml
+x systemctl reset-failed airlock-envoy; x systemctl restart airlock-envoy
 ck "airlock-envoy-apply root 0755" '[ "$(x stat -c %U:%G:%a /usr/local/sbin/airlock-envoy-apply)" = root:root:755 ]'
 ck "access log not readable by client" '! x runuser -u client -- cat /var/log/airlock-envoy/access.jsonl >/dev/null 2>&1'
 r="$(tunnel)"
