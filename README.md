@@ -69,7 +69,9 @@ sudo install/install-service.sh "$USER"       # system account, units, airlock-e
 - **Cutting egress:** `systemctl stop 'airlock-envoy-proxy@*.socket' airlock-envoy`. Stopping
   only `airlock-envoy` does not hold: the next box connection starts it again (that is how it
   comes up at boot and recovers). Starting the sockets again makes new socket files, so boxes
-  need a relaunch afterwards.
+  need a relaunch afterwards. `airlock-envoy-apply` (and so a deploy that applies a site file)
+  leaves the switch in place: it updates the config without starting anything.
+  `install-service.sh` starts egress again.
 - Envoy and the relay run as `airlock-envoy` with no capabilities and systemd's sandboxing
   (read-only system, no home, private /tmp and devices, a syscall allowlist, no core dumps,
   no swap; the relay also has no network at all). Envoy's allocator needs `mincore`, the one
@@ -130,7 +132,8 @@ infra  10.0.0.10:6443
 
 `sudo airlock-envoy-apply` renders the config, checks it with `envoy --mode validate` (as the
 service account), prints the change in allowed destinations against the last apply, swaps the
-config in atomically and restarts Envoy (only if the config changed). Then it starts a socket
+config in atomically and restarts Envoy (only if the config changed, or Envoy is down while box
+sockets are up; with the kill switch on, nothing is started). Then it starts a socket
 for each new listener and removes the socket of each listener that is gone, so a box set to it
 no longer launches. If Envoy does not start with the new config, the previous one goes back.
 `--check` does all the checking and shows the change without applying; `--list` and

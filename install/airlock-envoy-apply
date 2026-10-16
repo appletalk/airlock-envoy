@@ -424,12 +424,23 @@ install -d -m 0750 -o root -g "$grp" "$ETC"
 render "$LOG" > "$work/envoy.yaml"
 { echo "# listener destination, as last applied by airlock-envoy-apply"; cat "$work/new"; } > "$work/allowed"
 
+# The kill switch (README): Envoy and every box socket stopped. An apply then updates the
+# config and which sockets come up at boot, but starts nothing; install-service.sh does.
+held=0
+if [ "$restart" = 0 ] && [ -r "$ETC/allowed" ] && ! systemctl is-active --quiet airlock-envoy \
+   && ! systemctl list-units --state=active --plain --no-legend 'airlock-envoy-proxy@*.socket' | grep -q .; then
+  held=1
+fi
+
 changed=1
 same() { [ "$(sha256sum < "$1")" = "$(sha256sum < "$2")" ]; }   # no cmp on minimal systems
 if [ -f "$ETC/envoy.yaml" ] && same "$work/envoy.yaml" "$ETC/envoy.yaml"; then changed=0; fi
 [ -f "$ETC/envoy.yaml" ] && cp -p "$ETC/envoy.yaml" "$work/envoy.yaml.prev"
 inst "$work/envoy.yaml" "$ETC/envoy.yaml"
-if [ "$changed" = 1 ] || [ "$restart" = 1 ] || ! systemctl is-active --quiet airlock-envoy; then
+if [ "$held" = 1 ]; then
+  echo "==> Egress is stopped (Envoy and every box socket): config updated, nothing started"
+  echo "    To resume: systemctl start airlock-envoy-proxy@<listener>.socket ... (or rerun install-service.sh)"
+elif [ "$changed" = 1 ] || [ "$restart" = 1 ] || ! systemctl is-active --quiet airlock-envoy; then
   echo "==> Restarting airlock-envoy (open tunnels drop; box sockets stay)"
   # A deliberate restart: clear systemd's start-rate count, which a few applies in a row
   # would otherwise exhaust, leaving Envoy down and the rollback below unable to start it.
@@ -451,7 +462,7 @@ if [ "$from_elsewhere" = 1 ]; then printf '%s\n' "$site_text" > "$work/site.conf
 # A box socket per listener; the client's ACL comes from the unit's drop-in.
 for l in "${LISTENERS[@]}"; do
   systemctl enable --quiet "airlock-envoy-proxy@$l.socket"
-  systemctl start "airlock-envoy-proxy@$l.socket"
+  [ "$held" = 1 ] || systemctl start "airlock-envoy-proxy@$l.socket"
 done
 # Listeners no longer in the site file: their sockets go, so a box set to one fails to launch.
 declare -A keep=()
