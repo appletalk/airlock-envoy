@@ -33,7 +33,7 @@ export LC_ALL=C
 ETC=/etc/airlock-envoy
 ENVOY=/usr/local/bin/envoy
 LOG=/var/log/airlock-envoy/access.jsonl
-BUILTIN='anthropic api.anthropic.com:443 platform.claude.com:443 claude.ai:443'
+BUILTIN='anthropic api.anthropic.com:443 platform.claude.com:443'
 PER_LISTENER=128   # connections from boxes at once, per listener (so per profile)
 
 die() { echo "airlock-envoy-apply: $*" >&2; exit 1; }

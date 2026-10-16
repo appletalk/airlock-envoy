@@ -182,7 +182,7 @@ rerun `install-service.sh` from an updated clean clone.
 The config `airlock-envoy-apply` renders (`--render` prints it):
 
 1. The HTTP listener on each socket accepts `CONNECT <host>:<port>` only for an exact entry
-   of its own list (for `anthropic`: `api.anthropic.com`, `platform.claude.com`, `claude.ai`, on
+   of its own list (for `anthropic`: `api.anthropic.com` and `platform.claude.com`, on
    443). Any other host, port, IP address or spelling, another listener's entries, and any
    other request are refused: 403 from a deny route, or a 4xx from the HTTP parser for a
    malformed one (`OPTIONS *` gets 404).
@@ -266,8 +266,8 @@ its own run.
 
 Claude Code also tried `raw.githubusercontent.com` (release notes), `downloads.claude.ai`
 (update checks) and `github.com` (plugin marketplace). All were refused and logged, and nothing
-broke. `claude.ai` was never used: the browser half of `/login` runs on the host, and the code
-exchange goes to `platform.claude.com`.
+broke. `claude.ai` was never used, so it is not in the allowlist: the browser half of `/login`
+runs on the host, and the code exchange goes to `platform.claude.com`.
 
 ## Running the spike
 

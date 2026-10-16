@@ -36,12 +36,12 @@ echo "uid $(id -u); interfaces: $(ls /sys/class/net | tr "\n" " ")"
 # Allowed: the proxy answers 200 and TLS completes (the HTTP status is the site'"'"'s own).
 check "api.anthropic.com:443"          "proxy=200 http=[1-5]* exit=0" https://api.anthropic.com/
 check "platform.claude.com:443"        "proxy=200 http=[1-5]* exit=0" https://platform.claude.com/
-check "claude.ai:443"                  "proxy=200 http=[1-5]* exit=0" https://claude.ai/
 r="$(curl -s -o /dev/null --max-time 10 -w "http=%{http_code}" https://api.anthropic.com/) exit=$?"
 if [[ "$r" == http=[1-5]??" exit=0" ]]; then echo "ok   HTTPS_PROXY from the environment: $r"
 else echo "FAIL HTTPS_PROXY from the environment: $r"; fails=$((fails+1)); fi
 # Refused at CONNECT: the proxy itself answers 403 (curl exit 56).
 check "example.com:443"                "proxy=403 http=000 exit=56" https://example.com/
+check "claude.ai:443 (not needed, so not listed)" "proxy=403 http=000 exit=56" https://claude.ai/
 check "api.anthropic.com:8443"         "proxy=403 http=000 exit=56" https://api.anthropic.com:8443/
 check "IP literal 1.1.1.1:443"         "proxy=403 http=000 exit=56" https://1.1.1.1/
 check "[::1]:443"                      "proxy=403 http=000 exit=56" "https://[::1]/"
