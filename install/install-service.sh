@@ -37,7 +37,8 @@ install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy
 install -m 0755 -o root -g root "$repo/install/airlock-envoy-apply" /usr/local/sbin/airlock-envoy-apply.new
 mv -f /usr/local/sbin/airlock-envoy-apply.new /usr/local/sbin/airlock-envoy-apply
 
-for u in airlock-envoy.service airlock-envoy-proxy@.socket airlock-envoy-proxy@.service; do
+# airlock-envoy-web is enabled and started by airlock-envoy-apply, only while a listener lists web.
+for u in airlock-envoy.service airlock-envoy-web.service airlock-envoy-proxy@.socket airlock-envoy-proxy@.service; do
   install -m 0644 "$repo/systemd/$u" "/etc/systemd/system/$u"
 done
 # The client's ACL, re-applied by systemd whenever it (re)creates a box socket.

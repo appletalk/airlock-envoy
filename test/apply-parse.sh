@@ -68,6 +68,52 @@ lists "highest port, IPv4 edges"       'a example.com:65535\na 1.0.0.0:1\na 223.
   'a example.com:65535 1.0.0.0:1 223.255.255.255:443\n'
 lists "empty site file: built-in only" '' ''
 
+# web and what counts as internal for it.
+refuses "web as a listener name"       "is a destination"      'web example.com:443\n'
+refuses "web with a port"              "bad destination"       'a web:443\n'
+refuses "internal-name with nothing"   "internal-name lists nothing" 'internal-name\n'
+refuses "internal-net with nothing"    "internal-net lists nothing"  'internal-net\n'
+refuses "internal name with a port"    "bad internal name"     'internal-name corp.example:443\n'
+refuses "internal name with a leading dot" "bad internal name" 'internal-name .corp.example\n'
+refuses "internal name, numeric label" "bad internal name"     'internal-name corp.123\n'
+refuses "CIDR outside internal-net"    "only lowercase"        'a 10.0.0.0/8\n'
+refuses "internal-net without a prefix" "bad internal network" 'internal-net 10.0.0.0\n'
+refuses "internal-net IPv4 /33"        "bad internal network"  'internal-net 10.0.0.0/33\n'
+refuses "internal-net IPv4 octet 256"  "bad internal network"  'internal-net 10.0.0.256/32\n'
+refuses "internal-net prefix leading zero" "bad internal network" 'internal-net 10.0.0.0/08\n'
+refuses "internal-net IPv6 /129"       "bad internal network"  'internal-net fd00::/129\n'
+refuses "internal-net IPv6 two ::"     "bad internal network"  'internal-net fd00::1::/64\n'
+refuses "internal-net IPv6 nine groups" "bad internal network" 'internal-net 1:2:3:4:5:6:7:8:9/64\n'
+refuses "internal-net IPv6 seven groups, no ::" "bad internal network" 'internal-net 1:2:3:4:5:6:7/64\n'
+refuses "internal-net IPv6 five hex digits" "bad internal network" 'internal-net fd000::/16\n'
+refuses "internal-net IPv6 leading single colon" "bad internal network" 'internal-net :fd00::/16\n'
+refuses "internal-net IPv6 :::"        "bad internal network"  'internal-net fd00:::1/64\n'
+refuses "internal-net IPv6 uppercase"  "only lowercase"        'internal-net FD00::/8\n'
+refuses "internal-net IPv6 zone"       "only lowercase"        'internal-net fe80::1%eth0/64\n'
+refuses "internal-net a host name"     "bad internal network"  'internal-net example.com/32\n'
+lists "web expands through an include, after the exact entries" \
+  'a web\nb example.com:443\nb web' 'a web\nb @a example.com:443\n'
+lists "internal lines are listed while some listener has web" \
+  'a web\ninternal-name corp.example\ninternal-name lab.example.net\ninternal-net 198.51.100.0/24\ninternal-net 2001:db8:1::/48' \
+  'internal-name corp.example lab.example.net corp.example\ninternal-net 198.51.100.0/24 2001:db8:1::/48\na web\n'
+lists "internal lines without any web listener change nothing" 'a example.com:443' \
+  'internal-name corp.example\ninternal-net 10.0.0.0/8\na example.com:443\n'
+lists "IPv6 CIDR forms" \
+  'a web\ninternal-net ::/0\ninternal-net fd00:99::/32\ninternal-net 2001:db8:1:2:3:4:5:6/128\ninternal-net ::ffff:0:0/96\ninternal-net 1::/16\ninternal-net 0.0.0.0/0' \
+  'a web\ninternal-net ::/0 fd00:99::/32 2001:db8:1:2:3:4:5:6/128 ::ffff:0:0/96 1::/16 0.0.0.0/0\n'
+
+# The web drop-in: the site's networks denied, each resolver allowed by exact address.
+printf 'a web\ninternal-net 198.51.100.0/24 2001:db8:1::/48\n' > "$work/site"
+printf 'nameserver 127.0.0.53\nnameserver fe80::1%%eth0\noptions edns0\n' > "$work/resolv"
+want='[Service]
+IPAddressDeny=198.51.100.0/24
+IPAddressDeny=2001:db8:1::/48
+IPAddressAllow=127.0.0.53/32
+IPAddressAllow=fe80::1/128'
+got="$(RESOLV_CONF="$work/resolv" "$apply" --render-web-dropin "$work/site" | grep -v '^#')"
+if [ "$got" = "$want" ]; then echo "ok   web drop-in: site networks denied, resolvers allowed exactly"
+else echo "FAIL web drop-in, got:"; echo "$got"; fails=$((fails+1)); fi
+
 # A file shaped like a real site renders to a config Envoy accepts.
 printf 'x @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443\ny example.org:8443 x-y.example.com:443\n' > "$work/site"
 "$apply" --render "$work/site" > "$work/envoy.yaml"
@@ -77,6 +123,12 @@ if envoy="$(command -v envoy)"; then
   if "$envoy" --mode validate -c "$work/validate.yaml" >/dev/null 2>&1; then
     echo "ok   rendered config validates (envoy --mode validate)"
   else echo "FAIL rendered config does not validate"; fails=$((fails+1)); fi
+  printf 'w @anthropic web example.org:8443\ninternal-name corp.example\n' > "$work/site"
+  "$apply" --render-web "$work/site" | sed 's#path: /var/log/airlock-envoy/web.jsonl#path: /dev/null#' > "$work/validate-web.yaml"
+  "$apply" --render "$work/site" | sed 's#path: /var/log/airlock-envoy/access.jsonl#path: /dev/null#' > "$work/validate.yaml"
+  if "$envoy" --mode validate -c "$work/validate-web.yaml" >/dev/null 2>&1 && "$envoy" --mode validate -c "$work/validate.yaml" >/dev/null 2>&1; then
+    echo "ok   rendered web configs validate (both Envoys)"
+  else echo "FAIL rendered web configs do not validate"; fails=$((fails+1)); fi
 else
   echo "skip rendered config validation: no envoy on PATH"
 fi
