@@ -102,7 +102,7 @@ fi
 # ---- parse ----------------------------------------------------------------------------------
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
-declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=()
+declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
 PRESETS="any git git-read github-api github-issues victoria-logs victoria-metrics"
 
@@ -159,15 +159,20 @@ add_dest() {
 }
 
 parse() {  # parse <source label>, text on stdin
-  local src=$1 n=0 line name w d charset_ok
+  local src=$1 n=0 line name w d charset_ok chk
   local -a words
   while IFS= read -r line || [ -n "$line" ]; do
     n=$((n + 1))
     line=${line%%#*}
     charset_ok=1
-    [[ "$line" =~ ^[a-z0-9.:@/[:blank:]-]*$ ]] || charset_ok=0
+    # Project IDs (an http line's "projects" value) are mixed case; parse_http checks them.
+    chk=$line
+    if [[ "$line" =~ ^[[:blank:]]*http[[:blank:]] ]]; then
+      while [[ "$chk" =~ (^|[[:blank:]])projects[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
+    fi
+    [[ "$chk" =~ ^[a-z0-9.:@/[:blank:]-]*$ ]] || charset_ok=0
     # A slash only in http:// destinations and in internal-net CIDRs.
-    if [[ "${line//http:\/\//}" == */* ]] && ! [[ "$line" =~ ^[[:blank:]]*internal-net[[:blank:]] ]]; then charset_ok=0; fi
+    if [[ "${chk//http:\/\//}" == */* ]] && ! [[ "$line" =~ ^[[:blank:]]*internal-net[[:blank:]] ]]; then charset_ok=0; fi
     [ "$charset_ok" = 1 ] \
       || die "$src:$n: only lowercase listener names, host:port, IPv4:port, http://host, @listener and web (and CIDRs on internal-net lines) may appear"
     read -ra words <<< "$line"
@@ -220,41 +225,63 @@ parse() {  # parse <source label>, text on stdin
     done
   done
   # One mode per host and listener: a host reached by plain HTTP (rules, credential) must not
-  # also be a CONNECT entry, or a box could tunnel around the rules.
-  local l h
+  # also be a CONNECT entry, or a box could tunnel around the rules. And one definition of a
+  # host per listener: its requests can only go one way.
+  local l h k seen
   for l in "${LISTENERS[@]}"; do
-    for h in ${HDESTS[$l]:-}; do
+    seen=" "
+    for k in ${HDESTS[$l]:-}; do
+      h=${HTTP_HOST[$k]}
+      case "$seen" in *" $h "*) die "$src: listener $l lists $h twice (as http://$k and another); use one" ;; esac
+      seen="$seen$h "
       for d in ${DESTS[$l]}; do
-        [ "${d%:*}" != "$h" ] || die "$src: listener $l lists $h both as http://$h and as $d; use one"
+        [ "${d%:*}" != "$h" ] || die "$src: listener $l lists $h both as http://$k and as $d; use one"
       done
     done
   done
 }
 
-# http <host>[:port] rules <preset> [credential <name>]: how the box reaches a host by plain
-# HTTP. Envoy answers the box, checks method and path against the preset, adds the credential,
-# and is the TLS client to the host (its certificate checked, Host and SNI fixed).
+# http <host>[:port][@variant] rules <preset> [credential <name>] [projects <id>[,<id>...]]:
+# how the box reaches a host by plain HTTP. Envoy answers the box, checks method and path
+# against the preset, adds the credential, and is the TLS client to the host (its certificate
+# checked, Host and SNI fixed). A variant is another definition of the same host (its own
+# rules and credential, e.g. a second identity), listed as http://<host>@<variant>; a listener
+# uses one definition per host. projects (GitHub presets only) lets Projects v2 item writes
+# through for those project node IDs and no others.
 parse_http() {  # parse_http <where> <words...>
-  local where=$1 hp host port rules="" cred=""; shift
-  [ $# -ge 3 ] || die "$where: want: http <host>[:port] rules <preset> [credential <name>]"
+  local where=$1 hp host port variant="" k rules="" cred="" projects="" id; shift
+  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [projects <id>,...]"
   hp=$1; shift
+  if [[ "$hp" == *@* ]]; then
+    variant=${hp#*@} hp=${hp%%@*}
+    [[ "$variant" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die "$where: bad variant '@$variant' (a-z, 0-9 and -, starting with a letter, up to 32)"
+  fi
   host=${hp%:*}; port=443; [[ "$hp" == *:* ]] && port=${hp##*:}
   if ! valid_dest "$host:$port" || [[ "$host" =~ ^[0-9.]+$ ]]; then
     die "$where: bad http host '$hp' (want a host name, optionally :port)"
   fi
-  [ -z "${HTTP_RULES[$host]+x}" ] || die "$where: http $host is defined twice"
+  k=$host${variant:+@$variant}
+  [ -z "${HTTP_RULES[$k]+x}" ] || die "$where: http $k is defined twice"
   while [ $# -gt 0 ]; do
     case "$1" in
       rules) [ $# -ge 2 ] || die "$where: rules needs a preset"; rules=$2; shift 2 ;;
       credential) [ $# -ge 2 ] || die "$where: credential needs a name"; cred=$2; shift 2 ;;
-      *) die "$where: unknown http option '$1' (rules, credential)" ;;
+      projects) [ $# -ge 2 ] || die "$where: projects needs project IDs"
+        for id in ${2//,/ }; do
+          [[ "$id" =~ ^PVT_[A-Za-z0-9_-]{1,64}$ ]] || die "$where: bad project ID '$id' (want a Projects v2 node ID, PVT_...)"
+          case " $projects " in *" $id "*) ;; *) projects="${projects:+$projects }$id" ;; esac
+        done
+        shift 2 ;;
+      *) die "$where: unknown http option '$1' (rules, credential, projects)" ;;
     esac
   done
   case " $PRESETS " in *" $rules "*) ;; *) die "$where: unknown rules '$rules' (one of: $PRESETS)" ;; esac
   [ -z "$cred" ] || [[ "$cred" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad credential name '$cred'"
-  HTTP_RULES[$host]=$rules HTTP_CRED[$host]=$cred HTTP_PORT[$host]=$port
-  HTTP_HOSTS+=("$host")
+  case "$rules" in github-api|github-issues) ;; *) [ -z "$projects" ] || die "$where: projects only with the github-api or github-issues rules" ;; esac
+  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects
+  HTTP_HOSTS+=("$k")
 }
+hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
 
 add_hdest() {
   case " ${HDESTS[$1]:-} " in *" $2 "*) return ;; esac
@@ -323,7 +350,8 @@ listing() {
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
     for d in ${HDESTS[$l]:-}; do
-      printf '%s http://%s:%s rules %s%s\n' "$l" "$d" "${HTTP_PORT[$d]}" "${HTTP_RULES[$d]}" "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}"
+      printf '%s http://%s:%s%s rules %s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "${d#"${HTTP_HOST[$d]}"}" "${HTTP_RULES[$d]}" \
+        "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}"
     done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
   done
@@ -343,7 +371,7 @@ render_clients() {
   echo "# airlock-envoy: the plain-HTTP hosts of listener $1, for the box's clients: http://<host>/"
   echo "# through the proxy. No credentials here. Fields: host upstream-port rules credential"
   for d in ${HDESTS[$1]:-}; do
-    printf '%s %s %s %s\n' "$d" "${HTTP_PORT[$d]}" "${HTTP_RULES[$d]}" "$([ -n "${HTTP_CRED[$d]}" ] && echo yes || echo no)"
+    printf '%s %s %s %s\n' "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "${HTTP_RULES[$d]}" "$([ -n "${HTTP_CRED[$d]}" ] && echo yes || echo no)"
   done
 }
 
@@ -458,19 +486,20 @@ creds_used() {  # every credential some listener's http destinations use, once e
 # allowed one goes to the host with Host fixed (so another site on the same edge is out of
 # reach) and, if the host has one, its credential added (replacing anything the box sent).
 http_vhost() {
-  local h=$1 rules=${HTTP_RULES[$1]} cred=${HTTP_CRED[$1]} name methods kind pat flag timeout maxdur
+  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} cred=${HTTP_CRED[$1]} projects=${HTTP_PROJECTS[$1]} name methods kind pat flag timeout maxdur
+  id=$(hid "$1")
   # A clone or push can take long (the idle timeout still applies); anything else gets a cap
   # on the whole stream, so a slowly sent body can't hold a connection for good.
   timeout=120s maxdur=", max_stream_duration: { max_stream_duration: 300s }"
   case "$rules" in git|git-read) timeout=0s maxdur= ;; esac
   cat <<EOF
-            - name: "http-$h"
+            - name: "http-$id"
               domains: ["$h", "$h:80"]
               routes:
 EOF
   while read -r name methods kind pat flag; do
     [ -n "$name" ] || continue
-    echo "              - name: \"$h-$name\""
+    echo "              - name: \"$id-$name\""
     echo "                match:"
     case "$kind" in
       prefix) echo "                  prefix: \"$pat\"" ;;
@@ -482,9 +511,9 @@ EOF
       printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules\\n" } }\n' "$rules"
       continue
     fi
-    echo "                route: { cluster: \"http-$h\", host_rewrite_literal: \"$h\", timeout: $timeout, idle_timeout: 300s$maxdur }"
-    # The GraphQL check reads the preset's allowlist from the route's metadata.
-    [ "${flag:-}" != lua ] || echo "                metadata: { filter_metadata: { github-graphql: { rules: \"$rules\" } } }"
+    echo "                route: { cluster: \"http-$id\", host_rewrite_literal: \"$h\", timeout: $timeout, idle_timeout: 300s$maxdur }"
+    # The GraphQL check reads the preset's allowlist (and any projects) from the route's metadata.
+    [ "${flag:-}" != lua ] || echo "                metadata: { filter_metadata: { github-graphql: { rules: \"$rules\", projects: \"$projects\" } } }"
     if [ -n "$cred" ] || [ "${flag:-}" = lua ]; then
       echo "                typed_per_filter_config:"
       if [ "${flag:-}" = lua ]; then graphql_route_filters; fi
@@ -492,7 +521,7 @@ EOF
     fi
   done < <(preset_rules "$rules")
   cat <<EOF
-              - name: "$h-refused"
+              - name: "$id-refused"
                 match: { prefix: "/" }
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the $rules rules\\n" } }
 EOF
@@ -571,29 +600,30 @@ EOF
 # One upstream per plain-HTTP host in use: TLS, the host's certificate checked against the
 # system CAs and its name.
 http_clusters() {
-  local l d seen=" "
+  local l d h seen=" "
   for l in "${LISTENERS[@]}"; do
     for d in ${HDESTS[$l]:-}; do
       case "$seen" in *" $d "*) continue ;; esac
       seen="$seen$d "
+      h=${HTTP_HOST[$d]}
       cat <<EOF
   # Plain HTTP from boxes, TLS from here.
-  - name: "http-$d"
+  - name: "http-$(hid "$d")"
     type: LOGICAL_DNS
     dns_lookup_family: ALL
     connect_timeout: 5s
     load_assignment:
-      cluster_name: "http-$d"
-      endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: "$d", port_value: ${HTTP_PORT[$d]} } } } }] }]
+      cluster_name: "http-$(hid "$d")"
+      endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: "$h", port_value: ${HTTP_PORT[$d]} } } } }] }]
     transport_socket:
       name: envoy.transport_sockets.tls
       typed_config:
         "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-        sni: "$d"
+        sni: "$h"
         common_tls_context:
           validation_context:
             trusted_ca: { filename: /etc/ssl/certs/ca-certificates.crt }
-            match_typed_subject_alt_names: [{ san_type: DNS, matcher: { exact: "$d" } }]
+            match_typed_subject_alt_names: [{ san_type: DNS, matcher: { exact: "$h" } }]
 EOF
     done
   done
@@ -709,6 +739,7 @@ EOF
 EOF
     done
     for d in ${HDESTS[$l]:-}; do
+      d=${HTTP_HOST[$d]}
       de="$(printf '%s' "$d" | sed 's/[.]/\\\\./g')"   # dots escaped for the regex, as YAML wants them
       cat <<EOF
               - name: "deny-connect-http-$d"

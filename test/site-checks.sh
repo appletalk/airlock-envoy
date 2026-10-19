@@ -209,6 +209,13 @@ check 3132 "issues: REST issue edit passes"                "$P http=404 exit=0" 
 check 3132 "issues: REST pull create refused"              "$P http=403 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls
 check 3132 "issues: REST pull edit refused"                "$P http=403 exit=0" -X PATCH http://httpbingo.org/repos/o/r/pulls/1
 check 3132 "issues: REST reviewers refused"                "$P http=403 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls/1/requested_reviewers
+check 3132 "issues: Projects item write on the pinned project passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { archiveProjectV2Item(input: {projectId: \\\"PVT_test1\\\", itemId: \\\"i\\\"}) { clientMutationId } }\"}" http://httpbingo.org/graphql
+check 3132 "issues: Projects item write on another project refused" "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { archiveProjectV2Item(input: {projectId: \\\"PVT_other\\\", itemId: \\\"i\\\"}) { clientMutationId } }\"}" http://httpbingo.org/graphql
+slot; { r="$(curl -s -x http://127.0.0.1:3132 http://httpbingo.org/anything/v | tr -d " \n" | grep -o "Authorization\":\[\"[^\"]*")
+    $(curl -s -x http://127.0.0.1:3130 http://httpbingo.org/anything/v | tr -d " \n" | grep -o "Authorization\":\[\"[^\"]*")"
+  verdict "variants: one host, each listener its own credential (t-http t-cred, t-other t-gh)" "*SITE-TEST-TOKEN-1*dummy-not-a-github-token*" "$(echo $r)" > "$f"; } &
+pids+=($!)
+check 3130 "variants: t-other has the full rules (PR create passes)" "$P http=404 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle
 # Alone: 40 GraphQL requests at once on one listener; the limit on the route (bursts of 20) answers

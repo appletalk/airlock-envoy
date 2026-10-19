@@ -36,6 +36,13 @@ local function union(a, b)
   return t
 end
 local ALLOWLISTS = { ["github-issues"] = ISSUES, ["github-api"] = union(ISSUES, PULLS) }
+-- Projects (v2) item writes, under either preset, only when the route names projects and
+-- each such mutation's input.projectId is one of them (read from the query or its variables;
+-- anything it can't resolve for certain is refused).
+local PROJECT_MUTATIONS = {
+  updateProjectV2ItemFieldValue = true, clearProjectV2ItemFieldValue = true,
+  addProjectV2ItemById = true, archiveProjectV2Item = true,
+}
 
 -- Bounds on the work one request can cause (the check runs on Envoy's worker threads, which
 -- every listener shares): the body (Envoy's buffer filter also stops it at this size) and
@@ -112,11 +119,44 @@ local function json_skip(s, i, depth)
   return nil
 end
 
+-- Decode the JSON value at s[i] (for the variables): a string as a Lua string, an object as
+-- { obj = { key = value } }, anything else as { other = true }. Duplicate keys in an object
+-- are refused (which one a server takes is not ours to guess). Returns value, next index.
+local function json_value(s, i, depth)
+  depth = (depth or 0) + 1
+  if depth > MAX_DEPTH then return nil end
+  i = skip_ws(s, i)
+  local c = s:sub(i, i)
+  if c == '"' then return json_string(s, i) end
+  if c == "{" then
+    local o = {}
+    i = skip_ws(s, i + 1)
+    if s:sub(i, i) == "}" then return { obj = o }, i + 1 end
+    while true do
+      if s:sub(i, i) ~= '"' then return nil end
+      local k, j = json_string(s, i); if not k then return nil end
+      if o[k] ~= nil then return nil end
+      i = skip_ws(s, j); if s:sub(i, i) ~= ":" then return nil end
+      local v; v, i = json_value(s, i + 1, depth); if v == nil then return nil end
+      o[k] = v
+      i = skip_ws(s, i)
+      local d = s:sub(i, i)
+      if d == "}" then return { obj = o }, i + 1 end
+      if d ~= "," then return nil end
+      i = skip_ws(s, i + 1)
+    end
+  end
+  local j = json_skip(s, i, depth - 1)
+  if not j then return nil end
+  return { other = true }, j
+end
+
+-- The query string and the variables (an object, or nil if absent or null) of the body.
 function M.query_of(body)
   local i = skip_ws(body, 1)
   if body:sub(i, i) ~= "{" then return nil, "not a JSON object" end
   i = skip_ws(body, i + 1)
-  local query, seen = nil, 0
+  local query, seen, vars, vseen = nil, 0, nil, 0
   if body:sub(i, i) == "}" then return nil, "no query" end
   while true do
     if body:sub(i, i) ~= '"' then return nil, "bad JSON" end
@@ -128,6 +168,12 @@ function M.query_of(body)
       if body:sub(i, i) ~= '"' then return nil, "query is not a string" end
       local v, k = json_string(body, i); if not v then return nil, "bad JSON" end
       query, i = v, k
+    elseif key == "variables" then
+      vseen = vseen + 1
+      local v, k = json_value(body, i); if v == nil then return nil, "bad JSON in the variables" end
+      if v.obj then vars = v.obj
+      elseif not (v.other and body:sub(i, i + 3) == "null") then return nil, "variables is not an object" end
+      i = k
     else
       i = json_skip(body, i); if not i then return nil, "bad JSON" end
     end
@@ -141,7 +187,8 @@ function M.query_of(body)
     i = skip_ws(body, i + 1)
   end
   if seen ~= 1 then return nil, (seen == 0) and "no query" or "more than one query" end
-  return query
+  if vseen > 1 then return nil, "more than one variables" end
+  return query, nil, vars
 end
 
 -- ---- GraphQL: tokens, then the operations --------------------------------------------------
@@ -170,7 +217,9 @@ local function tokenize(s)
         elseif d == '"' then break
         else j = j + 1 end
       end
-      t[#t + 1] = { k = "str" }; i = j + 1
+      -- The value, only when plain (no escapes): a project ID is compared to it.
+      local raw = s:sub(i + 1, j - 1)
+      t[#t + 1] = { k = "str", v = (not raw:find("\\", 1, true)) and raw or nil }; i = j + 1
     elseif c:match("[_A-Za-z]") then
       local _, e = s:find("^[_0-9A-Za-z]*", i + 1)
       t[#t + 1] = { k = "name", v = s:sub(i, e) }; i = e + 1
@@ -232,15 +281,64 @@ local function top_fields(t, i)
       if not (t[i + 1] and t[i + 1].k == "name") then return nil, "bad alias" end
       field = t[i + 1].v; i = i + 2
     end
-    fields[#fields + 1] = field
-    if is_p(t[i], "(") then i = skip_group(t, i); if not i then return nil, "unbalanced arguments" end end
+    local f = { name = field }
+    fields[#fields + 1] = f
+    if is_p(t[i], "(") then
+      f.a = i
+      i = skip_group(t, i); if not i then return nil, "unbalanced arguments" end
+      f.b = i - 1                                          -- the closing ")"
+    end
     i = skip_directives(t, i); if not i then return nil, "bad directive" end
     if is_p(t[i], "{") then i = skip_group(t, i); if not i then return nil, "unbalanced selection" end end
   end
 end
 
--- nil if allowed under allowlist ALLOWED, else the reason.
-function M.check_document(doc, rules)
+-- The project a Projects mutation writes to: its arguments must be exactly (input: <value>),
+-- the value an object literal with one projectId (a plain string, or a $variable holding a
+-- string) or a $variable holding an object with a string projectId. Variables come only from
+-- the body (an operation's default value is not read: a missing variable refuses).
+local function project_of(t, f, vars)
+  if not f.a then return nil, "no input" end
+  local i = f.a + 1
+  if not (t[i] and t[i].k == "name" and t[i].v == "input" and is_p(t[i + 1], ":")) then return nil, "arguments other than input" end
+  i = i + 2
+  local function var(n)
+    if not (n and n.k == "name") then return nil end
+    return vars and vars[n.v]
+  end
+  local pid, after
+  if is_p(t[i], "$") then
+    local v = var(t[i + 1])
+    if not (type(v) == "table" and v.obj) then return nil, "input variable missing or not an object" end
+    pid = v.obj.projectId; after = i + 2
+  elseif is_p(t[i], "{") then
+    local n, j = 0, i + 1
+    while not is_p(t[j], "}") do
+      local key = t[j]
+      if not (key and key.k == "name" and is_p(t[j + 1], ":")) then return nil, "an input field that can't be read" end
+      j = j + 2
+      local val = t[j]
+      if not val then return nil, "unterminated input" end
+      local got
+      if is_p(val, "$") then got = var(t[j + 1]); j = j + 2
+      elseif is_p(val, "{") or is_p(val, "[") then j = skip_group(t, j); if not j then return nil, "unbalanced input" end
+      elseif val.k == "p" then return nil, "an input field that can't be read"
+      else got = (val.k == "str") and val.v or false; j = j + 1 end
+      if key.v == "projectId" then n = n + 1; pid = got end
+    end
+    if n ~= 1 then return nil, "not exactly one projectId" end
+    after = j + 1
+  else
+    return nil, "input that can't be read"
+  end
+  if after ~= f.b then return nil, "arguments other than input" end
+  if type(pid) ~= "string" then return nil, "a projectId that can't be read" end
+  return pid
+end
+
+-- nil if allowed under the preset's allowlist (and, for Projects mutations, the projects
+-- set), else the reason.
+function M.check_document(doc, rules, vars, projects)
   local ALLOWED = ALLOWLISTS[rules or ""]
   if not ALLOWED then return "no GraphQL allowlist for rules '" .. tostring(rules) .. "'" end
   local t = tokenize(doc)
@@ -266,7 +364,11 @@ function M.check_document(doc, rules)
         if not fields then return j end
         if #fields == 0 then return "an empty mutation" end
         for _, f in ipairs(fields) do
-          if not ALLOWED[f] then return "mutation " .. f .. " is not allowed" end
+          if PROJECT_MUTATIONS[f.name] and projects and next(projects) then
+            local pid, why = project_of(t, f, vars)
+            if not pid then return "mutation " .. f.name .. ": " .. why end
+            if not projects[pid] then return "mutation " .. f.name .. " on a project not allowed here" end
+          elseif not ALLOWED[f.name] then return "mutation " .. f.name .. " is not allowed" end
         end
         i = j
       end
@@ -284,13 +386,20 @@ function M.check_document(doc, rules)
   return nil
 end
 
--- nil if the body is allowed under rules (a preset name), else the reason.
-function M.check_body(body, rules)
+-- A set from a space-separated list of project IDs ("" or nil: none).
+function M.project_set(list)
+  local set = {}
+  for id in (list or ""):gmatch("%S+") do set[id] = true end
+  return set
+end
+
+-- nil if the body is allowed under rules (a preset name) and projects (a set), else the reason.
+function M.check_body(body, rules, projects)
   if not body or body == "" then return "empty body" end
   if #body > MAX_BODY then return "GraphQL body over " .. MAX_BODY .. " bytes" end
-  local q, why = M.query_of(body)
+  local q, why, vars = M.query_of(body)
   if not q then return why end
-  return M.check_document(q, rules)
+  return M.check_document(q, rules, vars, projects)
 end
 
 -- nil if the request (headers and body) may go on, else the reason.
@@ -307,10 +416,11 @@ local function check_request(handle)
   local len = tonumber(h:get("content-length") or "")
   if len and len > MAX_BODY then return "GraphQL body over " .. MAX_BODY .. " bytes" end
   -- The route's preset, from its metadata (airlock-envoy-apply sets it).
-  local rules = handle:metadata():get("rules")
+  local meta = handle:metadata()
+  local rules, projects = meta:get("rules"), M.project_set(meta:get("projects"))
   local b = handle:body()
   local body = b and b:getBytes(0, b:length()) or ""
-  return M.check_body(body, rules)
+  return M.check_body(body, rules, projects)
 end
 
 function envoy_on_request(handle)

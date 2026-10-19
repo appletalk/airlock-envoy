@@ -119,6 +119,33 @@ lists "http destinations, through an include" \
   'a http://x.example:443 rules git credential gh\nb http://x.example:443 rules git credential gh\nb http://y.example:8443 rules any' \
   'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example\nb @a http://y.example\n'
 
+# Variants: another definition of a host (its own rules, credential, projects), one per listener.
+refuses "variant: bad name"            "bad variant"           'http x.example@1v rules any\n'
+refuses "variant: empty"               "bad variant"           'http x.example@ rules any\n'
+refuses "variant: defined twice"       "defined twice"         'http x.example@v rules any\nhttp x.example@v rules git\n'
+refuses "variant: not defined"         "has no 'http x.example@w" 'http x.example@v rules any\na http://x.example@w\n'
+refuses "two definitions of a host in one listener" "lists x.example twice" 'http x.example rules any\nhttp x.example@v rules git\na http://x.example http://x.example@v\n'
+refuses "...also through an include"   "lists x.example twice" 'http x.example rules any\nhttp x.example@v rules git\na http://x.example\nb @a http://x.example@v\n'
+refuses "a variant and CONNECT to its host" "use one"          'http x.example@v rules any\na x.example:443 http://x.example@v\n'
+lists "variants: each listener its own definition of the host" \
+  'a http://x.example:443 rules github-api credential c1\nb http://x.example:443@board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9' \
+  'http x.example rules github-api credential c1\nhttp x.example@board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9\na http://x.example\nb http://x.example@board\n'
+# projects: Projects v2 node IDs, on the GitHub presets only; mixed case only there.
+refuses "projects: not a PVT_ ID"      "bad project ID"        'http x.example rules github-api projects PR_kw12\n'
+refuses "projects: a quote"            "bad project ID"        'http x.example rules github-api projects PVT_a"b\n'
+refuses "projects: an empty ID"        "bad project ID"        'http x.example rules github-api projects PVT_\n'
+refuses "projects: with other rules"   "projects only with"    'http x.example rules any projects PVT_abc\n'
+refuses "projects: none given"         "projects needs"        'http x.example rules github-api projects\n'
+refuses "mixed case elsewhere on an http line" "only lowercase" 'http X.example rules github-api projects PVT_abc\n'
+refuses "mixed case on a listener line" "only lowercase"       'a PVT_abc.example:443\n'
+printf 'http x.example@board rules github-issues credential c2 projects PVT_aB,PVT_cD\nb http://x.example@board\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+if grep -q 'name: "http-x.example_board"' <<< "$r" && grep -q 'host_rewrite_literal: "x.example"' <<< "$r" && grep -q 'domains: \["x.example", "x.example:80"\]' <<< "$r" \
+   && grep -q 'sni: "x.example"' <<< "$r" && grep -q 'filter_metadata: { github-graphql: { rules: "github-issues", projects: "PVT_aB PVT_cD" } }' <<< "$r" \
+   && [ "$("$apply" --clients b "$work/site" | grep -v '^#')" = "x.example 443 github-issues yes" ]; then
+  echo "ok   a variant renders to its host (Host, SNI, SAN, domains), its own cluster, its projects; the manifest names the host"
+else echo "FAIL variant rendering"; fails=$((fails+1)); fi
+
 # Client manifests: each listener's plain-HTTP hosts (an include's too), nothing else.
 printf 'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example example.com:443\nb @a http://y.example web\nc example.org:443\n' > "$work/site"
 m="$("$apply" --clients b "$work/site" | grep -v '^#')"
@@ -140,7 +167,7 @@ fields="$({ "$apply" --render "$work/site"; "$apply" --render-web "$work/site"; 
 if [ "$fields" = "%REQ(:AUTHORITY)% %REQ(:METHOD)% %REQ(:PATH)% " ]; then echo "ok   logs name no request header (only method, authority, path)"
 else echo "FAIL logs name request fields beyond method, authority, path: $fields"; fails=$((fails+1)); fi
 r="$("$apply" --render "$work/site")"
-if [ "$(grep -c 'github-graphql: { "@type"' <<< "$r")" = 1 ] && grep -q 'filter_metadata: { github-graphql: { rules: "github-api" } }' <<< "$r" \
+if [ "$(grep -c 'github-graphql: { "@type"' <<< "$r")" = 1 ] && grep -q 'filter_metadata: { github-graphql: { rules: "github-api", projects: "" } }' <<< "$r" \
    && grep -q 'max_request_bytes: 65536 }' <<< "$r" && grep -q 'token_bucket: { max_tokens: 20' <<< "$r" && grep -q 'name: strip-box-headers' <<< "$r" \
    && grep -q '"inject-c1": {' <<< "$r" && grep -q 'name: "deny-connect-http-api.example.com"' <<< "$r" \
    && grep -q 'disabled: true' <<< "$r" && grep -q 'mergePullRequest\|ALLOWED' <<< "$r"; then

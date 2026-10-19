@@ -96,6 +96,63 @@ for n, c in ipairs(cases) do
 end
 -- envoy_on_request against a stand-in for Envoy's handle: the header checks, and that an
 -- error anywhere refuses (a script error in Envoy's Lua filter otherwise lets the request on).
+-- Projects v2: allowed only on the route's projects (here PVT_ok and PVT_two), by input.projectId.
+local U = "updateProjectV2ItemFieldValue"
+local function pq(args, vars)
+  local q = "mutation M($input: X, $pid: ID, $p: ID = \"PVT_ok\") { " .. U .. "(" .. args .. ") { clientMutationId } }"
+  local b = '{"query":' .. string.format("%q", q):gsub("\\\n", "\\n")
+  if vars then b = b .. ',"variables":' .. vars end
+  return b .. "}"
+end
+local pcases = {
+  { true,  pq('input: {projectId: "PVT_ok", itemId: "i", fieldId: "f", value: {text: "a"}}') },
+  { true,  pq("input: $input", '{"input":{"projectId":"PVT_ok","itemId":"i","value":{"text":"projectId"}}}') },
+  { true,  pq("input: $input", '{"input":{"projectId":"PVT\\u005fok","itemId":"i"}}') },
+  { true,  pq('input: {itemId: "i", projectId: $pid}', '{"pid":"PVT_two"}') },
+  { true,  pq('input: {projectId: "PVT_ok"}', 'null') },
+  { true,  j('mutation { a: addProjectV2ItemById(input: {projectId: "PVT_ok", contentId: "c"}) { item { id } } b: archiveProjectV2Item(input: {projectId: "PVT_two", itemId: "i"}) { clientMutationId } c: createIssue(input: {}) { clientMutationId } }') },
+  { true,  j('mutation { clearProjectV2ItemFieldValue(input: {projectId: "PVT_ok", itemId: "i", fieldId: "f"}) { clientMutationId } }') },
+  { false, pq('input: {projectId: "PVT_other", itemId: "i"}') },
+  { false, pq("input: $input", '{"input":{"projectId":"PVT_other"}}') },
+  { false, pq('input: {projectId: $pid}', '{"pid":"PVT_other"}') },
+  { false, pq('input: {projectId: $p}') },                                   -- a default value is not read
+  { false, pq('input: {projectId: $pid}') },                                 -- a missing variable
+  { false, pq('input: {projectId: "PVT_ok", projectId: "PVT_other"}') },
+  { false, pq('input: {projectId: "PVT\\u005fok"}') },                       -- an escape in the query string
+  { false, pq('input: {projectId: """PVT_ok"""}') },
+  { false, pq('input: {projectId: 7}') },
+  { false, pq('input: {projectId: PVT_ok}') },
+  { false, pq('input: {projectId: "PVT_ok"}, other: 1') },
+  { false, pq('other: 1, input: {projectId: "PVT_ok"}') },
+  { false, pq('input: {itemId: "i", value: {projectId: "PVT_ok"}}') },       -- only a nested one
+  { false, pq("input: $input", '{"input":"PVT_ok"}') },
+  { false, pq("input: $input", '{"input":{"projectId":"PVT_ok","projectId":"PVT_other"}}') },
+  { false, pq("input: $input", '{"input":{"itemId":"i"}}') },
+  { false, pq("input: $input") },
+  { false, '{"query":"mutation($input: X) { ' .. U .. '(input: $input) { clientMutationId } }","variables":{"input":{"projectId":"PVT_ok"}},"variables":{"input":{"projectId":"PVT_other"}}}' },
+  { false, '{"query":"mutation($input: X) { ' .. U .. '(input: $input) { clientMutationId } }","variables":[1]}' },
+  { false, j('mutation { a: ' .. U .. '(input: {projectId: "PVT_ok"}) { clientMutationId } b: ' .. U .. '(input: {projectId: "PVT_other"}) { clientMutationId } }') },
+  { false, j('mutation { deleteProjectV2Item(input: {projectId: "PVT_ok", itemId: "i"}) { clientMutationId } }') },
+  { false, j('mutation { updateProjectV2(input: {projectId: "PVT_ok", title: "t"}) { clientMutationId } }') },
+}
+for n, c in ipairs(pcases) do
+  for _, rules in ipairs({ "github-issues", "github-api" }) do
+    local why = G.check_body(c[2], rules, G.project_set("PVT_ok PVT_two"))
+    if (why == nil) ~= c[1] then
+      fails = fails + 1
+      print(string.format("FAIL projects %2d %s want %s got %s: %s", n, rules, c[1] and "allow" or "refuse", tostring(why), c[2]:sub(1, 140)))
+    else print(string.format("ok   projects %2d %-13s %-7s %s", n, rules, c[1] and "allow" or "refuse", why or "")) end
+  end
+end
+-- With no projects on the route, every Projects mutation is refused.
+for n, c in ipairs(pcases) do
+  if c[1] then
+    local why = G.check_body(c[2], "github-api", G.project_set(""))
+    if why == nil then fails = fails + 1; print("FAIL projects " .. n .. " allowed with no projects set")
+    else print("ok   projects " .. n .. " refused with no projects set: " .. why) end
+  end
+end
+
 local function handle(hdrs, body, body_errors, meta)
   local h = { responded = nil }
   meta = meta or { rules = "github-api" }
@@ -124,6 +181,10 @@ local hcases = {
   { nil,   { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" }, ok_body, false, { rules = "github-issues" } },
   { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" },
            '{"query":"mutation { createPullRequest(input: {}) { id } }"}', false, { rules = "github-issues" } },
+  { nil,   { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" },
+           '{"query":"mutation { archiveProjectV2Item(input: {projectId: \\"PVT_b\\", itemId: \\"i\\"}) { clientMutationId } }"}', false, { rules = "github-issues", projects = "PVT_a PVT_b" } },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" },
+           '{"query":"mutation { archiveProjectV2Item(input: {projectId: \\"PVT_c\\", itemId: \\"i\\"}) { clientMutationId } }"}', false, { rules = "github-issues", projects = "PVT_a PVT_b" } },
 }
 for n, c in ipairs(hcases) do
   local h = handle(c[2], c[3], c[4], c[5])
