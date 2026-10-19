@@ -225,11 +225,12 @@ check 3130 "variants: t-other has the full rules (PR create passes)" "$P http=40
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle
 # Alone: 40 GraphQL requests at once on one listener, 20 to each of two GitHub-rule hosts; one
-# bucket per listener (bursts of 20) answers about half with 429 before the check runs.
+# bucket per listener (bursts of 20) answers about half with 429 before the check runs (fewer
+# when the machine is busy and they spread over the refill; a bucket per route would give none).
 note "== GraphQL rate limit per listener"
 slot; { r="$(for h in $(printf "httpbingo.org httpbin.org %.0s" $(seq 20)); do curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:3132 -H "Content-Type: application/json" --data "{\"query\":\"{ viewer { login } }\"}" "http://$h/graphql" & done; wait)"
   n429=$(grep -c 429 <<< "$r"); n404=$(grep -c 404 <<< "$r")
-  verdict "40 at once over two hosts: one bucket, some limited (429), the rest through (404)" "limited through*" "$([ "$n429" -ge 15 ] && echo limited) $([ "$n404" -ge 10 ] && echo through) ($n429 x 429, $n404 x 404)" > "$f"; } &
+  verdict "40 at once over two hosts: one bucket, some limited (429), the rest through (404)" "limited through*" "$([ "$n429" -ge 5 ] && echo limited) $([ "$n404" -ge 10 ] && echo through) ($n429 x 429, $n404 x 404)" > "$f"; } &
 pids+=($!)
 settle
 # Alone, after the rest: it holds t-other at its cap.

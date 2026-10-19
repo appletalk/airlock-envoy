@@ -92,6 +92,17 @@ local cases = {
   { false, j('mutation { createIssue(input: {title: "a"}, extra: 1) { clientMutationId } }') },
   { true,  '{"query":"mutation($i: CreateIssueInput!) { createIssue(input: $i) { issue { id } } }","variables":{"i":{"repositoryId":"R","title":"about projects"}}}' },
   { true,  j('mutation { createIssue(input: {repositoryId: "R", title: "t", labelIds: ["L"], body: "projectV2Ids"}) { issue { id } } }') },
+  -- what gh 2.102 sends for `gh issue create --label bug` (captured): projectIds null passes
+  { true,  '{"query":"\\n\\tmutation IssueCreate($input: CreateIssueInput!) {\\n\\t\\tcreateIssue(input: $input) {\\n\\t\\t\\tissue {\\n\\t\\t\\t\\tid\\n\\t\\t\\t\\turl\\n\\t\\t\\t}\\n\\t\\t}\\n\\t}","variables":{"input":{"body":"b","labelIds":["LA_1"],"projectIds":null,"repositoryId":"R_1","title":"t"}}}', "github-issues" },
+  { true,  j('mutation { createIssue(input: {title: "t", projectV2Ids: null}) { clientMutationId } }') },
+  { false, j('mutation { createIssue(input: {title: "t", projectV2Ids: []}) { clientMutationId } }') },
+  { false, '{"query":"mutation($i: X) { createIssue(input: $i) { id } }","variables":{"i":{"projectIds":[]}}}' },
+  { false, '{"query":"mutation($i: X, $p: [ID]) { createIssue(input: {title: \\"t\\", projectIds: $p}) { id } }","variables":{"p":["PRO_1"]}}' },
+  { true,  '{"query":"mutation($i: X, $p: [ID]) { createIssue(input: {title: \\"t\\", projectIds: $p}) { id } }","variables":{"p":null}}' },
+  -- at most 50 mutation fields in a body; a variable input is walked once however often used
+  { true,  j("mutation { " .. string.rep("a: addComment(input: {}) { clientMutationId } ", 50) .. "}") },
+  { false, j("mutation { " .. string.rep("a: addComment(input: {}) { clientMutationId } ", 51) .. "}") },
+  { false, j("mutation { " .. string.rep("a: addComment(input: {}) { clientMutationId } ", 30) .. "} mutation B { " .. string.rep("b: addComment(input: {}) { clientMutationId } ", 21) .. "}") },
 }
 
 local fails = 0

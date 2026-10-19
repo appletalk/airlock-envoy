@@ -267,6 +267,7 @@ parse_http() {  # parse_http <where> <words...>
       rules) [ $# -ge 2 ] || die "$where: rules needs a preset"; rules=$2; shift 2 ;;
       credential) [ $# -ge 2 ] || die "$where: credential needs a name"; cred=$2; shift 2 ;;
       projects) [ $# -ge 2 ] || die "$where: projects needs project IDs"
+        [[ "$2" != *, ]] || die "$where: bad project ID '' (a trailing comma)"
         IFS=, read -ra ids <<< "$2"
         for id in "${ids[@]}"; do
           [[ "$id" =~ ^PVT_[A-Za-z0-9_-]{1,64}$ ]] || die "$where: bad project ID '$id' (want a Projects v2 node ID, PVT_...)"

@@ -137,6 +137,8 @@ refuses "projects: an empty ID"        "bad project ID"        'http x.example r
 refuses "projects: with other rules"   "projects only with"    'http x.example rules any projects PVT_abc\n'
 refuses "projects: none given"         "projects needs"        'http x.example rules github-api projects\n'
 refuses "projects: a glob is not expanded" "bad project ID '*'"  'http x.example rules github-api projects *\n'
+refuses "projects: a trailing comma"   "bad project ID ''"     'http x.example rules github-api projects PVT_a,\n'
+refuses "projects: a double comma"     "bad project ID ''"     'http x.example rules github-api projects PVT_a,,PVT_b\n'
 refuses "mixed case elsewhere on an http line" "only lowercase" 'http X.example rules github-api projects PVT_abc\n'
 refuses "mixed case on a listener line" "only lowercase"       'a PVT_abc.example:443\n'
 printf 'http x.example@board rules github-issues credential c2 projects PVT_aB,PVT_cD\nb http://x.example@board\n' > "$work/site"
