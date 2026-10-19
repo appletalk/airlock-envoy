@@ -98,6 +98,10 @@ What it sets up:
 | `/etc/airlock-envoy/envoy.yaml`, `allowed` | root:airlock-envoy, 0640 | rendered config; what was last applied |
 | `/run/airlock-envoy-internal/` | airlock-envoy, 0700 | Envoy's own sockets, incl. admin; never given to anyone |
 | `/var/log/airlock-envoy/access.jsonl` | airlock-envoy, 0600 (dir 0750) | the audit log |
+| `/etc/airlock-envoy/envoy-web.yaml` | root:airlock-envoy, 0640 | the web Envoy's config, while a listener lists `web` |
+| `/etc/systemd/system/airlock-envoy-web.service.d/site.conf` | root, 0644 | web's kernel filter: the site's `internal-net`, the resolvers allowed |
+| `/run/airlock-envoy-web/` | airlock-envoy, 0700 | the web Envoy's socket (only the main Envoy connects) |
+| `/var/log/airlock-envoy/web.jsonl` | airlock-envoy, 0600 | the web Envoy's log: server name, chain, upstream address |
 
 Put a project's box behind a socket with `airlock egress proxy /run/airlock-envoy/<listener>.sock`
 (claude-airlock's proxy posture: no network of its own, every connection through that socket).
@@ -147,6 +151,16 @@ infra  10.0.0.10:6443
   resolves to the host itself or its LAN reaches it.
 - `@name`: everything listener `name` allows, defined above (so no cycles; a listener cannot
   be extended once included). Repeat a name to continue it on another line.
+- `web`: the public internet, any host name on port 443 (see *How web decides*). A listener's
+  exact entries still win, so `infra metrics.example.net:443 web` with `internal-name
+  example.net` reaches metrics and the public web, but no other `example.net` name.
+- `internal-name <domain>...` and `internal-net <CIDR>...` (site-wide lines, not listeners):
+  what web treats as internal beyond the built-ins. Names: `localhost`, `local`, `localdomain`,
+  `internal`, `lan`, `home.arpa` and their subdomains. Addresses: everything not public (in
+  `airlock-envoy-web.service`). Use `internal-net` for internal ranges that are publicly
+  routable (a company's own blocks) and for **your own public addresses**, which lead back in
+  to your services. CIDRs are checked strictly: systemd skips an entry it can't parse, and a
+  skipped deny would fail open.
 - Strict syntax: lowercase names, explicit ports, no wildcards, URLs, IPv6 or Windows line
   endings; `admin` and `anthropic` are reserved. A bad line stops the apply with its line number.
 
@@ -204,6 +218,35 @@ tests it), 10 s to send request headers,
 and a tunnel is cut after 1 h without bytes. In practice the CDN closes an idle TLS connection
 much sooner (about 15 s without a request).
 
+## How web decides
+
+1. On the box's listener, after its exact entries: a CONNECT authority that is an internal name
+   (built in or `internal-name`, any case) gets 403. Anything else that is a host name with an
+   alphabetic top-level label on port 443 goes, as raw TLS, to the web Envoy
+   (`airlock-envoy-web`, its own unit). IP literals, single labels and other ports never match
+   and get 403.
+2. The web Envoy picks a filter chain from the TLS server name **before any filter runs**. An
+   internal name, no name, an IP literal or a name without a dot gets no chain that has an
+   upstream, so nothing is dialled. The CONNECT host and the server name may differ; each side
+   checks its own.
+3. Envoy resolves the server name itself and dials what DNS returns, under the unit's kernel
+   filter: `IPAddressDeny` for every non-public range (built in) plus the site's
+   `internal-net`, and `IPAddressAllow` for the resolvers in `/etc/resolv.conf` by exact
+   address. That filter is what keeps web public, whatever a name resolves to. A resolver that
+   strips private answers (Unbound `private-address`) adds a layer in front of it.
+
+Check, as root, that the kernel enforces it on your host (systemd's IP filter needs cgroup
+BPF; a container or an old kernel may not have it). This runs a throwaway unit with the web
+unit's exact filter:
+
+```
+sudo systemd-run --wait --pipe --quiet \
+  -p "IPAddressDeny=$(systemctl show -P IPAddressDeny airlock-envoy-web)" \
+  -p "IPAddressAllow=$(systemctl show -P IPAddressAllow airlock-envoy-web)" \
+  sh -c 'curl -s -m 5 -o /dev/null https://1.1.1.1/ && echo "public: reachable (want this)";
+         curl -s -m 5 -o /dev/null https://10.0.0.1/ || echo "10.0.0.1: refused (want this)"'
+```
+
 ## What this does not stop
 
 - **Data sent to Anthropic itself.** The box holds a Claude login and can talk to
@@ -212,6 +255,9 @@ much sooner (about 15 s without a request).
   Without decrypting TLS, the proxy cannot see or stop this.
 - **The login in the box.** The tunnel carries the box's own credential; it does not hold or
   inject one.
+- **Data sent anywhere public, through web.** A listener with `web` can reach any public
+  host; the web log names each one. Narrow a profile to exact entries when that matters.
+- **The resolver, through web.** It is allowed by address, on every port.
 - **A different site inside a matched TLS session.** Once the SNI matches, the HTTP `Host` is
   encrypted. Asking `api.anthropic.com` for another Anthropic site's `Host` is refused today by
   the CDN (403), which is its policy, not this proxy's.

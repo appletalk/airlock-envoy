@@ -11,3 +11,14 @@
 infra  @anthropic
 infra  metrics.example.net:443 logs.example.net:443
 infra  10.0.0.10:6443
+
+# Claude plus the public internet (any host on 443, public addresses only); infra's internal
+# hosts stay out of reach through it.
+research  @anthropic web
+infra     web
+
+# What web treats as internal, beyond the built-ins (local, lan, internal, home.arpa, ...,
+# and every non-public address): your own domains, internal ranges that are publicly
+# routable, and your own public addresses.
+internal-name  example.net
+internal-net   198.51.100.0/24 2001:db8:1::/48
