@@ -352,7 +352,7 @@ listing() {
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
     for d in ${HDESTS[$l]:-}; do
-      printf '%s http://%s:%s%s rules %s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "${d#"${HTTP_HOST[$d]}"}" "${HTTP_RULES[$d]}" \
+      printf '%s http://%s:%s%s rules %s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
         "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}"
     done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"

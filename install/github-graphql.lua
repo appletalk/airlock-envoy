@@ -41,7 +41,7 @@ local ALLOWLISTS = { ["github-issues"] = ISSUES, ["github-api"] = union(ISSUES, 
 -- anything it can't resolve for certain is refused).
 local PROJECT_MUTATIONS = {
   updateProjectV2ItemFieldValue = true, clearProjectV2ItemFieldValue = true,
-  addProjectV2ItemById = true, archiveProjectV2Item = true,
+  addProjectV2ItemById = true, archiveProjectV2Item = true, deleteProjectV2Item = true,
 }
 
 -- Bounds on the work one request can cause (the check runs on Envoy's worker threads, which

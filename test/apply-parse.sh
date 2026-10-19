@@ -128,7 +128,7 @@ refuses "two definitions of a host in one listener" "lists x.example twice" 'htt
 refuses "...also through an include"   "lists x.example twice" 'http x.example rules any\nhttp x.example@v rules git\na http://x.example\nb @a http://x.example@v\n'
 refuses "a variant and CONNECT to its host" "use one"          'http x.example@v rules any\na x.example:443 http://x.example@v\n'
 lists "variants: each listener its own definition of the host" \
-  'a http://x.example:443 rules github-api credential c1\nb http://x.example:443@board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9' \
+  'a http://x.example:443 rules github-api credential c1\nb http://x.example:443 variant board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9' \
   'http x.example rules github-api credential c1\nhttp x.example@board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9\na http://x.example\nb http://x.example@board\n'
 # projects: Projects v2 node IDs, on the GitHub presets only; mixed case only there.
 refuses "projects: not a PVT_ ID"      "bad project ID"        'http x.example rules github-api projects PR_kw12\n'

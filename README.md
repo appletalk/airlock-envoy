@@ -225,9 +225,16 @@ dev   @anthropic web http://api.github.com http://github.com
   `clearProjectV2ItemFieldValue`, `addProjectV2ItemById`, `archiveProjectV2Item`), and only
   when the mutation's `input.projectId` is one of them: a plain string in the query, or a
   variable in the body's `variables` (an operation's default value is not read). Anything
-  the check can't resolve for certain is refused; project, field and view settings stay
-  refused. Without `projects`, all Projects writes are refused. That an item, field or value
-  ID belongs to the named project is GitHub's check, not this one.
+  the check can't resolve for certain is refused; `deleteProjectV2Item` too (removing an
+  item); project, field and view settings stay refused. Without `projects`, all Projects
+  writes are refused. Limits:
+  - That an item, field or value ID belongs to the named project is GitHub's check, not this
+    one (verify it live before relying on the pin).
+  - `addProjectV2ItemById` takes any content ID, so a box can put any issue it can read
+    (another repo's, a private one's) on the pinned board.
+  - GitHub adds items to boards by itself: org auto-add workflows, and an issue template with
+    `projects:` (createIssue with an `issueTemplate`) can add items to boards the box never
+    names.
   `http` is a reserved word (no listener of that name). That exact name gets no CONNECT route in
   the listener, `web` included, so the credentialed path can't be tunnelled around. Other
   names on the same front end (`www.`, aliases) are still ordinary `web` hosts: without the
@@ -281,7 +288,10 @@ dev   @anthropic web http://api.github.com http://github.com
   the token can and write issues and comments in any of them, e.g. copy a private repo into
   another repo's issue (only the token's or App installation's repo list bounds it); and label
   and comment writes also land on PRs, where org automation (an auto-merge label, a
-  comment-triggered workflow) can turn them into merges or deploys.
+  comment-triggered workflow) can turn them into merges or deploys. Assignment can start an
+  agent: where an org has the Copilot coding agent on, assigning an issue to Copilot
+  (`replaceActorsForAssignable`, REST assignees) has GitHub write code and open a PR, from an
+  issues-only box. The presets do not refuse it: turn the agent off where the token reaches.
   The admin config dump shows secrets as `[redacted]`.
 - **Clients in the box**: curl and anything that honours `http_proxy` use `http://<host>/`
   URLs. git keeps its ssh remotes on the host: in the box only, a config rewrites them, e.g.
