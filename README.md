@@ -26,7 +26,7 @@ Arch (systemd-booted containers), and run as a service on an Arch workstation.
 Envoy's apt repository is unmaintained, so this installs Envoy's official release binary on
 every distribution, after checking it against the Envoy maintainers' release key (pinned
 fingerprint `0AFC E836 BA4D 1D35 763C 8523 D8CD C375 0181 F31F`, the key behind every release
-from v1.25.0 in January 2023 to v1.39.4). Nothing comes from the AUR or a third-party repo.
+from v1.25.0 in January 2023 to v1.40.0). Nothing comes from the AUR or a third-party repo.
 
 Prerequisites:
 
@@ -39,7 +39,7 @@ As root, from a clean clone that **no airlock box mounts** (both scripts run as 
 install code, the release key and the egress allowlist from it; check `git status` first):
 
 ```
-sudo install/install-envoy.sh 1.39.4          # binary -> /usr/local/libexec/airlock-envoy/envoy-1.39.4
+sudo install/install-envoy.sh 1.40.0          # binary -> /usr/local/libexec/airlock-envoy/envoy-1.40.0
 sudo install/install-service.sh "$USER"       # system account, units, airlock-envoy-apply, config
 ```
 
@@ -422,7 +422,7 @@ box that keeps getting refused can grow it without bound (planned with the audit
 
 ## Spike results
 
-Envoy v1.39.4 (official image, pinned by digest), rootless podman.
+Envoy v1.40.0 (official image, pinned by digest), rootless podman.
 
 **Test 1, capture** (`configs/tunnel-capture.yaml`): a log-only tunnel on loopback, any host on
 443. Claude Code with Remote Control, run with `DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`,

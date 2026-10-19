@@ -3,18 +3,18 @@
 # maintainers' release key. Any glibc Linux on x86_64 or aarch64 (Arch, Ubuntu, Debian, ...);
 # Envoy's apt repository is unmaintained, so this is also the route on Ubuntu.
 #
-# Usage, as root:  install/install-envoy.sh <version>          e.g. 1.39.4
+# Usage, as root:  install/install-envoy.sh <version>          e.g. 1.40.0
 # Run it from a clean clone that no box mounts: as root it trusts this repo's key and code.
 # Each version lands in /usr/local/libexec/airlock-envoy/envoy-<version>, and
 # /usr/local/bin/envoy is switched to it atomically. Older versions stay for rollback.
 set -euo pipefail
 
 # Envoy maintainers <envoy-maintainers@googlegroups.com>: signed every release checked from
-# v1.25.0 (2023-01) to v1.39.4 (2026-10). A different key stops the install.
+# v1.25.0 (2023-01) to v1.40.0 (2026-10). A different key stops the install.
 FPR=0AFCE836BA4D1D35763C8523D8CDC3750181F31F
 
-ver="${1:?usage: install-envoy.sh <version>, e.g. 1.39.4}"
-[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must look like 1.39.4" >&2; exit 2; }
+ver="${1:?usage: install-envoy.sh <version>, e.g. 1.40.0}"
+[[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must look like 1.40.0" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 for t in curl gpg sha256sum setpriv; do
   command -v "$t" >/dev/null || { echo "missing $t (Ubuntu: apt install curl gpg util-linux)" >&2; exit 1; }
