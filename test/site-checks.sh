@@ -209,6 +209,12 @@ check 3132 "issues: REST issue edit passes"                "$P http=404 exit=0" 
 check 3132 "issues: REST pull create refused"              "$P http=403 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls
 check 3132 "issues: REST pull edit refused"                "$P http=403 exit=0" -X PATCH http://httpbingo.org/repos/o/r/pulls/1
 check 3132 "issues: REST reviewers refused"                "$P http=403 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls/1/requested_reviewers
+check 3132 "a header name with an underscore refused"     "$P http=400 exit=0" -H "X_HTTP_Method_Override: DELETE" http://httpbin.org/anything/u
+slot; { r="$(curl -s -x http://127.0.0.1:3132 -H "X-Request-Id: box-marker-id" http://httpbin.org/anything/rid | tr -d "\n")"
+  if [[ "$r" == *"\"url\""* && "$r" != *Request-Id* && "$r" != *box-marker-id* ]]; then r="no x-request-id upstream"; fi
+  verdict "no x-request-id upstream, the box one stripped and none generated" "no x-request-id upstream" "${r:0:300}" > "$f"; } &
+pids+=($!)
+check 3132 "issues: createIssue naming a project refused"  "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { createIssue(input: {title: \\\"t\\\", projectV2Ids: [\\\"PVT_x\\\"]}) { clientMutationId } }\"}" http://httpbingo.org/graphql
 check 3132 "issues: Projects item write on the pinned project passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { archiveProjectV2Item(input: {projectId: \\\"PVT_test1\\\", itemId: \\\"i\\\"}) { clientMutationId } }\"}" http://httpbingo.org/graphql
 check 3132 "issues: Projects item write on another project refused" "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { archiveProjectV2Item(input: {projectId: \\\"PVT_other\\\", itemId: \\\"i\\\"}) { clientMutationId } }\"}" http://httpbingo.org/graphql
 slot; { r="$(curl -s -x http://127.0.0.1:3132 http://httpbingo.org/anything/v | tr -d " \n" | grep -o "Authorization\":\[\"[^\"]*")
@@ -218,12 +224,12 @@ pids+=($!)
 check 3130 "variants: t-other has the full rules (PR create passes)" "$P http=404 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle
-# Alone: 40 GraphQL requests at once on one listener; the limit on the route (bursts of 20) answers
-# some with 429 before the check runs.
+# Alone: 40 GraphQL requests at once on one listener, 20 to each of two GitHub-rule hosts; one
+# bucket per listener (bursts of 20) answers about half with 429 before the check runs.
 note "== GraphQL rate limit per listener"
-slot; { r="$(for _ in $(seq 40); do curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:3132 -H "Content-Type: application/json" --data "{\"query\":\"{ viewer { login } }\"}" http://httpbingo.org/graphql & done; wait)"
+slot; { r="$(for h in $(printf "httpbingo.org httpbin.org %.0s" $(seq 20)); do curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:3132 -H "Content-Type: application/json" --data "{\"query\":\"{ viewer { login } }\"}" "http://$h/graphql" & done; wait)"
   n429=$(grep -c 429 <<< "$r"); n404=$(grep -c 404 <<< "$r")
-  verdict "40 at once: some limited (429), the rest through (404)" "limited through*" "$([ "$n429" -ge 10 ] && echo limited) $([ "$n404" -ge 10 ] && echo through) ($n429 x 429, $n404 x 404)" > "$f"; } &
+  verdict "40 at once over two hosts: one bucket, some limited (429), the rest through (404)" "limited through*" "$([ "$n429" -ge 15 ] && echo limited) $([ "$n404" -ge 10 ] && echo through) ($n429 x 429, $n404 x 404)" > "$f"; } &
 pids+=($!)
 settle
 # Alone, after the rest: it holds t-other at its cap.

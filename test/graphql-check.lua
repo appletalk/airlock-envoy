@@ -81,6 +81,17 @@ local cases = {
   { false, '{"query":"{ viewer { login } }","v":"' .. string.rep("x", 65536) .. '"}' },
   { true,  j("{ " .. string.rep("a ", 8000) .. "}") },
   { false, j("{ " .. string.rep("a ", 8200) .. "}") },
+  -- from the re-review: an allowlisted mutation must not name a project (that skips the pin)
+  { false, j('mutation { createIssue(input: {repositoryId: "R", title: "t", projectV2Ids: ["PVT_other"]}) { issue { id } } }'), "github-issues" },
+  { false, j('mutation { updateIssue(input: {id: "I", projectIds: ["PRO_x"]}) { clientMutationId } }') },
+  { false, j('mutation { updatePullRequest(input: {pullRequestId: "P", projectIds: []}) { clientMutationId } }') },
+  { false, '{"query":"mutation($i: CreateIssueInput!) { createIssue(input: $i) { issue { id } } }","variables":{"i":{"repositoryId":"R","projectV2Ids":["PVT_x"]}}}' },
+  { false, '{"query":"mutation($i: CreateIssueInput!) { createIssue(input: $i) { issue { id } } }","variables":{"i":{"repositoryId":"R","project\\u0056\\u0032Ids":["PVT_x"]}}}' },
+  { false, '{"query":"mutation($i: CreateIssueInput!) { createIssue(input: $i) { issue { id } } }"}' },
+  { false, j('mutation { createIssue(input: {title: "a", title: "b"}) { clientMutationId } }') },
+  { false, j('mutation { createIssue(input: {title: "a"}, extra: 1) { clientMutationId } }') },
+  { true,  '{"query":"mutation($i: CreateIssueInput!) { createIssue(input: $i) { issue { id } } }","variables":{"i":{"repositoryId":"R","title":"about projects"}}}' },
+  { true,  j('mutation { createIssue(input: {repositoryId: "R", title: "t", labelIds: ["L"], body: "projectV2Ids"}) { issue { id } } }') },
 }
 
 local fails = 0
