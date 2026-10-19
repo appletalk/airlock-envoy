@@ -293,11 +293,12 @@ local function top_fields(t, i)
   end
 end
 
--- The project a Projects mutation writes to: its arguments must be exactly (input: <value>),
--- the value an object literal with one projectId (a plain string, or a $variable holding a
--- string) or a $variable holding an object with a string projectId. Variables come only from
--- the body (an operation's default value is not read: a missing variable refuses).
-local function project_of(t, f, vars)
+-- A mutation field's input: its arguments must be exactly (input: <value>), the value an
+-- object literal or a $variable holding an object. Returns its top-level fields, each
+-- resolved to a string (a plain string literal, or a $variable holding a string), a table (a
+-- variable holding an object) or false (anything else); a duplicate field refuses. Variables
+-- come only from the body (an operation's default value is not read).
+local function read_input(t, f, vars)
   if not f.a then return nil, "no input" end
   local i = f.a + 1
   if not (t[i] and t[i].k == "name" and t[i].v == "input" and is_p(t[i + 1], ":")) then return nil, "arguments other than input" end
@@ -306,34 +307,54 @@ local function project_of(t, f, vars)
     if not (n and n.k == "name") then return nil end
     return vars and vars[n.v]
   end
-  local pid, after
+  local fields, after = {}, nil
   if is_p(t[i], "$") then
     local v = var(t[i + 1])
     if not (type(v) == "table" and v.obj) then return nil, "input variable missing or not an object" end
-    pid = v.obj.projectId; after = i + 2
+    fields = v.obj; after = i + 2
   elseif is_p(t[i], "{") then
-    local n, j = 0, i + 1
+    local j = i + 1
     while not is_p(t[j], "}") do
       local key = t[j]
       if not (key and key.k == "name" and is_p(t[j + 1], ":")) then return nil, "an input field that can't be read" end
+      if fields[key.v] ~= nil then return nil, "input field " .. key.v .. " given twice" end
       j = j + 2
       local val = t[j]
       if not val then return nil, "unterminated input" end
-      local got
-      if is_p(val, "$") then got = var(t[j + 1]); j = j + 2
+      local got = false
+      if is_p(val, "$") then got = var(t[j + 1]); if got == nil then got = false end; j = j + 2
       elseif is_p(val, "{") or is_p(val, "[") then j = skip_group(t, j); if not j then return nil, "unbalanced input" end
       elseif val.k == "p" then return nil, "an input field that can't be read"
-      else got = (val.k == "str") and val.v or false; j = j + 1 end
-      if key.v == "projectId" then n = n + 1; pid = got end
+      else got = (val.k == "str" and val.v) or false; j = j + 1 end
+      fields[key.v] = got
     end
-    if n ~= 1 then return nil, "not exactly one projectId" end
     after = j + 1
   else
     return nil, "input that can't be read"
   end
   if after ~= f.b then return nil, "arguments other than input" end
-  if type(pid) ~= "string" then return nil, "a projectId that can't be read" end
-  return pid
+  return fields
+end
+
+-- The project a Projects mutation writes to (input.projectId, a string), or nil + reason.
+local function project_of(t, f, vars)
+  local fields, why = read_input(t, f, vars)
+  if not fields then return nil, why end
+  if type(fields.projectId) ~= "string" then return nil, "a projectId that can't be read" end
+  return fields.projectId
+end
+
+-- An allowlisted mutation may not name a project at all (createIssue, updateIssue and
+-- updatePullRequest take projectIds/projectV2Ids): that would skip the projects pin. With
+-- arguments, its input must be readable (as above) and no field may mention a project.
+local function no_project_fields(t, f, vars)
+  if not f.a then return nil end
+  local fields, why = read_input(t, f, vars)
+  if not fields then return why end
+  for k in pairs(fields) do
+    if type(k) ~= "string" or k:lower():find("project", 1, true) then return "input field " .. tostring(k) .. " names a project" end
+  end
+  return nil
 end
 
 -- nil if allowed under the preset's allowlist (and, for Projects mutations, the projects
@@ -368,7 +389,11 @@ function M.check_document(doc, rules, vars, projects)
             local pid, why = project_of(t, f, vars)
             if not pid then return "mutation " .. f.name .. ": " .. why end
             if not projects[pid] then return "mutation " .. f.name .. " on a project not allowed here" end
-          elseif not ALLOWED[f.name] then return "mutation " .. f.name .. " is not allowed" end
+          elseif not ALLOWED[f.name] then return "mutation " .. f.name .. " is not allowed"
+          else
+            local why = no_project_fields(t, f, vars)
+            if why then return "mutation " .. f.name .. ": " .. why end
+          end
         end
         i = j
       end

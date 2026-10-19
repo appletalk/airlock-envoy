@@ -249,7 +249,7 @@ parse() {  # parse <source label>, text on stdin
 # uses one definition per host. projects (GitHub presets only) lets Projects v2 item writes
 # through for those project node IDs and no others.
 parse_http() {  # parse_http <where> <words...>
-  local where=$1 hp host port variant="" k rules="" cred="" projects="" id; shift
+  local where=$1 hp host port variant="" k rules="" cred="" projects="" id; local -a ids; shift
   [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [projects <id>,...]"
   hp=$1; shift
   if [[ "$hp" == *@* ]]; then
@@ -267,7 +267,8 @@ parse_http() {  # parse_http <where> <words...>
       rules) [ $# -ge 2 ] || die "$where: rules needs a preset"; rules=$2; shift 2 ;;
       credential) [ $# -ge 2 ] || die "$where: credential needs a name"; cred=$2; shift 2 ;;
       projects) [ $# -ge 2 ] || die "$where: projects needs project IDs"
-        for id in ${2//,/ }; do
+        IFS=, read -ra ids <<< "$2"
+        for id in "${ids[@]}"; do
           [[ "$id" =~ ^PVT_[A-Za-z0-9_-]{1,64}$ ]] || die "$where: bad project ID '$id' (want a Projects v2 node ID, PVT_...)"
           case " $projects " in *" $id "*) ;; *) projects="${projects:+$projects }$id" ;; esac
         done
@@ -526,19 +527,13 @@ EOF
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the $rules rules\\n" } }
 EOF
 }
-# The GraphQL route's filters: a rate limit per listener (10 a second, bursts of 20), the body
+# The GraphQL route's filters: a rate limit per listener (10 a second, bursts of 20, one bucket
+# for all its GraphQL routes: the filter's own, as no route sets one), the body
 # buffered up to 64 KiB (413 above it), then the check. The check runs on Envoy's worker
 # threads, which every listener shares, so these bound what one box can cost the others.
 graphql_route_filters() {
   cat <<'EOF'
-                  graphql-ratelimit:
-                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
-                    config:
-                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
-                      stat_prefix: graphql
-                      token_bucket: { max_tokens: 20, tokens_per_fill: 10, fill_interval: 1s }
-                      filter_enabled: { runtime_key: graphql_ratelimit_enabled, default_value: { numerator: 100, denominator: HUNDRED } }
-                      filter_enforced: { runtime_key: graphql_ratelimit_enforced, default_value: { numerator: 100, denominator: HUNDRED } }
+                  graphql-ratelimit: { "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }
                   graphql-buffer:
                     "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
                     config: { "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.BufferPerRoute, buffer: { max_request_bytes: 65536 } }
@@ -561,6 +556,9 @@ http_filters() {
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
               stat_prefix: graphql
+              token_bucket: { max_tokens: 20, tokens_per_fill: 10, fill_interval: 1s }
+              filter_enabled: { runtime_key: graphql_ratelimit_enabled, default_value: { numerator: 100, denominator: HUNDRED } }
+              filter_enforced: { runtime_key: graphql_ratelimit_enforced, default_value: { numerator: 100, denominator: HUNDRED } }
           - name: graphql-buffer
             disabled: true
             typed_config:
@@ -689,6 +687,12 @@ EOF
           normalize_path: true
           merge_slashes: true
           path_with_escaped_slashes_action: REJECT_REQUEST
+          # A header name with an underscore is refused (400): Rack and CGI servers read
+          # x_http_method_override as x-http-method-override, so it would slip past the strip
+          # below (and past the GraphQL check's content-type).
+          common_http_protocol_options: { headers_with_underscores_action: REJECT_REQUEST }
+          # No x-request-id of Envoy's own; a box-sent one is stripped below.
+          generate_request_id: false
           # Idle tunnels are cut by tcp_proxy's idle_timeout (1 h, on the SNI listeners), not here.
           stream_idle_timeout: 0s
           access_log_options:
@@ -779,7 +783,7 @@ EOF
                 request_mutations:
                 - remove_on_match: { key_matcher: { prefix: "x-envoy-", ignore_case: true } }
                 - remove_on_match: { key_matcher: { prefix: "x-forwarded-", ignore_case: true } }
-                - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)forwarded|x-real-ip|x-client-ip|x-original-url|x-rewrite-url|x-http-method|x-http-method-override|x-method-override" } } }
+                - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)forwarded|x-real-ip|x-client-ip|x-original-url|x-rewrite-url|x-http-method|x-http-method-override|x-method-override|x-request-id" } } }
 EOF
     http_filters "$l"
     cat <<'EOF'

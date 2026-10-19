@@ -247,21 +247,25 @@ dev   @anthropic web http://api.github.com http://github.com
 - **GitHub writes go through `POST /graphql`**, so both GitHub presets run a check on that
   route (`install/github-graphql.lua`): queries pass; a mutation passes only if every top-level
   field is on the preset's allowlist (as gh 2.102 sends them: `replaceActorsForAssignable` for
-  assignees, `requestReviewsByLogin` for reviewers); `mergePullRequest`, review approval, ref
+  assignees, `requestReviewsByLogin` for reviewers) and its `input` is readable and names no
+  project (`projectIds`, `projectV2Ids`: those would skip the `projects` pin); `mergePullRequest`, review approval, ref
   and branch-protection changes are refused, and so is any body it can't read for certain, a
   query string, a Content-Type other than JSON, a compressed body, and any error while
   checking. Every other `/graphql` form (any method, case or suffix) is refused. LuaJIT's
   compiler is off (the unit's `MemoryDenyWriteExecute` would make it panic Envoy).
 - **What one box can cost the others**: the check runs on Envoy's worker threads, which every
-  listener shares, so its route is bounded per listener: 10 requests a second (bursts of 20,
-  then 429), bodies up to 64 KiB (then 413) and 8192 GraphQL tokens; a few milliseconds of CPU
-  each at most. Every plain-HTTP stream but git's ends after 5 minutes, so a body sent slowly
-  can't hold a connection.
+  listener shares, so it is bounded per listener: 10 GraphQL requests a second over all its
+  GitHub hosts (bursts of 20, then 429), bodies up to 64 KiB (then 413) and 8192 GraphQL
+  tokens. A worst-case body costs about 20 ms of CPU in Envoy, so one listener can keep about
+  a fifth of one worker busy. Every plain-HTTP stream but git's ends after 5 minutes, so a
+  body sent slowly can't hold a connection.
 - Paths are normalized before the rules see them (dot segments, merged slashes) and an escaped
   slash is refused. Headers a box sends that steer Envoy or claim a client or method are
   removed before anything else: `x-envoy-*`, `x-forwarded-*`, `forwarded`, `x-real-ip`,
-  `x-client-ip`, `x-original-url`, `x-rewrite-url` and the method overrides
-  (`x-http-method(-override)`, `x-method-override`); Envoy adds none of its own.
+  `x-client-ip`, `x-original-url`, `x-rewrite-url`, `x-request-id` and the method overrides
+  (`x-http-method(-override)`, `x-method-override`). A header name with an underscore is
+  refused outright (400): Rack and CGI servers read `x_http_method_override` as the dashed
+  name. Envoy adds no headers of its own.
 - **Credentials**: `printf %s "$TOKEN" | sudo airlock-envoy-cred set github-api` (or from a
   prompt; `--format bearer|token|raw|basic:<user>`; for GitHub git, `basic:x-access-token`).
   Envoy uses a new value from the next request, no restart. `revoke` writes a value that grants
