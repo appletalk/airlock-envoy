@@ -14,10 +14,11 @@ User=airlock-envoy
 Group=airlock-envoy
 # The kernel filter below must be enforced, or web would reach every address: systemd accepts
 # IPAddressDeny and silently does nothing where cgroup BPF is missing (some containers, old
-# kernels). So the start fails unless a connect to a denied address (loopback, port 9) gets
-# EPERM from the kernel. Only a root-written drop-in can skip this (the install test does,
-# inside a container), and the skip is logged.
-ExecStartPre=/bin/bash -c 'if [ "$${AIRLOCK_ENVOY_WEB_FILTER_CHECK:-}" = skip ]; then echo "airlock-envoy-web: WARNING: kernel filter check skipped (AIRLOCK_ENVOY_WEB_FILTER_CHECK=skip)" >&2; exit 0; fi; out=$$( { exec 3<>/dev/tcp/127.0.0.2/9; } 2>&1 ); case "$$out" in *"Operation not permitted"*) exit 0 ;; esac; echo "airlock-envoy-web: the kernel IP filter is not enforced on this host (a connect to 127.0.0.2:9 gave: $${out:-success}); not starting web" >&2; exit 1'
+# kernels). So the start fails unless a UDP datagram to a denied address (loopback, port 9)
+# is refused with EPERM. (Not TCP: the filter drops a SYN silently, so a connect just waits.)
+# Bounded by timeout either way. Only a root-written drop-in can skip this (the install test
+# does, inside a container), and the skip is logged.
+ExecStartPre=/bin/bash -c 'if [ "$${AIRLOCK_ENVOY_WEB_FILTER_CHECK:-}" = skip ]; then echo "airlock-envoy-web: WARNING: kernel filter check skipped (AIRLOCK_ENVOY_WEB_FILTER_CHECK=skip)" >&2; exit 0; fi; out=$$(timeout 3 bash -c "exec 3<>/dev/udp/127.0.0.2/9 && echo x >&3" 2>&1); case "$$out" in *"Operation not permitted"*) exit 0 ;; esac; echo "airlock-envoy-web: the kernel IP filter is not enforced on this host (UDP to 127.0.0.2:9 gave: $${out:-sent}); not starting web" >&2; exit 1'
 # Rendered from /etc/airlock-envoy/site.conf by airlock-envoy-apply, which starts this unit only
 # while some listener lists web.
 ExecStart=/usr/local/bin/envoy -c /etc/airlock-envoy/envoy-web.yaml --disable-hot-restart --file-flush-interval-msec 1000 --log-level warn
