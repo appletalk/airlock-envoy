@@ -10,7 +10,7 @@
 set -euo pipefail
 # The log flushes every 100 ms here (1 s in the service), so the checks need not wait long.
 cd "$(dirname "$0")/.."
-image=docker.io/envoyproxy/envoy:v1.39.4@sha256:63dd445d23d7d419d1bba8b2b9b1b8fdb80f38ae1516fb5d2dcd8856713b7eac
+image=docker.io/envoyproxy/envoy:v1.40.0@sha256:459f2a6404c340fe6afccd69d85527012d47f3c036765493e6f8f3113fa384de
 
 for c in airlock-envoy-spike airlock-envoy-web-spike; do
   if podman container exists "$c"; then echo "$c is already running; stop it first" >&2; exit 1; fi

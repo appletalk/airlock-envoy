@@ -14,7 +14,7 @@ set -euo pipefail
 [ -n "${_CONTAINERS_USERNS_CONFIGURED:-}" ] || exec podman unshare "$0" "$@"
 cd "$(dirname "$0")/.."
 distro="${1:?ubuntu[-VERSION], debian or arch}"
-ver="${2:-1.39.4}"
+ver="${2:-1.40.0}"
 apt_prep='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd systemd-sysv curl gpg acl socat jq ca-certificates >/dev/null'
 case "$distro" in
   ubuntu|ubuntu-24.04) base=docker.io/library/ubuntu:24.04; prep="$apt_prep"; init=/sbin/init ;;
