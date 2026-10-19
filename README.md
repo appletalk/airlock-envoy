@@ -12,10 +12,11 @@ Two modes, both on sockets, neither decrypting TLS:
   Anthropic API. The proxy sees host, TLS server name, bytes and timing, never content, and holds
   no secret. The built-in `anthropic` socket allows Claude only; a host's site file adds more
   sockets, each a whole access profile (see [Site listeners](#site-listeners)).
-- **Plain-HTTP injection** (planned). For clients that can be pointed at a plain-HTTP URL (`gh`,
-  `git`, `kubectl`, `curl`): Envoy applies policy, adds the credential, and opens TLS upstream
-  itself. Service-specific policy (for GitHub, per-repo tokens, no approvals, branch-only pushes)
-  comes from an `ext_authz` decision service.
+- **Plain HTTP with an injected credential.** For clients that can be pointed at a plain-HTTP
+  URL (`gh`, `git`, `curl`): Envoy checks method and path against a preset, adds the
+  credential, and opens TLS upstream itself, so the box never holds the token (see
+  [Plain HTTP and credentials](#plain-http-and-credentials)). Not yet: per-repo scoping,
+  branch-only pushes and minted per-repo tokens (an `ext_authz` decision service).
 
 Status: **spike**, with an install path tested on Ubuntu 22.04, 24.04 and 26.04, Debian 13 and
 Arch (systemd-booted containers), and run as a service on an Arch workstation.
@@ -219,18 +220,31 @@ dev   @anthropic web http://api.github.com http://github.com
   can write**: force-push, branch deletion and a push to `main` included, so a merge without
   any GraphQL check; protect branches on the server, rulesets or branch protection, or use
   `git-read`),
-  `github-api` (reads; PR and issue create, edit, comment, labels, reviewers; refused: merge,
-  approve, settings, hooks, keys, deletes, anything else), `any` (every method but TRACE).
-- **GitHub writes go through `POST /graphql`**, so `github-api` runs a check on that route
-  (`install/github-graphql.lua`): queries pass; a mutation passes only if every top-level field
-  is on its allowlist (PR/issue create and edit, comments, labels, reviewers, reactions);
-  `mergePullRequest`, review approval, ref and branch-protection changes are refused, and so is
-  any body it can't read for certain, a query string, a Content-Type other than JSON, a
-  compressed body, and any error while checking. Every other `/graphql` form (any method,
-  case or suffix) is refused. LuaJIT's compiler is off (the unit's `MemoryDenyWriteExecute`
-  would make it panic Envoy).
+  `github-issues` (reads; issue create, edit, close, reopen, comments, labels, assignees,
+  reactions; no PR writes), `github-api` (the same plus PR create, edit including the base
+  branch, close, reopen, draft state, reviewers; refused in both: merge, approve, auto-merge,
+  settings, hooks, keys, deletes, Projects, anything else), `any` (every method but TRACE).
+  REST numbers PRs as issues, and GraphQL comment, label and assignee writes take any node ID,
+  so `github-issues` also reaches a PR's comments, labels, assignees, title, body and state
+  (not its base, reviewers or code).
+- **GitHub writes go through `POST /graphql`**, so both GitHub presets run a check on that
+  route (`install/github-graphql.lua`): queries pass; a mutation passes only if every top-level
+  field is on the preset's allowlist (as gh 2.102 sends them: `replaceActorsForAssignable` for
+  assignees, `requestReviewsByLogin` for reviewers); `mergePullRequest`, review approval, ref
+  and branch-protection changes are refused, and so is any body it can't read for certain, a
+  query string, a Content-Type other than JSON, a compressed body, and any error while
+  checking. Every other `/graphql` form (any method, case or suffix) is refused. LuaJIT's
+  compiler is off (the unit's `MemoryDenyWriteExecute` would make it panic Envoy).
+- **What one box can cost the others**: the check runs on Envoy's worker threads, which every
+  listener shares, so its route is bounded per listener: 10 requests a second (bursts of 20,
+  then 429), bodies up to 64 KiB (then 413) and 8192 GraphQL tokens; a few milliseconds of CPU
+  each at most. Every plain-HTTP stream but git's ends after 5 minutes, so a body sent slowly
+  can't hold a connection.
 - Paths are normalized before the rules see them (dot segments, merged slashes) and an escaped
-  slash is refused; Envoy's own `x-envoy-*` headers are not sent upstream.
+  slash is refused. Headers a box sends that steer Envoy or claim a client or method are
+  removed before anything else: `x-envoy-*`, `x-forwarded-*`, `forwarded`, `x-real-ip`,
+  `x-client-ip`, `x-original-url`, `x-rewrite-url` and the method overrides
+  (`x-http-method(-override)`, `x-method-override`); Envoy adds none of its own.
 - **Credentials**: `printf %s "$TOKEN" | sudo airlock-envoy-cred set github-api` (or from a
   prompt; `--format bearer|token|raw|basic:<user>`; for GitHub git, `basic:x-access-token`).
   Envoy uses a new value from the next request, no restart. `revoke` writes a value that grants
@@ -238,6 +252,14 @@ dev   @anthropic web http://api.github.com http://github.com
   and dates, never values. Apply refuses a listener whose credential isn't set.
 - **Never logged**: Envoy's access log sees request headers *after* the credential is added, so
   no rendered log format names a request header (a test checks it), and Envoy runs at `warn`.
+- **A credential is only as secret as the upstream keeps it.** An upstream that echoes request
+  headers (an echo service, a debug endpoint, a misconfigured app) hands the injected value
+  back to the box. Use `any` only for upstreams you trust not to reflect headers.
+- **What the presets don't bound** (the site's job): no repo scoping, so a box can read any repo
+  the token can and write issues and comments in any of them, e.g. copy a private repo into
+  another repo's issue (only the token's or App installation's repo list bounds it); and label
+  and comment writes also land on PRs, where org automation (an auto-merge label, a
+  comment-triggered workflow) can turn them into merges or deploys.
   The admin config dump shows secrets as `[redacted]`.
 - **Clients in the box**: curl and anything that honours `http_proxy` use `http://<host>/`
   URLs. git keeps its ssh remotes on the host: in the box only, a config rewrites them, e.g.

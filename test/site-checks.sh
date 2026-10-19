@@ -190,6 +190,34 @@ pids+=($!)
 slot; { mkdir -p /tmp/ghc; r="$(GH_CONFIG_DIR=/tmp/ghc GH_TOKEN=dummy sh -c "gh config set http_unix_socket /run/proxy/t-http.sock >/dev/null 2>&1; gh api /zen 2>&1" | tr "\n" " ")"
   verdict "gh over the socket reaches GitHub with the injected (dummy) credential" "*Bad credentials*" "$r" > "$f"; } &
 pids+=($!)
+slot; { r="$(curl -s -x http://127.0.0.1:3132 -H "X-Envoy-Upstream-Rq-Timeout-Ms: 1" -H "X-Envoy-Box: marker-e" -H "X-Forwarded-For: 10.9.9.9" -H "X-Forwarded-Host: marker-h" \
+    -H "Forwarded: for=marker-f" -H "X-HTTP-Method-Override: DELETE" -H "X-Method-Override: DELETE" http://httpbin.org/anything/headers | tr -d "\n")"
+  if [[ "$r" == *"\"url\""* && "$r" != *X-Envoy* && "$r" != *10.9.9.9* && "$r" != *marker-* && "$r" != *Override* ]]; then r="none reached the host"; fi
+  verdict "box-sent x-envoy-*, forwarding and method-override headers stripped" "none reached the host" "${r:0:300}" > "$f"; } &
+pids+=($!)
+slot; { r="$(head -c 70000 /dev/zero | tr "\0" a | sed "s/^/{\"query\":\"{ viewer { login } }\",\"v\":\"/; s/\$/\"}/" | \
+    curl -s -o /dev/null -w "http=%{http_code}" -x http://127.0.0.1:3132 -H "Content-Type: application/json" --data-binary @- http://httpbin.org/graphql)"
+  verdict "a GraphQL body over 64 KiB is refused before the check reads it" "http=413" "$r" > "$f"; } &
+pids+=($!)
+# github-issues (httpbingo): issues pass to the host (its 404), PR writes are refused here.
+check 3132 "issues: GraphQL createIssue passes"            "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { createIssue(input: {}) { clientMutationId } }\"}" http://httpbingo.org/graphql
+check 3132 "issues: GraphQL replaceActorsForAssignable passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { replaceActorsForAssignable(input: {}) { clientMutationId } }\"}" http://httpbingo.org/graphql
+check 3132 "issues: GraphQL createPullRequest refused"     "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { createPullRequest(input: {}) { clientMutationId } }\"}" http://httpbingo.org/graphql
+check 3132 "issues: GraphQL updatePullRequest refused"     "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { updatePullRequest(input: {}) { clientMutationId } }\"}" http://httpbingo.org/graphql
+check 3132 "issues: REST issue create passes"              "$P http=404 exit=0" -X POST http://httpbingo.org/repos/o/r/issues
+check 3132 "issues: REST issue edit passes"                "$P http=404 exit=0" -X PATCH http://httpbingo.org/repos/o/r/issues/1
+check 3132 "issues: REST pull create refused"              "$P http=403 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls
+check 3132 "issues: REST pull edit refused"                "$P http=403 exit=0" -X PATCH http://httpbingo.org/repos/o/r/pulls/1
+check 3132 "issues: REST reviewers refused"                "$P http=403 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls/1/requested_reviewers
+check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
+settle
+# Alone: 40 GraphQL requests at once on one listener; the limit on the route (bursts of 20) answers
+# some with 429 before the check runs.
+note "== GraphQL rate limit per listener"
+slot; { r="$(for _ in $(seq 40); do curl -s -o /dev/null -w "%{http_code}\n" -x http://127.0.0.1:3132 -H "Content-Type: application/json" --data "{\"query\":\"{ viewer { login } }\"}" http://httpbingo.org/graphql & done; wait)"
+  n429=$(grep -c 429 <<< "$r"); n404=$(grep -c 404 <<< "$r")
+  verdict "40 at once: some limited (429), the rest through (404)" "limited through*" "$([ "$n429" -ge 10 ] && echo limited) $([ "$n404" -ge 10 ] && echo through) ($n429 x 429, $n404 x 404)" > "$f"; } &
+pids+=($!)
 settle
 # Alone, after the rest: it holds t-other at its cap.
 note "== connection caps: one listener at its cap does not starve another"
