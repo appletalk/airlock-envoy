@@ -1,6 +1,7 @@
--- airlock-envoy: GitHub GraphQL write check (the github-api rules). Inlined into the rendered
--- config by airlock-envoy-apply. A POST /graphql body is allowed only if every mutation in it
--- asks for top-level fields on the allowlist below; queries pass. Default deny: a body this
+-- airlock-envoy: GitHub GraphQL write check (the github-api and github-issues rules). Inlined
+-- into the rendered config by airlock-envoy-apply. A POST /graphql body is allowed only if
+-- every mutation in it asks for top-level fields on the route's allowlist below (the route's
+-- metadata names it; none, or an unknown one, refuses); queries pass. Default deny: a body this
 -- can't read for certain (not one JSON object, no single string "query", a GraphQL document
 -- that doesn't tokenize, a subscription, a fragment on Mutation or a spread at a mutation's
 -- top level, schema definitions) is refused. Plain Lua 5.1 (LuaJIT, as in Envoy), no modules. Any error while
@@ -10,16 +11,37 @@
 -- panic the whole Envoy. The interpreter is plenty for request bodies this size.
 if jit then jit.off() end
 
-local ALLOWED = {
-  createPullRequest = true, updatePullRequest = true, closePullRequest = true,
-  reopenPullRequest = true, markPullRequestReadyForReview = true,
-  convertPullRequestToDraft = true, requestReviews = true,
-  addComment = true, updateIssueComment = true,
+-- Issues: create, edit, close, reopen, comments, labels, assignees (gh 2.102 sends
+-- replaceActorsForAssignable for --assignee), reactions. Comments, labels, assignees and
+-- reactions take any node ID, so they reach PRs too.
+local ISSUES = {
   createIssue = true, updateIssue = true, closeIssue = true, reopenIssue = true,
+  addComment = true, updateIssueComment = true,
   addLabelsToLabelable = true, removeLabelsFromLabelable = true,
-  addAssigneesToAssignable = true, removeAssigneesFromAssignable = true,
+  replaceActorsForAssignable = true, addAssigneesToAssignable = true,
+  removeAssigneesFromAssignable = true,
   addReaction = true, removeReaction = true,
 }
+-- The above, and PRs: create, edit (base branch included), close, reopen, draft state,
+-- reviewers (gh 2.102 sends requestReviewsByLogin). No merge, approval or auto-merge.
+local PULLS = {
+  createPullRequest = true, updatePullRequest = true, closePullRequest = true,
+  reopenPullRequest = true, markPullRequestReadyForReview = true,
+  convertPullRequestToDraft = true, requestReviews = true, requestReviewsByLogin = true,
+}
+local function union(a, b)
+  local t = {}
+  for k in pairs(a) do t[k] = true end
+  for k in pairs(b) do t[k] = true end
+  return t
+end
+local ALLOWLISTS = { ["github-issues"] = ISSUES, ["github-api"] = union(ISSUES, PULLS) }
+
+-- Bounds on the work one request can cause (the check runs on Envoy's worker threads, which
+-- every listener shares): the body (Envoy's buffer filter also stops it at this size) and
+-- the tokens in the query.
+local MAX_BODY = 65536
+local MAX_TOKENS = 8192
 
 local M = {}
 
@@ -127,6 +149,7 @@ end
 local function tokenize(s)
   local t, i, n = {}, 1, #s
   while i <= n do
+    if #t >= MAX_TOKENS then return nil end
     local c = s:sub(i, i)
     if c:match("[ \t\r\n,\239\187\191]") then i = i + 1   -- whitespace, commas, BOM bytes
     elseif c == "#" then
@@ -216,10 +239,12 @@ local function top_fields(t, i)
   end
 end
 
--- nil if allowed, else the reason.
-function M.check_document(doc)
+-- nil if allowed under allowlist ALLOWED, else the reason.
+function M.check_document(doc, rules)
+  local ALLOWED = ALLOWLISTS[rules or ""]
+  if not ALLOWED then return "no GraphQL allowlist for rules '" .. tostring(rules) .. "'" end
   local t = tokenize(doc)
-  if not t then return "the GraphQL document does not tokenize" end
+  if not t then return "the GraphQL document does not tokenize (or has over " .. MAX_TOKENS .. " tokens)" end
   if #t == 0 then return "empty GraphQL document" end
   local i = 1
   while i <= #t do
@@ -259,12 +284,13 @@ function M.check_document(doc)
   return nil
 end
 
--- nil if the body is allowed, else the reason.
-function M.check_body(body)
+-- nil if the body is allowed under rules (a preset name), else the reason.
+function M.check_body(body, rules)
   if not body or body == "" then return "empty body" end
+  if #body > MAX_BODY then return "GraphQL body over " .. MAX_BODY .. " bytes" end
   local q, why = M.query_of(body)
   if not q then return why end
-  return M.check_document(q)
+  return M.check_document(q, rules)
 end
 
 -- nil if the request (headers and body) may go on, else the reason.
@@ -279,10 +305,12 @@ local function check_request(handle)
   end
   if h:get("content-encoding") then return "an encoded (compressed) body" end
   local len = tonumber(h:get("content-length") or "")
-  if len and len > 1048576 then return "GraphQL body over 1 MiB" end
+  if len and len > MAX_BODY then return "GraphQL body over " .. MAX_BODY .. " bytes" end
+  -- The route's preset, from its metadata (airlock-envoy-apply sets it).
+  local rules = handle:metadata():get("rules")
   local b = handle:body()
   local body = b and b:getBytes(0, b:length()) or ""
-  return M.check_body(body)
+  return M.check_body(body, rules)
 end
 
 function envoy_on_request(handle)

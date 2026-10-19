@@ -104,7 +104,7 @@ fi
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
 declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
-PRESETS="any git git-read github-api victoria-logs victoria-metrics"
+PRESETS="any git git-read github-api github-issues victoria-logs victoria-metrics"
 
 valid_dest() {
   local h p o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -412,6 +412,19 @@ edit-comment PATCH regex /repos/[^/]+/[^/]+/issues/comments/[0-9]+
 reviewers POST regex /repos/[^/]+/[^/]+/pulls/[0-9]+/requested_reviewers
 EOR
     ;;
+    # Issues only. REST numbers PRs as issues, so these routes (and the GraphQL comment, label
+    # and assignee writes) also reach a PR's comments, labels, assignees, title, body and
+    # state; not its base branch, reviewers or code.
+    github-issues) cat <<'EOR'
+graphql POST exact /graphql lua
+graphql-other * regex (?i)/graphql.* deny
+read GET|HEAD prefix /
+create POST regex /repos/[^/]+/[^/]+/issues
+issue-sub POST regex /repos/[^/]+/[^/]+/issues/[0-9]+/(comments|labels|assignees)
+edit PATCH regex /repos/[^/]+/[^/]+/issues/[0-9]+
+edit-comment PATCH regex /repos/[^/]+/[^/]+/issues/comments/[0-9]+
+EOR
+    ;;
     victoria-logs) echo 'logsql GET|POST prefix /select/logsql/' ;;
     victoria-metrics) cat <<'EOR'
 query GET|POST prefix /api/v1/query
@@ -445,8 +458,11 @@ creds_used() {  # every credential some listener's http destinations use, once e
 # allowed one goes to the host with Host fixed (so another site on the same edge is out of
 # reach) and, if the host has one, its credential added (replacing anything the box sent).
 http_vhost() {
-  local h=$1 rules=${HTTP_RULES[$1]} cred=${HTTP_CRED[$1]} name methods kind pat flag timeout
-  timeout=120s; [ "$rules" = git ] && timeout=0s   # a clone can take long; the idle timeout still applies
+  local h=$1 rules=${HTTP_RULES[$1]} cred=${HTTP_CRED[$1]} name methods kind pat flag timeout maxdur
+  # A clone or push can take long (the idle timeout still applies); anything else gets a cap
+  # on the whole stream, so a slowly sent body can't hold a connection for good.
+  timeout=120s maxdur=", max_stream_duration: { max_stream_duration: 300s }"
+  case "$rules" in git|git-read) timeout=0s maxdur= ;; esac
   cat <<EOF
             - name: "http-$h"
               domains: ["$h", "$h:80"]
@@ -466,10 +482,12 @@ EOF
       printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules\\n" } }\n' "$rules"
       continue
     fi
-    echo "                route: { cluster: \"http-$h\", host_rewrite_literal: \"$h\", timeout: $timeout, idle_timeout: 300s }"
+    echo "                route: { cluster: \"http-$h\", host_rewrite_literal: \"$h\", timeout: $timeout, idle_timeout: 300s$maxdur }"
+    # The GraphQL check reads the preset's allowlist from the route's metadata.
+    [ "${flag:-}" != lua ] || echo "                metadata: { filter_metadata: { github-graphql: { rules: \"$rules\" } } }"
     if [ -n "$cred" ] || [ "${flag:-}" = lua ]; then
       echo "                typed_per_filter_config:"
-      [ "${flag:-}" != lua ] || echo "                  github-graphql: { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
+      if [ "${flag:-}" = lua ]; then graphql_route_filters; fi
       [ -z "$cred" ] || echo "                  \"inject-$cred\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
     fi
   done < <(preset_rules "$rules")
@@ -479,17 +497,46 @@ EOF
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the $rules rules\\n" } }
 EOF
 }
+# The GraphQL route's filters: a rate limit per listener (10 a second, bursts of 20), the body
+# buffered up to 64 KiB (413 above it), then the check. The check runs on Envoy's worker
+# threads, which every listener shares, so these bound what one box can cost the others.
+graphql_route_filters() {
+  cat <<'EOF'
+                  graphql-ratelimit:
+                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                    config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: graphql
+                      token_bucket: { max_tokens: 20, tokens_per_fill: 10, fill_interval: 1s }
+                      filter_enabled: { runtime_key: graphql_ratelimit_enabled, default_value: { numerator: 100, denominator: HUNDRED } }
+                      filter_enforced: { runtime_key: graphql_ratelimit_enforced, default_value: { numerator: 100, denominator: HUNDRED } }
+                  graphql-buffer:
+                    "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig
+                    config: { "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.BufferPerRoute, buffer: { max_request_bytes: 65536 } }
+                  github-graphql: { "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }
+EOF
+}
 # A listener's GraphQL check and credential injectors, each disabled until a route enables it.
 # The injected header is never logged: no log format here names a request header.
 http_filters() {
   local d c lua=0 seen=" " f
   for d in ${HDESTS[$1]:-}; do
-    [ "${HTTP_RULES[$d]}" != github-api ] || lua=1
+    case "${HTTP_RULES[$d]}" in github-api|github-issues) lua=1 ;; esac
   done
   if [ "$lua" = 1 ]; then
     f="$(lua_file)"
-    [ -r "$f" ] || die "the github-api rules need $f (install/install-service.sh installs it)"
+    [ -r "$f" ] || die "the github-api and github-issues rules need $f (install/install-service.sh installs it)"
     cat <<'EOF'
+          - name: graphql-ratelimit
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+              stat_prefix: graphql
+          - name: graphql-buffer
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
+              max_request_bytes: 65536
           - name: github-graphql
             disabled: true
             typed_config:
@@ -691,6 +738,17 @@ EOF
                 factory_key: envoy.hashable_string
                 format_string: { text_format_source: { inline_string: "%CONNECTION_ID%" } }
                 shared_with_upstream: ONCE
+          # Headers a box may not send on: Envoy's own (x-envoy-*: retries, timeouts), the
+          # forwarding ones, and method overrides (a GET the rules allowed must not act as a
+          # write upstream). Before the router and the injectors.
+          - name: strip-box-headers
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+              mutations:
+                request_mutations:
+                - remove_on_match: { key_matcher: { prefix: "x-envoy-", ignore_case: true } }
+                - remove_on_match: { key_matcher: { prefix: "x-forwarded-", ignore_case: true } }
+                - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)forwarded|x-real-ip|x-client-ip|x-original-url|x-rewrite-url|x-http-method|x-http-method-override|x-method-override" } } }
 EOF
     http_filters "$l"
     cat <<'EOF'
@@ -1179,8 +1237,11 @@ for l in "${LISTENERS[@]}"; do
     systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
   fi
   systemctl start "airlock-envoy-proxy@$l.socket"
-  install -m 0644 -o root -g root "$work/$l.clients" "$CLIENTS_RUN/$l.clients.new"
-  mv -f "$CLIENTS_RUN/$l.clients.new" "$CLIENTS_RUN/$l.clients"
+  # Only next to a socket that runs (a --stop in between leaves none, nor its directory).
+  if systemctl is-active --quiet "airlock-envoy-proxy@$l.socket"; then
+    install -m 0644 -o root -g root "$work/$l.clients" "$CLIENTS_RUN/$l.clients.new"
+    mv -f "$CLIENTS_RUN/$l.clients.new" "$CLIENTS_RUN/$l.clients"
+  fi
 done
 # Listeners no longer in the site file: their sockets go, so a box set to one fails to launch.
 declare -A keep=()

@@ -140,10 +140,11 @@ fields="$({ "$apply" --render "$work/site"; "$apply" --render-web "$work/site"; 
 if [ "$fields" = "%REQ(:AUTHORITY)% %REQ(:METHOD)% %REQ(:PATH)% " ]; then echo "ok   logs name no request header (only method, authority, path)"
 else echo "FAIL logs name request fields beyond method, authority, path: $fields"; fails=$((fails+1)); fi
 r="$("$apply" --render "$work/site")"
-if grep -q 'github-graphql: {' <<< "$r" && [ "$(grep -c 'github-graphql: {' <<< "$r")" = 1 ] \
+if [ "$(grep -c 'github-graphql: { "@type"' <<< "$r")" = 1 ] && grep -q 'filter_metadata: { github-graphql: { rules: "github-api" } }' <<< "$r" \
+   && grep -q 'max_request_bytes: 65536 }' <<< "$r" && grep -q 'token_bucket: { max_tokens: 20' <<< "$r" && grep -q 'name: strip-box-headers' <<< "$r" \
    && grep -q '"inject-c1": {' <<< "$r" && grep -q 'name: "deny-connect-http-api.example.com"' <<< "$r" \
    && grep -q 'disabled: true' <<< "$r" && grep -q 'mergePullRequest\|ALLOWED' <<< "$r"; then
-  echo "ok   plain-HTTP rendering: the GraphQL check on one route only, injectors per route, CONNECT refused"
+  echo "ok   plain-HTTP rendering: the GraphQL check (rate limit, 64 KiB, the preset's allowlist) on one route only, injectors per route, CONNECT refused, box headers stripped"
 else echo "FAIL plain-HTTP rendering"; fails=$((fails+1)); fi
 
 # The web Envoy, per profile: its own listener, socket and DNS cache; IPv4 only (A records);
@@ -177,7 +178,7 @@ if [ "$got" = "$want" ]; then echo "ok   web drop-in: site networks denied, reso
 else echo "FAIL web drop-in, got:"; echo "$got"; fails=$((fails+1)); fi
 
 # A file shaped like a real site renders to a config Envoy accepts.
-printf 'x @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443\ny example.org:8443 x-y.example.com:443\n' > "$work/site"
+printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues\nhttp g.example.com rules git\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\n' > "$work/site"
 "$apply" --render "$work/site" > "$work/envoy.yaml"
 if envoy="$(command -v envoy)"; then
   # Envoy picks the format by extension, and validate mode opens the access log.

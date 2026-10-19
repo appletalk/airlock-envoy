@@ -57,11 +57,35 @@ local cases = {
   { false, j("mutation { addComment(input: {body: \"unterminated }) { id } }") },
   { false, j("mutation { addComment(input: {}) { id } } }") },
   { false, '{"query":"mutation { createIssue(input: {}) { id } }\\u00e9"}' },
+  -- what gh 2.102 sends for assignees and reviewers
+  { true,  j("mutation { replaceActorsForAssignable(input: {}) { clientMutationId } }") },
+  { true,  j("mutation { requestReviewsByLogin(input: {}) { clientMutationId } }") },
+  -- github-issues: issues, comments, labels, assignees; no PR writes
+  { true,  j("mutation { createIssue(input: {}) { clientMutationId } }"), "github-issues" },
+  { true,  j("mutation { a: addComment(input: {}) { clientMutationId } b: addLabelsToLabelable(input: {}) { clientMutationId } }"), "github-issues" },
+  { true,  j("mutation { replaceActorsForAssignable(input: {}) { clientMutationId } }"), "github-issues" },
+  { true,  j("mutation { closeIssue(input: {}) { clientMutationId } }"), "github-issues" },
+  { true,  j("{ viewer { login } }"), "github-issues" },
+  { false, j("mutation { createPullRequest(input: {}) { clientMutationId } }"), "github-issues" },
+  { false, j("mutation { updatePullRequest(input: {baseRefName: \"main\"}) { clientMutationId } }"), "github-issues" },
+  { false, j("mutation { requestReviews(input: {}) { clientMutationId } }"), "github-issues" },
+  { false, j("mutation { requestReviewsByLogin(input: {}) { clientMutationId } }"), "github-issues" },
+  { false, j("mutation { closePullRequest(input: {}) { clientMutationId } }"), "github-issues" },
+  { false, j("mutation { mergePullRequest(input: {}) { clientMutationId } }"), "github-issues" },
+  { false, j("mutation { updateProjectV2ItemFieldValue(input: {}) { clientMutationId } }"), "github-issues" },
+  -- no allowlist for the route: refused, queries too
+  { false, j("{ viewer { login } }"), "" },
+  { false, j("{ viewer { login } }"), "any" },
+  -- bounds: the body (64 KiB) and the tokens (8192)
+  { true,  '{"query":"{ viewer { login } }","v":"' .. string.rep("x", 65000) .. '"}' },
+  { false, '{"query":"{ viewer { login } }","v":"' .. string.rep("x", 65536) .. '"}' },
+  { true,  j("{ " .. string.rep("a ", 8000) .. "}") },
+  { false, j("{ " .. string.rep("a ", 8200) .. "}") },
 }
 
 local fails = 0
 for n, c in ipairs(cases) do
-  local why = G.check_body(c[2])
+  local why = G.check_body(c[2], c[3] or "github-api")
   local allowed = (why == nil)
   if allowed ~= c[1] then
     fails = fails + 1
@@ -72,9 +96,11 @@ for n, c in ipairs(cases) do
 end
 -- envoy_on_request against a stand-in for Envoy's handle: the header checks, and that an
 -- error anywhere refuses (a script error in Envoy's Lua filter otherwise lets the request on).
-local function handle(hdrs, body, body_errors)
+local function handle(hdrs, body, body_errors, meta)
   local h = { responded = nil }
+  meta = meta or { rules = "github-api" }
   function h:headers() return { get = function(_, k) return hdrs[k] end } end
+  function h:metadata() return { get = function(_, k) return meta[k] end } end
   function h:body()
     if body_errors then error("simulated failure") end
     return { length = function() return #body end, getBytes = function(_, a, n) return body:sub(a + 1, a + n) end }
@@ -93,9 +119,14 @@ local hcases = {
   { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json", ["content-encoding"] = "gzip" }, ok_body },
   { "403", { [":method"] = "GET",  [":path"] = "/graphql", ["content-type"] = "application/json" }, ok_body },
   { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" }, ok_body, true },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json", ["content-length"] = "65537" }, ok_body },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" }, ok_body, false, {} },
+  { nil,   { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" }, ok_body, false, { rules = "github-issues" } },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" },
+           '{"query":"mutation { createPullRequest(input: {}) { id } }"}', false, { rules = "github-issues" } },
 }
 for n, c in ipairs(hcases) do
-  local h = handle(c[2], c[3], c[4])
+  local h = handle(c[2], c[3], c[4], c[5])
   envoy_on_request(h)
   if h.responded ~= c[1] then
     fails = fails + 1
