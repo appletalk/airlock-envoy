@@ -15,7 +15,12 @@ image=docker.io/envoyproxy/envoy:v1.39.4@sha256:63dd445d23d7d419d1bba8b2b9b1b8fd
 for c in airlock-envoy-spike airlock-envoy-web-spike; do
   if podman container exists "$c"; then echo "$c is already running; stop it first" >&2; exit 1; fi
 done
-mkdir -p run run/web
+mkdir -p run run/web run/credentials
+# Test credentials for the site's http destinations (Envoy reads them as SDS files).
+for c in t-cred:SITE-TEST-TOKEN-1 t-gh:dummy-not-a-github-token; do
+  printf 'resources:\n- "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret\n  name: "%s"\n  generic_secret: { secret: { inline_string: "Bearer %s" } }\n' "${c%%:*}" "${c#*:}" \
+    > "run/credentials/${c%%:*}.yaml"
+done
 web=0
 net=pasta
 if [ "${1:-}" = capture ]; then
@@ -43,14 +48,15 @@ fi
 podman run -d --rm --name airlock-envoy-spike --network "$net" \
   --cap-drop all --security-opt no-new-privileges --read-only \
   -e ENVOY_UID=0 -v ./run:/run/airlock-envoy-internal:z -v ./run:/var/log/airlock-envoy:z \
-  -v ./run/web:/run/airlock-envoy-web:z \
+  -v ./run/web:/run/airlock-envoy-web:z -v ./run/credentials:/etc/airlock-envoy/credentials:z \
   "$image" -c /run/airlock-envoy-internal/envoy.yaml --disable-hot-restart --file-flush-interval-msec 100 --log-level warn >/dev/null
 for _ in $(seq 50); do
   up=1; [ -S run/admin.sock ] || up=0
   if [ "$web" = 1 ]; then
     while read -r w; do [ -S "run/web/${w##*/}" ] || up=0; done < <(grep -o '/run/airlock-envoy-web/[a-z0-9-]*[.]sock' run/web/envoy-web.yaml)
   fi
-  [ "$up" = 0 ] || exit 0
+  # The sockets exist from the start; Envoy serves only once its clusters and secrets are in.
+  if [ "$up" = 1 ] && [ "$(curl -s --unix-socket run/admin.sock http://localhost/ready 2>/dev/null)" = LIVE ]; then exit 0; fi
   sleep 0.1
 done
 echo "Envoy did not come up:" >&2

@@ -36,6 +36,12 @@ uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
 install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy
 install -m 0755 -o root -g root "$repo/install/airlock-envoy-apply" /usr/local/sbin/airlock-envoy-apply.new
 mv -f /usr/local/sbin/airlock-envoy-apply.new /usr/local/sbin/airlock-envoy-apply
+install -m 0755 -o root -g root "$repo/install/airlock-envoy-cred" /usr/local/sbin/airlock-envoy-cred.new
+mv -f /usr/local/sbin/airlock-envoy-cred.new /usr/local/sbin/airlock-envoy-cred
+# The GitHub GraphQL write check the github-api rules inline into the config.
+install -D -m 0644 -o root -g root "$repo/install/github-graphql.lua" /usr/local/share/airlock-envoy/github-graphql.lua
+# Credentials for plain-HTTP destinations (airlock-envoy-cred): root writes, Envoy reads.
+install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/credentials
 
 # airlock-envoy-web is enabled and started by airlock-envoy-apply, only while a listener lists web.
 for u in airlock-envoy.service airlock-envoy-web.service airlock-envoy-proxy@.socket airlock-envoy-proxy@.service; do

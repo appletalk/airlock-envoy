@@ -22,3 +22,9 @@ infra     web
 # routable, and your own public addresses.
 internal-name  example.net
 internal-net   198.51.100.0/24 2001:db8:1::/48
+
+# Plain HTTP with a credential the box never sees (airlock-envoy-cred set <name>): GitHub's API
+# under the github-api rules (no merges or approvals) and git over smart HTTP.
+http  api.github.com  rules github-api  credential github-api
+http  github.com      rules git         credential github-git
+dev   @anthropic web http://api.github.com http://github.com

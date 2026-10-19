@@ -18,12 +18,13 @@ podman run --rm --network none --userns keep-id --user "$(id -u):$(id -g)" \
   -v "$DIR/t-other.sock:/run/proxy/t-other.sock${SOCK_MOUNT_OPTS-:z}" \
   -v "$DIR/anthropic.sock:/run/proxy/anthropic.sock${SOCK_MOUNT_OPTS-:z}" \
   -v "$DIR/t-web.sock:/run/proxy/t-web.sock${SOCK_MOUNT_OPTS-:z}" \
+  -v "$DIR/t-http.sock:/run/proxy/t-http.sock${SOCK_MOUNT_OPTS-:z}" \
   --entrypoint bash localhost/airlock-envoy-spike-client:test -c '
-for s in t-site:3128 anthropic:3129 t-other:3130 t-web:3131; do
+for s in t-site:3128 anthropic:3129 t-other:3130 t-web:3131 t-http:3132; do
   socat -lf /dev/null TCP-LISTEN:${s#*:},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/proxy/${s%:*}.sock &
 done
-listening() { for p in 0C38 0C39 0C3A 0C3B; do grep -q ":$p 00000000:0000 0A" /proc/net/tcp || return 1; done; }
-until listening; do sleep 0.01; done   # 127.0.0.1:3128-3131
+listening() { for p in 0C38 0C39 0C3A 0C3B 0C3C; do grep -q ":$p 00000000:0000 0A" /proc/net/tcp || return 1; done; }
+until listening; do sleep 0.01; done   # 127.0.0.1:3128-3132
 # The checks run concurrently (each is a network round trip or several); settle waits for the
 # batch and prints the results in the order they were declared.
 res=/tmp/checks n=0 pids=() fails=0
@@ -148,6 +149,33 @@ slot; { verdict "CONNECT example.com, raw ClientHello with SNI www.example.net (
 pids+=($!)
 slot; { verdict "CONNECT example.com, raw ClientHello with SNI example.com (control)" "HTTP/1.1 200 OK data" "$(rawhello example.com 3131 example.com)" > "$f"; } &
 pids+=($!)
+note "== t-http: plain HTTP (httpbin under github-api rules + t-cred, github.com git, api.github.com for gh)"
+P="proxy=000"
+check 3132 "GET under the read rule"                      "$P http=200 exit=0" http://httpbin.org/anything/read
+slot; { r="$(curl -s -x http://127.0.0.1:3132 -H "Authorization: Bearer FROM-THE-BOX" -H "Host: example.com" http://httpbin.org/anything/x)"
+  verdict "the credential replaces the box one; Host stays pinned" "*SITE-TEST-TOKEN-1*httpbin.org*" \
+    "$(echo "$r" | grep -o "\"Authorization\": \"[^\"]*\"") $(echo "$r" | grep -o "\"Host\": \"[^\"]*\"")" > "$f"; } &
+pids+=($!)
+check 3132 "POST outside the rules"                       "$P http=403 exit=0" -X POST http://httpbin.org/anything/x
+check 3132 "DELETE outside the rules"                     "$P http=403 exit=0" -X DELETE http://httpbin.org/repos/o/r
+check 3132 "PATCH a pull (allowed) reaches the host"      "$P http=404 exit=0" -X PATCH http://httpbin.org/repos/o/r/pulls/1
+check 3132 "GET /graphql refused"                         "$P http=403 exit=0" http://httpbin.org/graphql
+check 3132 "GraphQL mergePullRequest refused"             "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { mergePullRequest(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
+check 3132 "GraphQL aliased merge refused"                "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { createIssue: mergePullRequest(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
+check 3132 "GraphQL createIssue passes to the host"       "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { createIssue(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
+check 3132 "GraphQL query passes to the host"             "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"{ viewer { login } }\"}" http://httpbin.org/graphql
+check 3132 "GraphQL body that is not JSON refused"        "$P http=403 exit=0" --data "mutation { mergePullRequest }" http://httpbin.org/graphql
+check 3132 "CONNECT to a plain-HTTP host refused"         "$NO" https://httpbin.org/
+check 3132 "plain HTTP to a host not in the profile"      "$P http=403 exit=0" http://example.com/
+check 3132 "plain HTTP to the host on port 443"           "$P http=403 exit=0" http://httpbin.org:443/anything/x
+check 3132 "git rules: a non-git path on github.com"      "$P http=403 exit=0" http://github.com/octocat
+slot; { r="$(cd /tmp && rm -rf hw && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.http://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com: \
+    http_proxy=http://127.0.0.1:3132 git clone -q --depth 1 git@github.com:octocat/Hello-World.git hw 2>&1 && git -C hw rev-parse --short HEAD)"
+  verdict "git clone of an ssh remote, rewritten to plain HTTP in the box environment" "7fd1a60" "$r" > "$f"; } &
+pids+=($!)
+slot; { mkdir -p /tmp/ghc; r="$(GH_CONFIG_DIR=/tmp/ghc GH_TOKEN=dummy sh -c "gh config set http_unix_socket /run/proxy/t-http.sock >/dev/null 2>&1; gh api /zen 2>&1" | tr "\n" " ")"
+  verdict "gh over the socket reaches GitHub with the injected (dummy) credential" "*Bad credentials*" "$r" > "$f"; } &
+pids+=($!)
 settle
 # Alone, after the rest: it holds t-other at its cap.
 note "== connection caps: one listener at its cap does not starve another"
@@ -188,6 +216,10 @@ logchecks() {
         | $http[.connection] ] | map(select(. == "allow-1.1.1.1" or . == "allow-example.com" or . == "allow-one.one.one.one")) | length')
   if [ "$n" -eq 5 ]; then echo "ok   log: the 5 refused tunnels (2 SNI, 2 no TLS, 1 no SNI) each join to their t-site CONNECT"
   else echo "FAIL log: $n of 5 refused tunnels joined to a t-site CONNECT"; fi
+  lc "t-http logged the method, host and path of a plain-HTTP request" '.listener == "t-http" and .method == "GET" and .authority == "httpbin.org" and .path == "/anything/read" and .route == "httpbin.org-read" and .status == 200'
+  lc "t-http logged the GraphQL refusal" '.listener == "t-http" and .path == "/graphql" and .status == 403 and .method == "POST"'
+  if log | grep -q "SITE-TEST-TOKEN\|dummy-not-a-github-token"; then echo "FAIL log: a credential value is in the access log"
+  else echo "ok   log: no credential value in the access log"; fi
   lc "t-web sent example.com to the web Envoy" '.listener == "t-web" and .authority == "example.com:443" and .route == "allow-web" and .status == 200'
   lc "t-web allowed example.org by its exact entry" '.listener == "t-web" and .authority == "example.org:443" and .route == "allow-example.org"'
   lc "t-web refused www.example.org as internal" '.listener == "t-web" and .authority == "www.example.org:443" and .route == "deny-web-internal-sub-example.org"'
@@ -213,5 +245,21 @@ logchecks() {
 deadline=$((SECONDS + 4))
 until out="$(logchecks)"; ! grep -q "^FAIL" <<<"$out" || [ "$SECONDS" -ge "$deadline" ]; do sleep 0.1; done
 printf '%s\n' "$out"; fails=$((fails + $(grep -c "^FAIL" <<<"$out")))
+# A credential swapped in place (what airlock-envoy-cred does): the next request carries it,
+# with Envoy still the same process.
+if [ -f "$DIR/credentials/t-cred.yaml" ]; then
+  sed 's/SITE-TEST-TOKEN-1/SITE-TEST-TOKEN-2/' "$DIR/credentials/t-cred.yaml" > "$DIR/credentials/.t-cred.new"
+  mv -f "$DIR/credentials/.t-cred.new" "$DIR/credentials/t-cred.yaml"
+  r=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    r="$(podman run --rm --network none --userns keep-id --user "$(id -u):$(id -g)" -v "$DIR/t-http.sock:/run/proxy/t-http.sock${SOCK_MOUNT_OPTS-:z}" \
+      --entrypoint sh localhost/airlock-envoy-spike-client:test -c 'socat -lf /dev/null TCP-LISTEN:3132,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/proxy/t-http.sock & sleep 0.2; curl -s -x http://127.0.0.1:3132 http://httpbin.org/anything/rot' | grep -o "SITE-TEST-TOKEN-[0-9]")"
+    [ "$r" = SITE-TEST-TOKEN-2 ] && break; sleep 0.3
+  done
+  if [ "$r" = SITE-TEST-TOKEN-2 ]; then echo "ok   a credential swapped in place is used from the next request"
+  else echo "FAIL a credential swapped in place: got '$r'"; fails=$((fails + 1)); fi
+  sed 's/SITE-TEST-TOKEN-2/SITE-TEST-TOKEN-1/' "$DIR/credentials/t-cred.yaml" > "$DIR/credentials/.t-cred.new"
+  mv -f "$DIR/credentials/.t-cred.new" "$DIR/credentials/t-cred.yaml"
+fi
 echo "failures: $fails"
 exit "$fails"

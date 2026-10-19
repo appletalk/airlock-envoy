@@ -102,6 +102,36 @@ lists "IPv6 CIDR forms" \
   'a web\ninternal-net ::/0\ninternal-net fd00:10::/32\ninternal-net 2001:db8:1:2:3:4:5:6/128\ninternal-net ::ffff:0:0/96\ninternal-net 1::/16\ninternal-net 0.0.0.0/0' \
   'a web\ninternal-net ::/0 fd00:10::/32 2001:db8:1:2:3:4:5:6/128 ::ffff:0:0/96 1::/16 0.0.0.0/0\n'
 
+# Plain HTTP: the http lines, http:// destinations, one mode per host.
+refuses "http without rules"           "want: http"            'http x.example\n'
+refuses "http, unknown rules"          "unknown rules"         'http x.example rules nope\n'
+refuses "http, unknown option"         "unknown http option"   'http x.example rules any header x\n'
+refuses "http, bad credential name"    "bad credential name"   'http x.example rules any credential 1x\n'
+refuses "http, uppercase credential"   "only lowercase"        'http x.example rules any credential Gh\n'
+refuses "http host an IP address"      "bad http host"         'http 10.0.0.1 rules any\n'
+refuses "http host with a path"        "only lowercase"        'http x.example/p rules any\n'
+refuses "http defined twice"           "defined twice"         'http x.example rules any\nhttp x.example rules git\n'
+refuses "http:// with no http line"    "has no 'http x.example"  'a http://x.example\n'
+refuses "http:// before its http line" "has no 'http x.example"  'a http://x.example\nhttp x.example rules any\n'
+refuses "a host as http:// and CONNECT" "use one"              'http x.example rules any\na x.example:443 http://x.example\n'
+refuses "...also through an include"   "use one"               'http x.example rules any\na http://x.example\nb @a x.example:8443\n'
+lists "http destinations, through an include" \
+  'a http://x.example:443 rules git credential gh\nb http://x.example:443 rules git credential gh\nb http://y.example:8443 rules any' \
+  'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example\nb @a http://y.example\n'
+
+# No log format may name a request field other than method, authority and path: a credential
+# Envoy adds is a request header, and the log sees headers after the injection.
+printf 'http api.example.com rules github-api credential c1\nhttp g.example.com rules git credential c2\np @anthropic web http://api.example.com http://g.example.com 10.0.0.1:6443\n' > "$work/site"
+fields="$({ "$apply" --render "$work/site"; "$apply" --render-web "$work/site"; } | grep -o '%REQ([^)]*)%\|%RESP([^)]*)%\|%REQ_WITHOUT_QUERY([^)]*)%\|%DOWNSTREAM_PEER[A-Z_]*%' | sort -u | tr '\n' ' ')"
+if [ "$fields" = "%REQ(:AUTHORITY)% %REQ(:METHOD)% %REQ(:PATH)% " ]; then echo "ok   logs name no request header (only method, authority, path)"
+else echo "FAIL logs name request fields beyond method, authority, path: $fields"; fails=$((fails+1)); fi
+r="$("$apply" --render "$work/site")"
+if grep -q 'github-graphql: {' <<< "$r" && [ "$(grep -c 'github-graphql: {' <<< "$r")" = 1 ] \
+   && grep -q '"inject-c1": {' <<< "$r" && grep -q 'name: "deny-connect-http-api.example.com"' <<< "$r" \
+   && grep -q 'disabled: true' <<< "$r" && grep -q 'mergePullRequest\|ALLOWED' <<< "$r"; then
+  echo "ok   plain-HTTP rendering: the GraphQL check on one route only, injectors per route, CONNECT refused"
+else echo "FAIL plain-HTTP rendering"; fails=$((fails+1)); fi
+
 # The web Envoy, per profile: its own listener, socket and DNS cache; IPv4 only (A records);
 # no resolv.conf search domains.
 printf 'p @anthropic web\nq web\nr example.org:443\n' > "$work/site"
