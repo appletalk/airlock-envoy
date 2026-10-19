@@ -14,6 +14,10 @@ SocketUser=airlock-envoy
 SocketGroup=airlock-envoy
 SocketMode=0600
 # install-service.sh adds the client's uid ACL in a drop-in (ExecStartPost=setfacl ...).
+# The listener's client manifest (its plain-HTTP hosts, nothing secret), public next to the
+# socket and gone with it; airlock-envoy-apply keeps it in /etc and updates a running one.
+ExecStartPost=-/usr/bin/install -m 0644 -o root -g root /etc/airlock-envoy/clients/%i.clients /run/airlock-envoy/%i.clients
+ExecStopPost=/usr/bin/rm -f /run/airlock-envoy/%i.clients
 
 [Install]
 WantedBy=sockets.target
