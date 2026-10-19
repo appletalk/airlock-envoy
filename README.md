@@ -240,10 +240,16 @@ dev   @anthropic web http://api.github.com http://github.com
   no rendered log format names a request header (a test checks it), and Envoy runs at `warn`.
   The admin config dump shows secrets as `[redacted]`.
 - **Clients in the box**: curl and anything that honours `http_proxy` use `http://<host>/`
-  URLs. git keeps its ssh remotes on the host: in the box only, an environment config rewrites
-  them, e.g. `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.http://github.com/.insteadOf
-  GIT_CONFIG_VALUE_0=git@github.com:`. gh: `gh config set http_unix_socket
-  /run/airlock-envoy/<listener>.sock` and any placeholder `GH_TOKEN` (Envoy replaces it).
+  URLs. git keeps its ssh remotes on the host: in the box only, a config rewrites them, e.g.
+  `url.http://github.com/.insteadOf git@github.com:`. gh: `http_unix_socket
+  /run/airlock-envoy/<listener>.sock` in a box gh config, and any placeholder `GH_TOKEN`
+  (Envoy replaces it). claude-airlock sets both up at launch from the client manifest.
+- **Client manifest**: apply writes `/run/airlock-envoy/<listener>.clients` next to each box
+  socket (root, 0644; `--clients <listener>` prints it): one line per plain-HTTP host,
+  `<host> <upstream port> <rules> <credential: yes|no>`, and nothing secret (no credential
+  names or values). A box launcher reads it, since the site file is root's. The socket unit
+  copies it from `/etc/airlock-envoy/clients/` when the socket starts (at boot too) and removes
+  it when the socket stops; a listener without plain-HTTP hosts gets one with comments only.
 
 ## How a tunnel decides
 

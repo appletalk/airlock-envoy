@@ -119,6 +119,20 @@ lists "http destinations, through an include" \
   'a http://x.example:443 rules git credential gh\nb http://x.example:443 rules git credential gh\nb http://y.example:8443 rules any' \
   'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example\nb @a http://y.example\n'
 
+# Client manifests: each listener's plain-HTTP hosts (an include's too), nothing else.
+printf 'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example example.com:443\nb @a http://y.example web\nc example.org:443\n' > "$work/site"
+m="$("$apply" --clients b "$work/site" | grep -v '^#')"
+if [ "$m" = "$(printf 'x.example 443 git yes\ny.example 8443 any no')" ]; then echo "ok   client manifest: the include's host and its own, port, rules, credential yes/no"
+else echo "FAIL client manifest: got: $m"; fails=$((fails+1)); fi
+m="$("$apply" --clients c "$work/site")"
+if [ -n "$m" ] && ! grep -qv '^#' <<< "$m"; then echo "ok   client manifest: a listener without plain HTTP gets comments only"
+else echo "FAIL client manifest without plain HTTP: got: $m"; fails=$((fails+1)); fi
+m="$("$apply" --clients anthropic "$work/site" | grep -v '^#')"
+if [ -z "$m" ]; then echo "ok   client manifest: the built-in anthropic listener has none"
+else echo "FAIL client manifest for anthropic: got: $m"; fails=$((fails+1)); fi
+if ! "$apply" --clients nope "$work/site" >/dev/null 2>&1 && ! "$apply" --clients >/dev/null 2>&1; then echo "ok   client manifest: an unknown listener, or none named, is refused"
+else echo "FAIL client manifest: an unknown listener was accepted"; fails=$((fails+1)); fi
+
 # No log format may name a request field other than method, authority and path: a credential
 # Envoy adds is a request header, and the log sees headers after the injection.
 printf 'http api.example.com rules github-api credential c1\nhttp g.example.com rules git credential c2\np @anthropic web http://api.example.com http://g.example.com 10.0.0.1:6443\n' > "$work/site"

@@ -8,6 +8,8 @@
 #   airlock-envoy-apply --check [SITE]   parse, render and validate; show what would change
 #   airlock-envoy-apply --list [SITE]    print each listener's destinations (any user)
 #   airlock-envoy-apply --render [SITE]  print the Envoy config (any user)
+#   airlock-envoy-apply --clients NAME [SITE]
+#                                        print listener NAME's client manifest (any user)
 #   airlock-envoy-apply --stop           as root: cut all box egress and keep it cut, across
 #                                        applies and reboots (the kill switch)
 #   airlock-envoy-apply --start          as root: lift it, apply, and start everything
@@ -38,6 +40,10 @@
 # Built in: names localhost, local, localdomain, internal, lan, home.arpa; every address that
 # is not public (private, loopback, link-local, CGNAT, documentation, multicast, IPv6 ULA and
 # the address-mapping prefixes; the list lives in airlock-envoy-web.service).
+#
+# Each listener also gets a client manifest, /run/airlock-envoy/<name>.clients (0644, next to
+# its socket): one line per plain-HTTP host, "<host> <port> <rules> <credential: yes|no>",
+# nothing secret. A box launcher reads it to point the box's clients (git, gh) at http://.
 set -euo pipefail
 umask 077
 export LC_ALL=C
@@ -53,10 +59,12 @@ PER_LISTENER=128   # connections from boxes at once, per listener (so per profil
 
 die() { echo "airlock-envoy-apply: $*" >&2; exit 1; }
 
-mode=apply yes=0 start=0
+mode=apply yes=0 start=0 clients_of=
 while [ $# -gt 0 ]; do
   case "$1" in
     --check|--list|--render|--render-web|--render-web-dropin|--stop|--status) mode=${1#--} ;;
+    --clients) [ $# -ge 2 ] || { echo "airlock-envoy-apply: --clients needs a listener name" >&2; exit 1; }
+               mode=clients clients_of=$2; shift ;;
     --start) mode=apply start=1 ;;
     --yes) yes=1 ;;
     --restart) restart=1 ;;   # install-service.sh: the unit may have changed; start egress
@@ -325,6 +333,19 @@ listing() {
   fi
 }
 any_web() { [ "${#WEB[@]}" -gt 0 ]; }
+
+# Listener $1's client manifest. Only names the parser already validated go in, so a reader
+# can hold every line to the same strict form.
+CLIENTS_RUN=/run/airlock-envoy
+CLIENTS_ETC=$ETC/clients
+render_clients() {
+  local d
+  echo "# airlock-envoy: the plain-HTTP hosts of listener $1, for the box's clients: http://<host>/"
+  echo "# through the proxy. No credentials here. Fields: host upstream-port rules credential"
+  for d in ${HDESTS[$1]:-}; do
+    printf '%s %s %s %s\n' "$d" "${HTTP_PORT[$d]}" "${HTTP_RULES[$d]}" "$([ -n "${HTTP_CRED[$d]}" ] && echo yes || echo no)"
+  done
+}
 
 # ---- render ---------------------------------------------------------------------------------
 
@@ -944,6 +965,9 @@ resolvers() {  # nameserver addresses in /etc/resolv.conf, all of them (Envoy's 
 
 case "$mode" in
   list) listing; exit 0 ;;
+  clients)
+    [ -n "${DESTS[$clients_of]+x}" ] || die "no listener '$clients_of'"
+    render_clients "$clients_of"; exit 0 ;;
   render-web) render_web "$WEB_LOG"; exit 0 ;;
   render-web-dropin) render_web_dropin; exit 0 ;;
   render) render "$LOG"; exit 0 ;;
@@ -1136,6 +1160,13 @@ if ! any_web && { [ -e "$ETC/envoy-web.yaml" ] || [ -e "$WEB_DROPIN" ] || system
   systemctl daemon-reload
 fi
 inst "$work/allowed" "$ETC/allowed"
+# Client manifests: kept in /etc, from where each box socket's unit copies its own into /run
+# when it starts (at boot too); the running sockets' copies are written here.
+install -d -m 0750 -o root -g "$grp" "$CLIENTS_ETC"
+for l in "${LISTENERS[@]}"; do
+  render_clients "$l" > "$work/$l.clients"
+  inst "$work/$l.clients" "$CLIENTS_ETC/$l.clients"
+done
 # Only now, so a config Envoy would not start with never lands in /etc as the site file.
 if [ "$from_elsewhere" = 1 ]; then printf '%s\n' "$site_text" > "$work/site.conf"; inst "$work/site.conf" "$ETC/site.conf"; fi
 
@@ -1148,6 +1179,8 @@ for l in "${LISTENERS[@]}"; do
     systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
   fi
   systemctl start "airlock-envoy-proxy@$l.socket"
+  install -m 0644 -o root -g root "$work/$l.clients" "$CLIENTS_RUN/$l.clients.new"
+  mv -f "$CLIENTS_RUN/$l.clients.new" "$CLIENTS_RUN/$l.clients"
 done
 # Listeners no longer in the site file: their sockets go, so a box set to one fails to launch.
 declare -A keep=()
@@ -1165,6 +1198,14 @@ for l in "${current[@]}"; do
   systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
   rm -f "/run/airlock-envoy/$l.sock"
 done
+# Manifests of listeners that are gone (the socket's stop removes its /run copy; this covers
+# one that never started).
+shopt -s nullglob
+for f in "$CLIENTS_ETC"/*.clients "$CLIENTS_RUN"/*.clients; do
+  l=${f##*/}; l=${l%.clients}
+  [ -n "${keep[$l]:-}" ] || rm -f "$f"
+done
+shopt -u nullglob
 if [ "$held" = 1 ]; then echo "    listeners (stopped): ${LISTENERS[*]}"
 else for l in "${LISTENERS[@]}"; do echo "    /run/airlock-envoy/$l.sock"; done; fi
 lifted=0   # done: a --start that got here keeps egress on

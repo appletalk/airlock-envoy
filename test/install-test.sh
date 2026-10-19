@@ -134,11 +134,15 @@ ck "running install-service.sh again keeps the socket and its ACL" \
    'x /repo/install/install-service.sh client >/dev/null && [ "$(x stat -c %i "$S")" = "$ino" ] && x getfacl -p "$S" | grep -q "^user:client:rw"'
 x systemctl restart airlock-envoy-proxy@anthropic.socket   # returns after the ACL's ExecStartPost
 ck "recreating the box socket re-applies the ACL" 'x getfacl -p "$S" | grep -q "^user:client:rw"'
+M=/run/airlock-envoy/anthropic.clients
+ck "the socket's client manifest: next to it, root 0644, readable by the client, no hosts (anthropic has none); the /etc copy root:airlock-envoy 0640" \
+   '[ "$(x stat -c %U:%G:%a "$M")" = root:root:644 ] && x runuser -u client -- grep -q "^# airlock-envoy" "$M" && ! x grep -qv "^#" "$M" && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/clients /etc/airlock-envoy/clients/anthropic.clients | tr "\n" " ")" = "root:airlock-envoy:750 root:airlock-envoy:640 " ]'
 # --stop takes no lock: an apply holding it (say, waiting at its prompt) does not delay it.
 x sh -c 'flock /run/airlock-envoy-apply.lock sh -c "touch /root/held; sleep 1" & until [ -e /root/held ]; do sleep 0.01; done
   airlock-envoy-apply --stop >/dev/null; echo "rc=$?" > /root/stop.rc; rm -f /root/held; wait'
 ck "--stop works while another apply holds the lock" '[ "$(x cat /root/stop.rc)" = rc=0 ]'
 ck "the kill switch, --stop, cuts egress (no connect, Envoy down)" '! x runuser -u client -- socat -u /dev/null UNIX-CONNECT:"$S" 2>/dev/null && sleep 0.3 && [ "$(x systemctl is-active airlock-envoy)" != active ]'
+ck "...and the client manifest goes with the socket" '! x test -e "$M"'
 x airlock-envoy-apply >/dev/null
 x systemctl start airlock-envoy-proxy@anthropic.socket airlock-envoy 2>/dev/null || true
 # As after a reboot with the switch on: no socket was ever made, so no /run/airlock-envoy.
@@ -161,6 +165,7 @@ x airlock-envoy-apply --start >/dev/null
 ck "--start with the switch already off restarts nothing" '[ "$(x systemctl show -p MainPID --value airlock-envoy)" = "$p" ]'
 r="$(tunnel)"
 ck "--start brings it back with the ACL: got '$r'" '[ "$r" = "200 403" ] && x getfacl -p "$S" | grep -q "^user:client:rw" && ! x test -e /etc/airlock-envoy/stopped'
+ck "...and its client manifest" 'x test -f "$M"'
 # Not the kill switch: a crash. Envoy cannot start; a burst of box connections (more than the
 # socket's trigger limit, 20 in 2 s) is closed, and the box socket stays up: the relay only
 # Wants= Envoy. Once Envoy is back the same socket works, so running boxes need no relaunch.
@@ -245,8 +250,8 @@ ck "with --yes it is installed as site.conf (root:airlock-envoy 0640) and applie
    '[ "$(x sha256sum /home/client/site.conf | cut -d" " -f1)" = "$(x sha256sum /etc/airlock-envoy/site.conf | cut -d" " -f1)" ] && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/site.conf)" = root:airlock-envoy:640 ] && [ "$r" = "200 403" ]'
 x sh -c ': > /etc/airlock-envoy/site.conf'
 x airlock-envoy-apply >/dev/null
-ck "a listener removed from the site file loses its socket, unit stopped and disabled" \
-   '! x test -e "$E" && [ "$(x systemctl is-active airlock-envoy-proxy@extra.socket)" != active ] && [ "$(x systemctl is-enabled airlock-envoy-proxy@extra.socket 2>/dev/null)" != enabled ]'
+ck "a listener removed from the site file loses its socket, unit stopped and disabled, and its client manifest (both copies)" \
+   '! x test -e "$E" && [ "$(x systemctl is-active airlock-envoy-proxy@extra.socket)" != active ] && [ "$(x systemctl is-enabled airlock-envoy-proxy@extra.socket 2>/dev/null)" != enabled ] && ! x test -e /run/airlock-envoy/extra.clients && ! x test -e /etc/airlock-envoy/clients/extra.clients'
 r="$(tunnel)"
 ck "anthropic still works after the removal (same inode): got '$r'" '[ "$(x stat -c %i "$S")" = "$ino" ] && [ "$r" = "200 403" ]'
 x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
@@ -382,6 +387,12 @@ ck "plain HTTP: list shows the name and format, not the value" \
 x airlock-envoy-apply >/dev/null
 r="$(httpget /run/airlock-envoy/extra.sock http://httpbin.org/anything/x | grep -o '"Authorization": "[^"]*"')"
 ck "plain HTTP: the request carries the credential: got $r" '[ "$r" = "\"Authorization\": \"Bearer INSTALL-TEST-SECRET-1\"" ]'
+EM=/run/airlock-envoy/extra.clients
+ck "plain HTTP: the client manifest names the host, its port, rules and that a credential is set (not which)" \
+   '[ "$(x runuser -u client -- grep -v "^#" "$EM")" = "httpbin.org 443 any yes" ] && ! x grep -q t-cred "$EM"'
+x systemctl stop airlock-envoy-proxy@extra.socket
+x systemctl start airlock-envoy-proxy@extra.socket
+ck "plain HTTP: a socket started anew (as at boot) gets its manifest from the copy in /etc" '[ "$(x grep -v "^#" "$EM")" = "httpbin.org 443 any yes" ]'
 dump="$(x curl -s --unix-socket /run/airlock-envoy-internal/admin.sock "http://localhost/config_dump?include_eds")"
 ck "plain HTTP: Envoy's config dump doesn't show the secret (redacted; $(grep -c redacted <<< "$dump") marks)" \
    '[[ "$dump" == *credential_injector* && "$dump" == *redacted* && "$dump" != *INSTALL-TEST-SECRET* ]]'
@@ -410,6 +421,7 @@ ck "github-api under the unit's MemoryDenyWriteExecute ($(x systemctl show -p Me
    '[ "$r" = "404 403 404" ] && [ "$(x systemctl show -p MainPID --value airlock-envoy)" = "$pid0" ] && [ "$(x systemctl is-active airlock-envoy)" = active ]'
 x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
 x airlock-envoy-apply >/dev/null
+ck "plain HTTP dropped: a running socket's manifest is updated by the apply (no hosts)" 'x test -f "$EM" && ! x grep -qv "^#" "$EM"'
 
 if [ -n "${AIRLOCK_REPO:-}" ]; then
   # claude-airlock's own socket check, extracted from the checkout and run as the client.
