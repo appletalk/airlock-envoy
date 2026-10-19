@@ -160,6 +160,17 @@ check 3132 "POST outside the rules"                       "$P http=403 exit=0" -
 check 3132 "DELETE outside the rules"                     "$P http=403 exit=0" -X DELETE http://httpbin.org/repos/o/r
 check 3132 "PATCH a pull (allowed) reaches the host"      "$P http=404 exit=0" -X PATCH http://httpbin.org/repos/o/r/pulls/1
 check 3132 "GET /graphql refused"                         "$P http=403 exit=0" http://httpbin.org/graphql
+check 3132 "HEAD /graphql refused"                        "$P http=403 exit=0" -I http://httpbin.org/graphql
+check 3132 "GET /graphql/ refused"                        "$P http=403 exit=0" http://httpbin.org/graphql/
+check 3132 "GET /GraphQL refused"                         "$P http=403 exit=0" http://httpbin.org/GraphQL
+check 3132 "POST /GRAPHQL refused"                        "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"{ viewer { login } }\"}" http://httpbin.org/GRAPHQL
+check 3132 "POST /graphql?query=<a merge> refused"        "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"{ viewer { login } }\"}" "http://httpbin.org/graphql?query=mutation%7BmergePullRequest(input:%7B%7D)%7Bid%7D%7D"
+check 3132 "POST /graphql as a form refused"              "$P http=403 exit=0" -H "Content-Type: application/x-www-form-urlencoded" --data "{\"query\":\"{ viewer { login } }\"}" http://httpbin.org/graphql
+check 3132 "POST /repos/o/r/merges refused"               "$P http=403 exit=0" -X POST http://httpbin.org/repos/o/r/merges
+check 3132 "POST a pull review refused"                   "$P http=403 exit=0" -X POST http://httpbin.org/repos/o/r/pulls/1/reviews
+check 3132 "PUT a pull merge refused"                     "$P http=403 exit=0" -X PUT http://httpbin.org/repos/o/r/pulls/1/merge
+check 3132 "PATCH through dot segments to merges refused" "$P http=403 exit=0" --path-as-is -X PATCH http://httpbin.org/repos/o/r/pulls/1/../../merges
+check 3132 "an escaped slash in the path refused"         "$P http=400 exit=0" -X PATCH http://httpbin.org/repos/o/r/pulls%2F1
 check 3132 "GraphQL mergePullRequest refused"             "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { mergePullRequest(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 check 3132 "GraphQL aliased merge refused"                "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { createIssue: mergePullRequest(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 check 3132 "GraphQL createIssue passes to the host"       "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { createIssue(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
@@ -169,6 +180,9 @@ check 3132 "CONNECT to a plain-HTTP host refused"         "$NO" https://httpbin.
 check 3132 "plain HTTP to a host not in the profile"      "$P http=403 exit=0" http://example.com/
 check 3132 "plain HTTP to the host on port 443"           "$P http=403 exit=0" http://httpbin.org:443/anything/x
 check 3132 "git rules: a non-git path on github.com"      "$P http=403 exit=0" http://github.com/octocat
+slot; { r="$(curl -s --unix-socket /run/proxy/t-http.sock -H "Host: httpbin.org:80" http://httpbin.org/anything/origin | grep -o "\"Host\": \"[^\"]*\"")"
+  verdict "origin-form (as gh sends) with Host httpbin.org:80: the upstream sees Host httpbin.org" "*\"Host\": \"httpbin.org\"*" "$r" > "$f"; } &
+pids+=($!)
 slot; { r="$(cd /tmp && rm -rf hw && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.http://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com: \
     http_proxy=http://127.0.0.1:3132 git clone -q --depth 1 git@github.com:octocat/Hello-World.git hw 2>&1 && git -C hw rev-parse --short HEAD)"
   verdict "git clone of an ssh remote, rewritten to plain HTTP in the box environment" "7fd1a60" "$r" > "$f"; } &
@@ -217,6 +231,7 @@ logchecks() {
   if [ "$n" -eq 5 ]; then echo "ok   log: the 5 refused tunnels (2 SNI, 2 no TLS, 1 no SNI) each join to their t-site CONNECT"
   else echo "FAIL log: $n of 5 refused tunnels joined to a t-site CONNECT"; fi
   lc "t-http logged the method, host and path of a plain-HTTP request" '.listener == "t-http" and .method == "GET" and .authority == "httpbin.org" and .path == "/anything/read" and .route == "httpbin.org-read" and .status == 200'
+  lc "t-http (with web) refused CONNECT to its plain-HTTP host by that host's own route" '.listener == "t-http" and .authority == "httpbin.org:443" and .route == "deny-connect-http-httpbin.org"'
   lc "t-http logged the GraphQL refusal" '.listener == "t-http" and .path == "/graphql" and .status == 403 and .method == "POST"'
   if log | grep -q "SITE-TEST-TOKEN\|dummy-not-a-github-token"; then echo "FAIL log: a credential value is in the access log"
   else echo "ok   log: no credential value in the access log"; fi

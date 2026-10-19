@@ -1,7 +1,6 @@
 -- Unit tests for install/github-graphql.lua: run with `luajit test/graphql-check.lua` from the
 -- repo root. Each case is a POST /graphql body and whether it must be allowed.
 package.path = "install/?.lua;" .. package.path
-envoy_on_request = nil
 local G = dofile("install/github-graphql.lua")
 
 local function j(q) return '{"query":' .. string.format("%q", q):gsub("\\\n", "\\n") .. '}' end
@@ -43,6 +42,10 @@ local cases = {
   { false, j("subscription { createIssue(input: {}) { id } }") },
   { true,  j("mutation { addComment(input: {body: \"say \\\"hi\\\" { ok } mergePullRequest\"}) { clientMutationId } }") },
   { false, '{"query":"query { viewer { login } }\\u0120"}' },
+  -- from the cold review: deep nesting must refuse, not overflow the stack (which let it pass)
+  { false, '{"v":' .. string.rep("[", 100000) .. string.rep("]", 100000) .. ',"query":"mutation { mergePullRequest(input: {}) { id } }"}' },
+  { false, '{"v":' .. string.rep("[", 150) .. string.rep("]", 150) .. ',"query":"{ viewer { login } }"}' },
+  { true,  '{"v":' .. string.rep("[", 50) .. string.rep("]", 50) .. ',"query":"{ viewer { login } }"}' },
   -- refused: anything this can't read for certain
   { false, "" },
   { false, "mutation { mergePullRequest }" },
@@ -66,6 +69,38 @@ for n, c in ipairs(cases) do
   else
     print(string.format("ok   %2d %-7s %s", n, allowed and "allow" or "refuse", why or ""))
   end
+end
+-- envoy_on_request against a stand-in for Envoy's handle: the header checks, and that an
+-- error anywhere refuses (a script error in Envoy's Lua filter otherwise lets the request on).
+local function handle(hdrs, body, body_errors)
+  local h = { responded = nil }
+  function h:headers() return { get = function(_, k) return hdrs[k] end } end
+  function h:body()
+    if body_errors then error("simulated failure") end
+    return { length = function() return #body end, getBytes = function(_, a, n) return body:sub(a + 1, a + n) end }
+  end
+  function h:respond(r, _) self.responded = r[":status"] end
+  function h:logWarn() end
+  return h
+end
+local ok_body = '{"query":"{ viewer { login } }"}'
+local hcases = {
+  { nil,   { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" }, ok_body },
+  { nil,   { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json; charset=utf-8" }, ok_body },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql?query=mutation%7BmergePullRequest%7D", ["content-type"] = "application/json" }, ok_body },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/x-www-form-urlencoded" }, ok_body },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql" }, ok_body },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json", ["content-encoding"] = "gzip" }, ok_body },
+  { "403", { [":method"] = "GET",  [":path"] = "/graphql", ["content-type"] = "application/json" }, ok_body },
+  { "403", { [":method"] = "POST", [":path"] = "/graphql", ["content-type"] = "application/json" }, ok_body, true },
+}
+for n, c in ipairs(hcases) do
+  local h = handle(c[2], c[3], c[4])
+  envoy_on_request(h)
+  if h.responded ~= c[1] then
+    fails = fails + 1
+    print(string.format("FAIL handle %d: want %s got %s", n, tostring(c[1]), tostring(h.responded)))
+  else print(string.format("ok   handle %d: %s", n, c[1] and "refused" or "passed")) end
 end
 print("failures: " .. fails)
 os.exit(fails == 0 and 0 or 1)

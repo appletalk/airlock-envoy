@@ -3,7 +3,12 @@
 -- asks for top-level fields on the allowlist below; queries pass. Default deny: a body this
 -- can't read for certain (not one JSON object, no single string "query", a GraphQL document
 -- that doesn't tokenize, a subscription, a fragment on Mutation or a spread at a mutation's
--- top level, schema definitions) is refused. Plain Lua 5.1 (LuaJIT, as in Envoy), no modules.
+-- top level, schema definitions) is refused. Plain Lua 5.1 (LuaJIT, as in Envoy), no modules. Any error while
+-- checking refuses the request too (envoy_on_request runs the check under pcall).
+
+-- Envoy's unit sets MemoryDenyWriteExecute, so LuaJIT can't compile hot code: a hot loop would
+-- panic the whole Envoy. The interpreter is plenty for request bodies this size.
+if jit then jit.off() end
 
 local ALLOWED = {
   createPullRequest = true, updatePullRequest = true, closePullRequest = true,
@@ -49,8 +54,12 @@ local function json_string(s, i)
   return nil
 end
 
--- Skip any JSON value at s[i]; returns the index after it, or nil.
-local function json_skip(s, i)
+-- Skip any JSON value at s[i]; returns the index after it, or nil. Nesting is capped (as
+-- Ruby's JSON parser does at 100), so a deep document is refused, never a stack overflow.
+local MAX_DEPTH = 100
+local function json_skip(s, i, depth)
+  depth = (depth or 0) + 1
+  if depth > MAX_DEPTH then return nil end
   i = skip_ws(s, i)
   local c = s:sub(i, i)
   if c == '"' then local _, j = json_string(s, i); return j end
@@ -65,7 +74,7 @@ local function json_skip(s, i)
         i = skip_ws(s, j); if s:sub(i, i) ~= ":" then return nil end
         i = i + 1
       end
-      i = json_skip(s, i); if not i then return nil end
+      i = json_skip(s, i, depth); if not i then return nil end
       i = skip_ws(s, i)
       local d = s:sub(i, i)
       if d == close then return i + 1 end
@@ -258,16 +267,27 @@ function M.check_body(body)
   return M.check_document(q)
 end
 
-function envoy_on_request(handle)
+-- nil if the request (headers and body) may go on, else the reason.
+local function check_request(handle)
   local h = handle:headers()
-  if h:get(":method") ~= "POST" or (h:get(":path") or ""):match("^/graphql") == nil then return end
-  local len = tonumber(h:get("content-length") or "")
-  if len and len > 1048576 then
-    handle:respond({ [":status"] = "413" }, "airlock-envoy: GraphQL body over 1 MiB\n"); return
+  -- The route sends only POST /graphql here; anything else is a misconfiguration: refuse.
+  if h:get(":method") ~= "POST" then return "not a POST" end
+  if h:get(":path") ~= "/graphql" then return "a query string or another path on /graphql" end
+  local ct = (h:get("content-type") or ""):lower()
+  if not (ct == "application/json" or ct:match("^application/json%s*;")) then
+    return "Content-Type must be application/json"
   end
+  if h:get("content-encoding") then return "an encoded (compressed) body" end
+  local len = tonumber(h:get("content-length") or "")
+  if len and len > 1048576 then return "GraphQL body over 1 MiB" end
   local b = handle:body()
   local body = b and b:getBytes(0, b:length()) or ""
-  local why = M.check_body(body)
+  return M.check_body(body)
+end
+
+function envoy_on_request(handle)
+  local ok, why = pcall(check_request, handle)
+  if not ok then why = "the GraphQL check failed: " .. tostring(why) end
   if why then
     handle:logWarn("airlock-envoy graphql refused: " .. why)
     handle:respond({ [":status"] = "403", ["content-type"] = "text/plain" }, "airlock-envoy: " .. why .. "\n")
