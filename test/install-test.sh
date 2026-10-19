@@ -359,6 +359,43 @@ r="$(tunnel "$E2" example.com example.org)"
 ck "web removed from the site file: unit stopped and disabled, config and drop-in gone: got '$r'" \
    '[ "$(x systemctl is-active airlock-envoy-web)" != active ] && [ "$(x systemctl is-enabled airlock-envoy-web 2>/dev/null)" != enabled ] && ! x test -e /etc/airlock-envoy/envoy-web.yaml && ! x test -e "$D" && [ "$r" = "200 403" ]'
 
+# Plain HTTP with a credential: the helper, apply's checks, injection, and no secret in sight.
+httpget() {  # httpget <socket> <url>: a plain-HTTP request through a box socket, as the client
+  x runuser -u client -- bash -c 'socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:"$0" &
+    until grep -q ":0C38 00000000:0000 0A" /proc/net/tcp; do sleep 0.01; done
+    curl -s -x http://127.0.0.1:3128 "$1"; kill %1; wait' "$1" "$2" 2>/dev/null
+}
+ck "plain HTTP: airlock-envoy-cred root 0755, the GraphQL check installed, credentials dir root:airlock-envoy 0750" \
+   '[ "$(x stat -c %U:%G:%a /usr/local/sbin/airlock-envoy-cred)" = root:root:755 ] && x test -r /usr/local/share/airlock-envoy/github-graphql.lua && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/credentials)" = root:airlock-envoy:750 ]'
+x sh -c 'printf "%s\n" "http httpbin.org rules any credential t-cred" "extra @anthropic example.com:443 http://httpbin.org" > /etc/airlock-envoy/site.conf'
+cfg="$(x sha256sum /etc/airlock-envoy/envoy.yaml)"
+out="$(x airlock-envoy-apply 2>&1)" && rc=0 || rc=$?
+ck "plain HTTP: a credential that isn't set refuses the apply, nothing changed" \
+   '[ "$rc" != 0 ] && [[ "$out" == *"credential t-cred is not set"* ]] && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ]'
+ck "plain HTTP: the helper refuses a non-root caller, and a secret with a quote" \
+   '! x runuser -u client -- /usr/local/sbin/airlock-envoy-cred list >/dev/null 2>&1 && ! printf "%s" "a\"b" | x airlock-envoy-cred set t-cred >/dev/null 2>&1'
+out="$(printf 'INSTALL-TEST-SECRET-1\n' | x airlock-envoy-cred set t-cred 2>&1)"
+ck "plain HTTP: set reads stdin, never echoes the secret, file root:airlock-envoy 0640" \
+   '[[ "$out" != *INSTALL-TEST-SECRET* ]] && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/credentials/t-cred.yaml)" = root:airlock-envoy:640 ]'
+ck "plain HTTP: list shows the name and format, not the value" \
+   '[[ "$(x airlock-envoy-cred list)" == "t-cred  bearer  "* ]] && ! x airlock-envoy-cred list | grep -q INSTALL-TEST-SECRET'
+x airlock-envoy-apply >/dev/null
+r="$(httpget /run/airlock-envoy/extra.sock http://httpbin.org/anything/x | grep -o '"Authorization": "[^"]*"')"
+ck "plain HTTP: the request carries the credential: got $r" '[ "$r" = "\"Authorization\": \"Bearer INSTALL-TEST-SECRET-1\"" ]'
+dump="$(x curl -s --unix-socket /run/airlock-envoy-internal/admin.sock "http://localhost/config_dump?include_eds")"
+ck "plain HTTP: Envoy's config dump doesn't show the secret (redacted; $(grep -c redacted <<< "$dump") marks)" \
+   '[[ "$dump" == *credential_injector* && "$dump" == *redacted* && "$dump" != *INSTALL-TEST-SECRET* ]]'
+ck "plain HTTP: nor does the access log" '! x grep -q INSTALL-TEST-SECRET /var/log/airlock-envoy/access.jsonl'
+printf 'INSTALL-TEST-SECRET-2' | x airlock-envoy-cred set t-cred --format basic:x-access-token >/dev/null
+want="Basic $(printf 'x-access-token:INSTALL-TEST-SECRET-2' | base64 -w0)"
+r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(httpget /run/airlock-envoy/extra.sock http://httpbin.org/anything/y | sed -n 's/.*"Authorization": "\([^"]*\)".*/\1/p')"; [ "$r" = "$want" ] && break; sleep 0.3; done
+ck "plain HTTP: a new credential (basic format) is used without a restart" '[ "$r" = "$want" ]'
+x airlock-envoy-cred revoke t-cred >/dev/null
+r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(httpget /run/airlock-envoy/extra.sock http://httpbin.org/anything/z | sed -n 's/.*"Authorization": "\([^"]*\)".*/\1/p')"; [ "$r" = airlock-envoy-revoked ] && break; sleep 0.3; done
+ck "plain HTTP: revoke replaces it with a value that grants nothing: got $r" '[ "$r" = airlock-envoy-revoked ]'
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
+x airlock-envoy-apply >/dev/null
+
 if [ -n "${AIRLOCK_REPO:-}" ]; then
   # claude-airlock's own socket check, extracted from the checkout and run as the client.
   r="$(x runuser -u client -- bash -c 'eval "$(sed -n "/^_airlock_socket_check() {/,/^}/p" /airlock/bin/claude-airlock)"

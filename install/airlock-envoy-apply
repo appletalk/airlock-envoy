@@ -94,7 +94,9 @@ fi
 # ---- parse ----------------------------------------------------------------------------------
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
-LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=()
+declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=()
+LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
+PRESETS="any git github-api victoria-logs victoria-metrics"
 
 valid_dest() {
   local h p o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -156,9 +158,10 @@ parse() {  # parse <source label>, text on stdin
     line=${line%%#*}
     charset_ok=1
     [[ "$line" =~ ^[a-z0-9.:@/[:blank:]-]*$ ]] || charset_ok=0
-    if [[ "$line" == */* ]] && ! [[ "$line" =~ ^[[:blank:]]*internal-net[[:blank:]] ]]; then charset_ok=0; fi
+    # A slash only in http:// destinations and in internal-net CIDRs.
+    if [[ "${line//http:\/\//}" == */* ]] && ! [[ "$line" =~ ^[[:blank:]]*internal-net[[:blank:]] ]]; then charset_ok=0; fi
     [ "$charset_ok" = 1 ] \
-      || die "$src:$n: only lowercase listener names, host:port, IPv4:port, @listener and web (and CIDRs on internal-net lines) may appear"
+      || die "$src:$n: only lowercase listener names, host:port, IPv4:port, http://host, @listener and web (and CIDRs on internal-net lines) may appear"
     read -ra words <<< "$line"
     [ "${#words[@]}" -gt 0 ] || continue
     name=${words[0]}
@@ -175,6 +178,7 @@ parse() {  # parse <source label>, text on stdin
           fi
         done
         continue ;;
+      http) parse_http "$src:$n" "${words[@]:1}"; continue ;;
       web) die "$src:$n: 'web' is a destination, not a listener name" ;;
     esac
     [[ "$name" =~ ^[a-z][a-z0-9-]{0,31}$ ]] \
@@ -193,15 +197,60 @@ parse() {  # parse <source label>, text on stdin
         [ -n "${DESTS[$w]+x}" ] || die "$src:$n: @$w is not a listener defined above"
         INCLUDED_BY[$w]=$name
         for d in ${DESTS[$w]}; do add_dest "$name" "$d"; done
+        for d in ${HDESTS[$w]:-}; do add_hdest "$name" "$d"; done
         [ -z "${WEB[$w]:-}" ] || WEB[$name]=1
       elif [ "$w" = web ]; then
         WEB[$name]=1
+      elif [[ "$w" == http://* ]]; then
+        d=${w#http://}
+        [ -n "${HTTP_RULES[$d]+x}" ] || die "$src:$n: $w has no 'http $d ...' line above it"
+        add_hdest "$name" "$d"
       else
         valid_dest "$w" || die "$src:$n: bad destination '$w' (want host:port or IPv4:port)"
         add_dest "$name" "$w"
       fi
     done
   done
+  # One mode per host and listener: a host reached by plain HTTP (rules, credential) must not
+  # also be a CONNECT entry, or a box could tunnel around the rules.
+  local l h
+  for l in "${LISTENERS[@]}"; do
+    for h in ${HDESTS[$l]:-}; do
+      for d in ${DESTS[$l]}; do
+        [ "${d%:*}" != "$h" ] || die "$src: listener $l lists $h both as http://$h and as $d; use one"
+      done
+    done
+  done
+}
+
+# http <host>[:port] rules <preset> [credential <name>]: how the box reaches a host by plain
+# HTTP. Envoy answers the box, checks method and path against the preset, adds the credential,
+# and is the TLS client to the host (its certificate checked, Host and SNI fixed).
+parse_http() {  # parse_http <where> <words...>
+  local where=$1 hp host port rules="" cred=""; shift
+  [ $# -ge 3 ] || die "$where: want: http <host>[:port] rules <preset> [credential <name>]"
+  hp=$1; shift
+  host=${hp%:*}; port=443; [[ "$hp" == *:* ]] && port=${hp##*:}
+  if ! valid_dest "$host:$port" || [[ "$host" =~ ^[0-9.]+$ ]]; then
+    die "$where: bad http host '$hp' (want a host name, optionally :port)"
+  fi
+  [ -z "${HTTP_RULES[$host]+x}" ] || die "$where: http $host is defined twice"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      rules) [ $# -ge 2 ] || die "$where: rules needs a preset"; rules=$2; shift 2 ;;
+      credential) [ $# -ge 2 ] || die "$where: credential needs a name"; cred=$2; shift 2 ;;
+      *) die "$where: unknown http option '$1' (rules, credential)" ;;
+    esac
+  done
+  case " $PRESETS " in *" $rules "*) ;; *) die "$where: unknown rules '$rules' (one of: $PRESETS)" ;; esac
+  [ -z "$cred" ] || [[ "$cred" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad credential name '$cred'"
+  HTTP_RULES[$host]=$rules HTTP_CRED[$host]=$cred HTTP_PORT[$host]=$port
+  HTTP_HOSTS+=("$host")
+}
+
+add_hdest() {
+  case " ${HDESTS[$1]:-} " in *" $2 "*) return ;; esac
+  HDESTS[$1]="${HDESTS[$1]:+${HDESTS[$1]} }$2"
 }
 
 # Read the site file once, as root too, and use only that copy from here on.
@@ -265,6 +314,9 @@ listing() {
   local l d
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
+    for d in ${HDESTS[$l]:-}; do
+      printf '%s http://%s:%s rules %s%s\n' "$l" "$d" "${HTTP_PORT[$d]}" "${HTTP_RULES[$d]}" "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}"
+    done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
   done
   if any_web; then
@@ -309,8 +361,173 @@ EOF
   printf '                route: { cluster: "web-egress-%s", upgrade_configs: [{ upgrade_type: CONNECT, connect_config: {} }] }\n' "$1"
 }
 
+# ---- plain HTTP: presets, virtual hosts, credentials, upstreams ----------------------------
+# Each preset is default-deny: these routes, in order, then 403. A line is
+#   <name> <methods: regex, or * for any> <prefix|exact|regex> <path> [deny|lua]
+# Paths are matched without the query string. github-api's lua line runs the GraphQL write
+# check (install/github-graphql.lua) on that route: GitHub writes go through POST /graphql, so
+# method and path alone can't tell a PR from a merge.
+preset_rules() {
+  case "$1" in
+    any) echo 'any * prefix /' ;;
+    git) cat <<'EOR'
+info-refs GET regex /[^/]+/[^/]+/info/refs
+pack POST regex /[^/]+/[^/]+/git-(upload|receive)-pack
+EOR
+    ;;
+    github-api) cat <<'EOR'
+graphql-get GET exact /graphql deny
+graphql POST exact /graphql lua
+read GET|HEAD prefix /
+create POST regex /repos/[^/]+/[^/]+/(pulls|issues)
+issue-sub POST regex /repos/[^/]+/[^/]+/issues/[0-9]+/(comments|labels|assignees)
+edit PATCH regex /repos/[^/]+/[^/]+/(pulls|issues)/[0-9]+
+edit-comment PATCH regex /repos/[^/]+/[^/]+/issues/comments/[0-9]+
+reviewers POST regex /repos/[^/]+/[^/]+/pulls/[0-9]+/requested_reviewers
+EOR
+    ;;
+    victoria-logs) echo 'logsql GET|POST prefix /select/logsql/' ;;
+    victoria-metrics) cat <<'EOR'
+query GET|POST prefix /api/v1/query
+series GET|POST exact /api/v1/series
+labels GET|POST exact /api/v1/labels
+label-values GET regex /api/v1/label/[^/]+/values
+metadata GET exact /api/v1/metadata
+EOR
+    ;;
+  esac
+}
+CRED_DIR=/etc/airlock-envoy/credentials
+lua_file() {  # the GraphQL check: next to this script in a checkout, else where install put it
+  local f
+  f="$(dirname "$(readlink -f "$0")")/github-graphql.lua"
+  [ -r "$f" ] || f=/usr/local/share/airlock-envoy/github-graphql.lua
+  printf '%s' "$f"
+}
+creds_used() {  # every credential some listener's http destinations use, once each
+  local l d c seen=" "
+  for l in "${LISTENERS[@]}"; do
+    for d in ${HDESTS[$l]:-}; do
+      c=${HTTP_CRED[$d]}
+      [ -n "$c" ] || continue
+      case "$seen" in *" $c "*) continue ;; esac
+      seen="$seen$c "; echo "$c"
+    done
+  done
+}
+# A virtual host for plain-HTTP host $1: the box's request is matched against the preset; an
+# allowed one goes to the host with Host fixed (so another site on the same edge is out of
+# reach) and, if the host has one, its credential added (replacing anything the box sent).
+http_vhost() {
+  local h=$1 rules=${HTTP_RULES[$1]} cred=${HTTP_CRED[$1]} name methods kind pat flag timeout
+  timeout=120s; [ "$rules" = git ] && timeout=0s   # a clone can take long; the idle timeout still applies
+  cat <<EOF
+            - name: "http-$h"
+              domains: ["$h", "$h:80"]
+              routes:
+EOF
+  while read -r name methods kind pat flag; do
+    [ -n "$name" ] || continue
+    echo "              - name: \"$h-$name\""
+    echo "                match:"
+    case "$kind" in
+      prefix) echo "                  prefix: \"$pat\"" ;;
+      exact)  echo "                  path: \"$pat\"" ;;
+      regex)  echo "                  safe_regex: { regex: \"$pat\" }" ;;
+    esac
+    [ "$methods" = "*" ] || echo "                  headers: [{ name: \":method\", string_match: { safe_regex: { regex: \"$methods\" } } }]"
+    if [ "${flag:-}" = deny ]; then
+      printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules\\n" } }\n' "$rules"
+      continue
+    fi
+    echo "                route: { cluster: \"http-$h\", host_rewrite_literal: \"$h\", timeout: $timeout, idle_timeout: 300s }"
+    if [ -n "$cred" ] || [ "${flag:-}" = lua ]; then
+      echo "                typed_per_filter_config:"
+      [ "${flag:-}" != lua ] || echo "                  github-graphql: { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
+      [ -z "$cred" ] || echo "                  \"inject-$cred\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
+    fi
+  done < <(preset_rules "$rules")
+  cat <<EOF
+              - name: "$h-refused"
+                match: { prefix: "/" }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the $rules rules\\n" } }
+EOF
+}
+# A listener's GraphQL check and credential injectors, each disabled until a route enables it.
+# The injected header is never logged: no log format here names a request header.
+http_filters() {
+  local d c lua=0 seen=" " f
+  for d in ${HDESTS[$1]:-}; do
+    [ "${HTTP_RULES[$d]}" != github-api ] || lua=1
+  done
+  if [ "$lua" = 1 ]; then
+    f="$(lua_file)"
+    [ -r "$f" ] || die "the github-api rules need $f (install/install-service.sh installs it)"
+    cat <<'EOF'
+          - name: github-graphql
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                inline_string: |
+EOF
+    sed 's/^/                  /' "$f"
+  fi
+  for d in ${HDESTS[$1]:-}; do
+    c=${HTTP_CRED[$d]}
+    [ -n "$c" ] || continue
+    case "$seen" in *" $c "*) continue ;; esac
+    seen="$seen$c "
+    cat <<EOF
+          - name: "inject-$c"
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.credential_injector.v3.CredentialInjector
+              overwrite: true
+              credential:
+                name: envoy.http.injected_credentials.generic
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.http.injected_credentials.generic.v3.Generic
+                  header: Authorization
+                  credential:
+                    name: "$c"
+                    sds_config: { path_config_source: { path: "$CRED_DIR/$c.yaml", watched_directory: { path: "$CRED_DIR" } } }
+EOF
+  done
+}
+# One upstream per plain-HTTP host in use: TLS, the host's certificate checked against the
+# system CAs and its name.
+http_clusters() {
+  local l d seen=" "
+  for l in "${LISTENERS[@]}"; do
+    for d in ${HDESTS[$l]:-}; do
+      case "$seen" in *" $d "*) continue ;; esac
+      seen="$seen$d "
+      cat <<EOF
+  # Plain HTTP from boxes, TLS from here.
+  - name: "http-$d"
+    type: LOGICAL_DNS
+    dns_lookup_family: ALL
+    connect_timeout: 5s
+    load_assignment:
+      cluster_name: "http-$d"
+      endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: "$d", port_value: ${HTTP_PORT[$d]} } } } }] }]
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: "$d"
+        common_tls_context:
+          validation_context:
+            trusted_ca: { filename: /etc/ssl/certs/ca-certificates.crt }
+            match_typed_subject_alt_names: [{ san_type: DNS, matcher: { exact: "$d" } }]
+EOF
+    done
+  done
+}
+
 render() {  # render <access log path>
-  local log=$1 l d k first=1
+  local log=$1 l d k de first=1
   cat <<EOF
 # Rendered by airlock-envoy-apply from the site file. Edit the site file, not this.
 #
@@ -318,6 +535,9 @@ render() {  # render <access log path>
 # entries. Each allowed tunnel goes to an internal listener for its destination that reads the
 # TLS server name without decrypting: a host entry passes only its own name, an address entry
 # only TLS with no name. The upstream is fixed per destination, never chosen by the client.
+# Credentials are file-based SDS secrets, which need a node identity.
+node: { id: airlock-envoy, cluster: airlock-envoy }
+
 bootstrap_extensions:
 - name: envoy.bootstrap.internal_listener
   typed_config:
@@ -378,6 +598,7 @@ EOF
                   connection: "%CONNECTION_ID%"
                   method: "%REQ(:METHOD)%"
                   authority: "%REQ(:AUTHORITY)%"
+                  path: "%REQ(:PATH)%"
                   route: "%ROUTE_NAME%"
                   status: "%RESPONSE_CODE%"
                   flags: "%RESPONSE_FLAGS%"
@@ -392,6 +613,9 @@ EOF
           route_config:
             name: "$l"
             virtual_hosts:
+EOF
+    for d in ${HDESTS[$l]:-}; do http_vhost "$d"; done
+    cat <<EOF
             - name: "$l"
               domains: ["*"]
               routes:
@@ -406,6 +630,16 @@ EOF
                 route: { cluster: "sni-$k", upgrade_configs: [{ upgrade_type: CONNECT, connect_config: {} }] }
 EOF
     done
+    for d in ${HDESTS[$l]:-}; do
+      de="$(printf '%s' "$d" | sed 's/[.]/\\\\./g')"   # dots escaped for the regex, as YAML wants them
+      cat <<EOF
+              - name: "deny-connect-http-$d"
+                match:
+                  connect_matcher: {}
+                  headers: [{ name: ":authority", string_match: { safe_regex: { regex: "(?i)$de(:[0-9]+)?" } } }]
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: $d is reached by plain HTTP here: use http://$d/\\n" } }
+EOF
+    done
     [ -z "${WEB[$l]:-}" ] || web_routes "$l"
     cat <<'EOF'
               - name: deny-connect
@@ -413,7 +647,7 @@ EOF
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: host not in allowlist\n" } }
               - name: deny-http
                 match: { prefix: "/" }
-                direct_response: { status: 403, body: { inline_string: "airlock-envoy: CONNECT only\n" } }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: not a plain-HTTP host of this profile\n" } }
           http_filters:
           # The tunnel's connection ID travels to the SNI listener, so its log lines join this one.
           # hashable_string makes it part of the upstream pool key, so each tunnel gets its own
@@ -426,6 +660,9 @@ EOF
                 factory_key: envoy.hashable_string
                 format_string: { text_format_source: { inline_string: "%CONNECTION_ID%" } }
                 shared_with_upstream: ONCE
+EOF
+    http_filters "$l"
+    cat <<'EOF'
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -531,6 +768,7 @@ EOF
       endpoints: [{ lb_endpoints: [{ endpoint: { address: { pipe: { path: $(web_sock "$l") } } } }] }]
 EOF
   done < <(web_listeners)
+  http_clusters
   echo "  # The real upstreams: names resolved by Envoy, or a fixed address."
   for d in "${ALL[@]}"; do
     k=$(key "$d")
@@ -726,6 +964,14 @@ unset TMPDIR
 work="$(mktemp -d /tmp/airlock-envoy-apply.XXXXXX)"
 trap 'rm -rf "$work"' EXIT
 
+# Every credential a listener uses must exist before anything changes (Envoy would refuse
+# the config, or start with a destination that can never authenticate).
+if [ "$(id -u)" = 0 ]; then
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    [ -f "$CRED_DIR/$c.yaml" ] || die "credential $c is not set: sudo airlock-envoy-cred set $c (nothing was changed)"
+  done < <(creds_used)
+fi
 # Envoy's validate mode opens the access log, so the copy it checks logs to /dev/null; it is
 # otherwise the config that gets installed. As root it runs as the service account.
 render /dev/null > "$work/validate.yaml"

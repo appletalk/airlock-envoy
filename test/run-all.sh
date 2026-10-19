@@ -29,19 +29,25 @@ for d in "${distros[@]}"; do run "install-$d" test/install-test.sh "$d" & order+
 lint() {
   local sc="${SHELLCHECK:-$(command -v shellcheck)}"
   [ -n "$sc" ] || { echo "skipped: no shellcheck (set SHELLCHECK=)"; return 3; }
-  "$sc" install/*.sh install/airlock-envoy-apply test/*.sh test/client/entry.sh && echo "ok   shellcheck"
+  "$sc" install/*.sh install/airlock-envoy-apply install/airlock-envoy-cred test/*.sh test/client/entry.sh && echo "ok   shellcheck"
+}
+# shellcheck disable=SC2329  # run via run()
+graphql() {  # the GitHub GraphQL write check, under LuaJIT as in Envoy
+  command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
+  luajit test/graphql-check.lua
 }
 { run shellcheck lint
   run apply-parse test/apply-parse.sh
+  run graphql graphql
   with_envoy t2 "" test/t2-checks.sh
   with_envoy site-checks test/site.conf test/site-checks.sh
 } &
-order=(shellcheck apply-parse t2 site-checks "${order[@]}")
+order=(shellcheck apply-parse graphql t2 site-checks "${order[@]}")
 wait
 failed=0
 for name in "${order[@]}"; do
   read -r rc s < "$logs/$name.result" || { rc=1 s='?'; }
-  case "$rc" in 0) st=ok ;; 3) st=skip ;; *) st=FAIL; failed=1 ;; esac   # 3: lint skipped
+  case "$rc" in 0) st=ok ;; 3) st=skip ;; *) st=FAIL; failed=1 ;; esac   # 3: a tool missing, skipped
   printf '%-4s %-24s %6s s  %s\n' "$st" "$name" "$s" "$(grep -c '^ok' "$logs/$name.log") checks ok"
   case "$rc" in 0|3) ;; *) grep -E '^FAIL' "$logs/$name.log" | sed 's/^/       /' ;; esac
   [ "$rc" = 0 ] || [ "$rc" = 3 ] || grep -q '^FAIL' "$logs/$name.log" || tail -3 "$logs/$name.log" | sed 's/^/       /'

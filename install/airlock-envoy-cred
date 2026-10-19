@@ -1,0 +1,87 @@
+#!/bin/bash
+# airlock-envoy-cred: the credentials Envoy adds to plain-HTTP requests (site file: http <host>
+# ... credential <name>). The secret comes from stdin, never from the command line; nothing
+# here prints one.
+#
+#   airlock-envoy-cred set <name> [--format bearer|token|raw|basic:<user>]
+#       as root: read the secret from stdin (a prompt without echo on a terminal) and make the
+#       Authorization value: bearer "Bearer <s>" (the default), token "token <s>", raw "<s>",
+#       basic:<user> "Basic base64(<user>:<s>)". Envoy picks it up within a second, no restart.
+#   airlock-envoy-cred revoke <name>   as root: replace it with a value that grants nothing
+#                                     (deleting the file would not: Envoy keeps the last one)
+#   airlock-envoy-cred list            as root: names, formats and when each was set
+set -euo pipefail
+umask 077
+export LC_ALL=C
+DIR=/etc/airlock-envoy/credentials
+die() { echo "airlock-envoy-cred: $*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
+
+[ $# -ge 1 ] || { usage >&2; exit 2; }
+cmd=$1; shift
+case "$cmd" in -h|--help) usage; exit 0 ;; esac
+[ "$(id -u)" = 0 ] || die "run as root"
+[ -d "$DIR" ] || die "$DIR does not exist: run install/install-service.sh first"
+grp="$(stat -c %G "$DIR")"
+
+valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "bad credential name '$1' (a-z, 0-9 and -, starting with a letter)"; }
+
+# write <name> <header value> <format label>: an SDS file, swapped in atomically (Envoy watches
+# the directory and takes the new file on the rename).
+write() {
+  local tmp
+  tmp="$(mktemp "$DIR/.new.XXXXXX")"
+  {
+    printf '# airlock-envoy credential %s, format %s, set %s\n' "$1" "$3" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'resources:\n- "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret\n'
+    printf '  name: "%s"\n  generic_secret: { secret: { inline_string: "%s" } }\n' "$1" "$2"
+  } > "$tmp"
+  chown "root:$grp" "$tmp"; chmod 0640 "$tmp"
+  mv -f "$tmp" "$DIR/$1.yaml"
+}
+
+case "$cmd" in
+  set)
+    [ $# -ge 1 ] || die "usage: airlock-envoy-cred set <name> [--format bearer|token|raw|basic:<user>]"
+    name=$1; shift; valid_name "$name"
+    fmt=bearer
+    if [ $# -gt 0 ]; then
+      [ "$1" = --format ] && [ $# = 2 ] || die "unknown arguments: $* (want --format <format>)"
+      fmt=$2
+    fi
+    if [ -t 0 ]; then read -rs -p "Secret for $name: " secret; echo >&2
+    else secret="$(cat)"; secret=${secret%$'\n'}; fi
+    [ -n "$secret" ] || die "empty secret"
+    # Printable ASCII without quote or backslash: what tokens are, and what goes into the SDS
+    # file's YAML string unescaped.
+    if ! [[ "$secret" =~ ^[[:graph:]]+$ ]] || [[ "$secret" == *'"'* || "$secret" == *\\* ]]; then
+      die "the secret must be printable ASCII, without spaces, quotes or backslashes"
+    fi
+    case "$fmt" in
+      bearer) value="Bearer $secret" ;;
+      token)  value="token $secret" ;;
+      raw)    value="$secret" ;;
+      basic:*)
+        user=${fmt#basic:}
+        [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]] || die "bad basic user '$user'"
+        value="Basic $(printf '%s:%s' "$user" "$secret" | base64 -w0)" ;;
+      *) die "unknown format '$fmt' (bearer, token, raw, basic:<user>)" ;;
+    esac
+    write "$name" "$value" "$fmt"
+    echo "==> $name set ($fmt): Envoy uses it from the next request"
+    ;;
+  revoke)
+    [ $# = 1 ] || die "usage: airlock-envoy-cred revoke <name>"
+    valid_name "$1"
+    [ -f "$DIR/$1.yaml" ] || die "no credential $1"
+    write "$1" "airlock-envoy-revoked" revoked
+    echo "==> $1 revoked: requests now carry a value that grants nothing (revoke it at the issuer too)"
+    ;;
+  list)
+    shopt -s nullglob
+    for f in "$DIR"/*.yaml; do
+      sed -n '1s/^# airlock-envoy credential \([^,]*\), format \([^,]*\), set \(.*\)$/\1  \2  \3/p' "$f"
+    done
+    ;;
+  *) usage >&2; exit 2 ;;
+esac

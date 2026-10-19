@@ -98,6 +98,8 @@ What it sets up:
 | `/etc/airlock-envoy/envoy.yaml`, `allowed` | root:airlock-envoy, 0640 | rendered config; what was last applied |
 | `/run/airlock-envoy-internal/` | airlock-envoy, 0700 | Envoy's own sockets, incl. admin; never given to anyone |
 | `/var/log/airlock-envoy/access.jsonl` | airlock-envoy, 0600 (dir 0750) | the audit log |
+| `/etc/airlock-envoy/credentials/<name>.yaml` | root:airlock-envoy, 0640 (dir 0750) | credentials for plain-HTTP destinations, written by `airlock-envoy-cred` |
+| `/usr/local/sbin/airlock-envoy-cred`, `/usr/local/share/airlock-envoy/github-graphql.lua` | root | the credential helper; the GitHub GraphQL write check |
 | `/etc/airlock-envoy/envoy-web.yaml` | root:airlock-envoy, 0640 | the web Envoy's config, while a listener lists `web` |
 | `/etc/systemd/system/airlock-envoy-web.service.d/site.conf` | root, 0644 | web's kernel filter: the site's `internal-net`, the resolvers allowed |
 | `/run/airlock-envoy-web/<listener>.sock` | airlock-envoy (dir 0700) | the web Envoy's socket for each web profile (only the main Envoy connects) |
@@ -190,6 +192,47 @@ Keep the site file in version control. Two ways to land it:
 
 The built-in `anthropic` list lives in `airlock-envoy-apply`, so updating it is this repo's job:
 rerun `install-service.sh` from an updated clean clone.
+
+## Plain HTTP and credentials
+
+For a service the box needs credentials for, or that sits on a shared front end, the box
+speaks **plain HTTP** to Envoy and Envoy is the TLS client: it checks the request against a
+preset (methods and paths), fixes the `Host` and server name (so no other site on the same
+address is reachable), adds the credential, and verifies the service's certificate. The box
+never holds the credential, and the plain-HTTP leg is a Unix socket, never a wire.
+
+```
+http  api.github.com      rules github-api  credential github-api
+http  github.com          rules git         credential github-git
+http  metrics.example.net rules victoria-metrics
+dev   @anthropic web http://api.github.com http://github.com
+```
+
+- `http <host>[:port] rules <preset> [credential <name>]` (site-wide, above its use) defines
+  the destination; a listener lists it as `http://<host>`. A host a listener reaches by plain
+  HTTP gets no CONNECT route there, `web` included, so the box can't tunnel around the rules.
+- **Presets** (default deny, in `airlock-envoy-apply`): `victoria-metrics`, `victoria-logs`
+  (the query paths), `git` (smart HTTP fetch and push; branch rules belong on the server),
+  `github-api` (reads; PR and issue create, edit, comment, labels, reviewers; refused: merge,
+  approve, settings, hooks, keys, deletes, anything else), `any`.
+- **GitHub writes go through `POST /graphql`**, so `github-api` runs a check on that route
+  (`install/github-graphql.lua`): queries pass; a mutation passes only if every top-level field
+  is on its allowlist (PR/issue create and edit, comments, labels, reviewers, reactions);
+  `mergePullRequest`, review approval, ref and branch-protection changes are refused, and so is
+  any body it can't read for certain. `GET /graphql` is refused.
+- **Credentials**: `printf %s "$TOKEN" | sudo airlock-envoy-cred set github-api` (or from a
+  prompt; `--format bearer|token|raw|basic:<user>`; for GitHub git, `basic:x-access-token`).
+  Envoy uses a new value from the next request, no restart. `revoke` writes a value that grants
+  nothing (deleting the file would not: Envoy keeps the last good value). `list` shows names
+  and dates, never values. Apply refuses a listener whose credential isn't set.
+- **Never logged**: Envoy's access log sees request headers *after* the credential is added, so
+  no rendered log format names a request header (a test checks it), and Envoy runs at `warn`.
+  The admin config dump shows secrets as `[redacted]`.
+- **Clients in the box**: curl and anything that honours `http_proxy` use `http://<host>/`
+  URLs. git keeps its ssh remotes on the host: in the box only, an environment config rewrites
+  them, e.g. `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.http://github.com/.insteadOf
+  GIT_CONFIG_VALUE_0=git@github.com:`. gh: `gh config set http_unix_socket
+  /run/airlock-envoy/<listener>.sock` and any placeholder `GH_TOKEN` (Envoy replaces it).
 
 ## How a tunnel decides
 
