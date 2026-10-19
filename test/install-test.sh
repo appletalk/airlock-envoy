@@ -281,22 +281,45 @@ x airlock-envoy-apply --start >/dev/null
 r="$(tunnel "$E" example.com)"
 ck "...and a good --start then brings it all back: got '$r'" '[ "$r" = 200 ] && ! x test -e /etc/airlock-envoy/stopped'
 
-# web: a second Envoy, its own unit, its kernel filter in a drop-in.
-x sh -c 'printf "%s\n" "extra @anthropic example.com:443 web" "internal-name example.net" "internal-net 198.51.100.0/24 2001:db8:1::/48" > /etc/airlock-envoy/site.conf'
-x airlock-envoy-apply >/dev/null
+# web: a second Envoy, its own unit, its kernel filter in a drop-in. The unit starts only where
+# that filter is enforced; a rootless container usually can't enforce it, so first: does it?
+enforced=0
+x systemd-run --wait --pipe --quiet -p IPAddressDeny=127.0.0.2/32 /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.2/9' 2>&1 \
+  | grep -q "Operation not permitted" && enforced=1
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443 web" "internal-name example.net" "internal-net 192.0.3.0/24 2001:db9::/32" > /etc/airlock-envoy/site.conf'
 D=/etc/systemd/system/airlock-envoy-web.service.d/site.conf
+if [ "$enforced" = 0 ]; then
+  cfg="$(x sha256sum /etc/airlock-envoy/envoy.yaml)"
+  ck "web: kernel filter not enforced here, so the web Envoy refuses to start and apply fails" '! x airlock-envoy-apply >/dev/null 2>&1'
+  ck "...and nothing is left half set up: unit off, no web config or drop-in, main config unchanged" \
+     '[ "$(x systemctl is-active airlock-envoy-web)" != active ] && [ "$(x systemctl is-enabled airlock-envoy-web 2>/dev/null)" != enabled ] && ! x test -e /etc/airlock-envoy/envoy-web.yaml && ! x test -e "$D" && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ]'
+  ck "...and the journal says why" 'x journalctl -u airlock-envoy-web --no-pager | grep -q "kernel IP filter is not enforced"'
+  # From here on, test the rest with the check skipped (root's drop-in, as documented).
+  x sh -c 'mkdir -p /etc/systemd/system/airlock-envoy-web.service.d && printf "[Service]\nEnvironment=AIRLOCK_ENVOY_WEB_FILTER_CHECK=skip\n" > /etc/systemd/system/airlock-envoy-web.service.d/test-skip.conf && systemctl daemon-reload'
+else
+  echo "ok   web: this container enforces the kernel filter, so the self-check passes as is"
+fi
+x airlock-envoy-apply >/dev/null
 ck "web: airlock-envoy-web active and enabled" '[ "$(x systemctl is-active airlock-envoy-web)" = active ] && [ "$(x systemctl is-enabled airlock-envoy-web)" = enabled ]'
 ck "web: envoy-web.yaml root:airlock-envoy 0640, drop-in root:root 0644" \
    '[ "$(x stat -c %U:%G:%a /etc/airlock-envoy/envoy-web.yaml)" = root:airlock-envoy:640 ] && [ "$(x stat -c %U:%G:%a "$D")" = root:root:644 ]'
 ns="$(x awk '$1 == "nameserver" { print $2; exit }' /etc/resolv.conf)"
 ck "web: the drop-in denies the site's networks and allows the resolver ($ns) exactly" \
-   'x grep -qx "IPAddressDeny=198.51.100.0/24" "$D" && x grep -qx "IPAddressDeny=2001:db8:1::/48" "$D" && x grep -qE "^IPAddressAllow=$ns/(32|128)$" "$D"'
-deny="$(x systemctl show -p IPAddressDeny --value airlock-envoy-web)"
-ck "web: systemd applies the unit's built-in list plus the site's: $(wc -w <<< "$deny") entries" \
-   '[[ " $deny " == *" 10.0.0.0/8 "* && " $deny " == *" 127.0.0.0/8 "* && " $deny " == *" 8000::/1 "* && " $deny " == *" 198.51.100.0/24 "* ]]'
+   'x grep -qx "IPAddressDeny=192.0.3.0/24" "$D" && x grep -qx "IPAddressDeny=2001:db9::/32" "$D" && x grep -qE "^IPAddressAllow=$ns/(32|128)$" "$D"'
+deny="$(x systemctl show -p IPAddressDeny --value airlock-envoy-web | tr " " "\n" | sort)"
+# Against a fixed list (the reviewed one, as in apply-parse.sh), not the unit file it tests.
+want="$(printf "%s\n" 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 ::/3 4000::/2 8000::/1 2001::/23 2001:db8::/32 2002::/16 3fff::/20 192.0.3.0/24 2001:db9::/32 | sort)"
+ck "web: systemd applies exactly the unit's built-in list plus the site's ($(wc -l <<< "$deny") entries)" '[ -n "$deny" ] && [ "$deny" = "$want" ]'
+ck "web: the main Envoy's sockets are out of the web unit's sight" \
+   'x systemctl show -p InaccessiblePaths --value airlock-envoy-web | grep -q /run/airlock-envoy-internal'
+ck "web: a socket for the profile in the web Envoy" 'x test -S /run/airlock-envoy-web/extra.sock'
 E2=/run/airlock-envoy/extra.sock
 r="$(tunnel "$E2" example.com example.org example.net git.example.net 1.1.1.1)"
 ck "web: exact entry, web host, internal names, IP literal: got '$r'" '[ "$r" = "200 200 403 403 403" ]'
+r="$(x runuser -u client -- bash -c 'socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:"$0" &
+  until grep -q ":0C38 00000000:0000 0A" /proc/net/tcp; do sleep 0.01; done
+  curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:3128 https://example.org/; kill %1; wait' "$E2" 2>/dev/null)"
+ck "web: TLS really gets through (an HTTP status from example.org, not just the CONNECT): got '$r'" '[[ "$r" =~ ^[1-5][0-9][0-9]$ ]]'
 r="$(tunnel "$S" example.org)"
 ck "web: the anthropic listener has no web: got '$r'" '[ "$r" = 403 ]'
 out="$(x airlock-envoy-apply --status)"
@@ -316,6 +339,19 @@ ck "web: a web config Envoy will not start with: apply fails and says so" '! x a
 r="$(tunnel "$E2" example.org)"
 ck "...and the previous web config is back and running: got '$r'" \
    '[ "$(x sha256sum /etc/airlock-envoy/envoy-web.yaml)" = "$wcfg" ] && [ "$(x systemctl is-active airlock-envoy-web)" = active ] && [ "$r" = 200 ]'
+x mv -f /usr/local/bin/envoy.real /usr/local/bin/envoy
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443 web" "internal-name example.net" "internal-net 192.0.3.0/24 2001:db9::/32" > /etc/airlock-envoy/site.conf'
+x airlock-envoy-apply >/dev/null
+# Web dropped in the same apply as a main config Envoy won't start: the main Envoy rolls back
+# to a config that still routes web, so web must still be there.
+x sh -c 'real="$(readlink -f /usr/local/bin/envoy)"; printf "%s\n" "#!/bin/sh" \
+  "case \" \$* \" in *\" --mode validate \"*) ;; *envoy.yaml*) grep -q nostart /etc/airlock-envoy/envoy.yaml && exit 1 ;; esac" \
+  "exec $real \"\$@\"" > /usr/local/bin/envoy.wrap && chmod 0755 /usr/local/bin/envoy.wrap && mv /usr/local/bin/envoy /usr/local/bin/envoy.real && mv /usr/local/bin/envoy.wrap /usr/local/bin/envoy'
+x sh -c 'printf "%s\n" "extra @anthropic example.com:443" "nostart @anthropic" > /etc/airlock-envoy/site.conf'
+ck "web dropped with a main config that won't start: apply fails" '! x airlock-envoy-apply >/dev/null 2>&1'
+r="$(tunnel "$E2" example.org)"
+ck "...and web is still up, as the rolled-back main config expects: got '$r'" \
+   '[ "$(x systemctl is-active airlock-envoy-web)" = active ] && x test -e /etc/airlock-envoy/envoy-web.yaml && [ "$r" = 200 ]'
 x mv -f /usr/local/bin/envoy.real /usr/local/bin/envoy
 x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
 x airlock-envoy-apply >/dev/null

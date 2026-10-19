@@ -102,6 +102,24 @@ lists "IPv6 CIDR forms" \
   'a web\ninternal-net ::/0\ninternal-net fd00:99::/32\ninternal-net 2001:db8:1:2:3:4:5:6/128\ninternal-net ::ffff:0:0/96\ninternal-net 1::/16\ninternal-net 0.0.0.0/0' \
   'a web\ninternal-net ::/0 fd00:99::/32 2001:db8:1:2:3:4:5:6/128 ::ffff:0:0/96 1::/16 0.0.0.0/0\n'
 
+# The web Envoy, per profile: its own listener, socket and DNS cache; IPv4 only (A records);
+# no resolv.conf search domains.
+printf 'p @anthropic web\nq web\nr example.org:443\n' > "$work/site"
+w="$("$apply" --render-web "$work/site")"
+if [ "$(grep -c 'dns_lookup_family: V4_ONLY' <<< "$w")" = 2 ] && [ "$(grep -c 'no_default_search_domain: true' <<< "$w")" = 2 ] \
+   && ! grep -qE 'dns_lookup_family: (ALL|AUTO|V6)' <<< "$w" \
+   && grep -q 'path: /run/airlock-envoy-web/p.sock' <<< "$w" && grep -q 'path: /run/airlock-envoy-web/q.sock' <<< "$w" \
+   && ! grep -q 'airlock-envoy-web/r.sock' <<< "$w" && grep -q 'listener: "q"' <<< "$w"; then
+  echo "ok   web Envoy: a listener, socket and IPv4-only cache per web profile, no search domains"
+else echo "FAIL web Envoy per-profile rendering"; fails=$((fails+1)); fi
+
+# The web unit's built-in deny list, against a list kept here on purpose (checked against the
+# IANA special-purpose registries for IPv4 and IPv6): an edit to the unit has to edit this too.
+WEB_DENY_GOLDEN="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 ::/3 4000::/2 8000::/1 2001::/23 2001:db8::/32 2002::/16 3fff::/20"
+got="$(sed -n 's/^IPAddressDeny=//p' systemd/airlock-envoy-web.service | tr ' ' '\n' | sort)"
+if [ "$got" = "$(tr ' ' '\n' <<< "$WEB_DENY_GOLDEN" | sort)" ]; then echo "ok   web unit: the built-in deny list is exactly the reviewed one"
+else echo "FAIL web unit: the built-in deny list differs from the reviewed one:"; diff <(tr ' ' '\n' <<< "$WEB_DENY_GOLDEN" | sort) <(printf '%s\n' "$got"); fails=$((fails+1)); fi
+
 # The web drop-in: the site's networks denied, each resolver allowed by exact address.
 printf 'a web\ninternal-net 198.51.100.0/24 2001:db8:1::/48\n' > "$work/site"
 printf 'nameserver 127.0.0.53\nnameserver fe80::1%%eth0\noptions edns0\n' > "$work/resolv"

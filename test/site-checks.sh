@@ -58,6 +58,29 @@ except (OSError, ssl.SSLError):
     print(status, "closed")
 PY
 }
+rawhello() {  # rawhello <sni> <port> <host>: CONNECT, then a hand-built ClientHello carrying any
+  # server name, an IP literal included (TLS libraries refuse to send one; an attacker would)
+  python3 -I - "$1" "$2" "$3" <<"PY"
+import os, socket, struct, sys
+sni, port, host = sys.argv[1].encode(), int(sys.argv[2]), sys.argv[3].encode()
+s = socket.create_connection(("127.0.0.1", port), timeout=10)
+s.sendall(b"CONNECT " + host + b":443 HTTP/1.1\r\nHost: " + host + b":443\r\n\r\n")
+head = b""
+while b"\r\n\r\n" not in head:
+    c = s.recv(1)
+    if not c: break
+    head += c
+status = head.split(b"\r\n")[0].decode(errors="replace")
+ext = struct.pack("!HH", 0, len(sni) + 5) + struct.pack("!HBH", len(sni) + 3, 0, len(sni)) + sni
+body = b"\x03\x03" + os.urandom(32) + b"\x00" + struct.pack("!H", 4) + b"\x13\x01\xc0\x2f" + b"\x01\x00" + struct.pack("!H", len(ext)) + ext
+hs = b"\x01" + len(body).to_bytes(3, "big") + body
+s.sendall(b"\x16\x03\x01" + struct.pack("!H", len(hs)) + hs)
+try:
+    print(status, "data" if s.recv(1) else "closed")
+except OSError:
+    print(status, "closed")
+PY
+}
 tlscheck() {  # tlscheck <name> <expected> <sni or ""> [port] [host]
   local f; slot
   { verdict "$1" "$2" "$(tls "$3" "${4:-}" "${5:-}")" > "$f"; } &
@@ -117,10 +140,13 @@ check 3131 "CONNECT example.com, SNI example.net (internal)" "proxy=200 http=000
 check 3131 "CONNECT example.com, plain HTTP inside"          "proxy=200 http=000 exit=52" -p http://example.com:443/
 tlscheck "CONNECT example.com, TLS with its SNI (control)"   "HTTP/1.1 200 OK handshake" example.com 3131 example.com
 tlscheck "CONNECT example.com, TLS without SNI"              "HTTP/1.1 200 OK closed" "" 3131 example.com
-# Python will not send an IP literal as the server name (RFC 6066); openssl will, as an
-# attacker would.
-slot; { verdict "CONNECT example.com, SNI 10.99.0.10 (openssl)" "closed" \
-  "$(echo | timeout 10 openssl s_client -proxy 127.0.0.1:3131 -connect example.com:443 -servername 10.99.0.10 2>&1 | grep -q "BEGIN CERTIFICATE" && echo handshake || echo closed)" > "$f"; } &
+# A server name that is an IP literal (a documentation address, never a real one here): the
+# web Envoy must give it no chain, so nothing is dialled (the web log checks that below).
+slot; { verdict "CONNECT example.com, raw ClientHello with SNI 192.0.2.1" "HTTP/1.1 200 OK closed" "$(rawhello 192.0.2.1 3131 example.com)" > "$f"; } &
+pids+=($!)
+slot; { verdict "CONNECT example.com, raw ClientHello with SNI www.example.net (internal)" "HTTP/1.1 200 OK closed" "$(rawhello www.example.net 3131 example.com)" > "$f"; } &
+pids+=($!)
+slot; { verdict "CONNECT example.com, raw ClientHello with SNI example.com (control)" "HTTP/1.1 200 OK data" "$(rawhello example.com 3131 example.com)" > "$f"; } &
 pids+=($!)
 settle
 # Alone, after the rest: it holds t-other at its cap.
@@ -170,12 +196,13 @@ logchecks() {
   wl() {  # wl <name> <jq filter that must match a line of the web log>
     if [ -n "$(wlog | jq -c "select($2)" 2>/dev/null)" ]; then echo "ok   web log: $1"; else echo "FAIL web log: $1"; fi
   }
-  wl "example.com dialled by the web chain" '.sni == "example.com" and .route == "web" and .upstream != null'
+  wl "example.com dialled by the web chain, logged under t-web" '.listener == "t-web" and .sni == "example.com" and .route == "web" and .upstream != null'
   wl "SNI example.net refused, nothing dialled" '.sni == "example.net" and .route == "deny-internal-name" and .upstream == null'
-  # Some openssl builds drop an IP literal from the server name; either way nothing is dialled.
-  if [ -n "$(wlog | jq -c 'select(.sni == "10.99.0.10" and (.route != null or .upstream != null))' 2>/dev/null)" ]; then
-    echo "FAIL web log: SNI 10.99.0.10 got a chain or an upstream"
-  else echo "ok   web log: SNI 10.99.0.10 got no chain, nothing dialled"; fi
+  wl "SNI 192.0.2.1 (raw ClientHello) got no chain, nothing dialled" '.sni == "192.0.2.1" and .route == null and .flags == "NR" and .upstream == null'
+  wl "SNI www.example.net (subdomain of an internal name) refused at the web Envoy" '.sni == "www.example.net" and .route == "deny-internal-name" and .upstream == null'
+  if [ -n "$(wlog | jq -c 'select(.upstream != null and (.upstream | startswith("[")))' 2>/dev/null)" ]; then
+    echo "FAIL web log: an IPv6 upstream (web is IPv4 only)"
+  else echo "ok   web log: no IPv6 upstream (web is IPv4 only)"; fi
   wl "no SNI got no chain, nothing dialled" '.sni == null and .route == null and .flags == "NR" and .upstream == null'
   if [ -n "$(wlog | jq -c 'select(.upstream != null and (.upstream | test("^(10|127|172\\.(1[6-9]|2[0-9]|3[01])|192\\.168)\\.")))' 2>/dev/null)" ]; then
     echo "FAIL web log: the web Envoy dialled a private address"

@@ -23,7 +23,7 @@ if [ "${1:-}" = capture ]; then
   net=host
 else
   install/airlock-envoy-apply --render "${1:-/dev/null}" > run/envoy.yaml
-  if grep -q 'name: web-egress' run/envoy.yaml; then
+  if grep -q 'name: "web-egress-' run/envoy.yaml; then
     web=1
     install/airlock-envoy-apply --render-web "${1:-/dev/null}" > run/web/envoy-web.yaml
   fi
@@ -46,7 +46,11 @@ podman run -d --rm --name airlock-envoy-spike --network "$net" \
   -v ./run/web:/run/airlock-envoy-web:z \
   "$image" -c /run/airlock-envoy-internal/envoy.yaml --disable-hot-restart --file-flush-interval-msec 100 --log-level warn >/dev/null
 for _ in $(seq 50); do
-  if [ -S run/admin.sock ] && { [ "$web" = 0 ] || [ -S run/web/egress.sock ]; }; then exit 0; fi
+  up=1; [ -S run/admin.sock ] || up=0
+  if [ "$web" = 1 ]; then
+    while read -r w; do [ -S "run/web/${w##*/}" ] || up=0; done < <(grep -o '/run/airlock-envoy-web/[a-z0-9-]*[.]sock' run/web/envoy-web.yaml)
+  fi
+  [ "$up" = 0 ] || exit 0
   sleep 0.1
 done
 echo "Envoy did not come up:" >&2

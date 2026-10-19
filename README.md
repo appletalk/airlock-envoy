@@ -100,8 +100,8 @@ What it sets up:
 | `/var/log/airlock-envoy/access.jsonl` | airlock-envoy, 0600 (dir 0750) | the audit log |
 | `/etc/airlock-envoy/envoy-web.yaml` | root:airlock-envoy, 0640 | the web Envoy's config, while a listener lists `web` |
 | `/etc/systemd/system/airlock-envoy-web.service.d/site.conf` | root, 0644 | web's kernel filter: the site's `internal-net`, the resolvers allowed |
-| `/run/airlock-envoy-web/` | airlock-envoy, 0700 | the web Envoy's socket (only the main Envoy connects) |
-| `/var/log/airlock-envoy/web.jsonl` | airlock-envoy, 0600 | the web Envoy's log: server name, chain, upstream address |
+| `/run/airlock-envoy-web/<listener>.sock` | airlock-envoy (dir 0700) | the web Envoy's socket for each web profile (only the main Envoy connects) |
+| `/var/log/airlock-envoy/web.jsonl` | airlock-envoy, 0600 | the web Envoy's log: profile, server name, chain, upstream address |
 
 Put a project's box behind a socket with `airlock egress proxy /run/airlock-envoy/<listener>.sock`
 (claude-airlock's proxy posture: no network of its own, every connection through that socket).
@@ -225,19 +225,35 @@ much sooner (about 15 s without a request).
    alphabetic top-level label on port 443 goes, as raw TLS, to the web Envoy
    (`airlock-envoy-web`, its own unit). IP literals, single labels and other ports never match
    and get 403.
-2. The web Envoy picks a filter chain from the TLS server name **before any filter runs**. An
-   internal name, no name, an IP literal or a name without a dot gets no chain that has an
-   upstream, so nothing is dialled. The CONNECT host and the server name may differ; each side
-   checks its own.
-3. Envoy resolves the server name itself and dials what DNS returns, under the unit's kernel
-   filter: `IPAddressDeny` for every non-public range (built in) plus the site's
-   `internal-net`, and `IPAddressAllow` for the resolvers in `/etc/resolv.conf` by exact
-   address. That filter is what keeps web public, whatever a name resolves to. A resolver that
-   strips private answers (Unbound `private-address`) adds a layer in front of it.
+2. Each web profile has its own listener in the web Envoy, so its own DNS cache (one profile
+   filling it doesn't stall another) and its own name in the web log. The filter chain is
+   picked from the TLS server name **before any filter runs**: an internal name, no name, an
+   IP literal or a name without a dot gets no chain that has an upstream, so nothing is
+   dialled. The CONNECT host and the server name may differ; each side checks its own.
+3. Envoy resolves the server name itself, **IPv4 only** (A records), without resolv.conf
+   search domains, and dials what DNS returns under the unit's kernel filter: `IPAddressDeny`
+   for every non-public range (built in) plus the site's `internal-net`, and `IPAddressAllow`
+   for the resolvers in `/etc/resolv.conf` by exact address. That filter is the boundary;
+   `internal-name` is policy on top of it (a CNAME, `/etc/hosts` or a name you didn't list
+   still resolves). A resolver that strips private answers (Unbound `private-address`) adds a
+   layer in front.
+4. **No filter, no web.** systemd accepts `IPAddressDeny` and silently enforces nothing where
+   cgroup BPF is missing (some containers, old kernels), so the unit's start fails unless a
+   connect to a denied address gets `EPERM`; `apply` then reports it and leaves web off. Only
+   a root-written drop-in setting `AIRLOCK_ENVOY_WEB_FILTER_CHECK=skip` overrides that, and the
+   start logs the skip.
 
-Check, as root, that the kernel enforces it on your host (systemd's IP filter needs cgroup
-BPF; a container or an old kernel may not have it). This runs a throwaway unit with the web
-unit's exact filter:
+**Why IPv4 only.** "Public" by address range includes a site's own public addresses. Over IPv6
+those are the site's global prefix, which rotates with a dynamic delegation, and some never
+cross a router (the host's own addresses, hosts on its link), so neither a fixed list nor the
+router can keep web off them. Over IPv4 the internal space is RFC 1918, fixed and denied, and
+a site's own public address is its router's WAN address: add it to `internal-net` if it's
+fixed, and check whether the router reflects port forwards back inside (NAT reflection). The
+web Envoy's sockets are also out of reach of the main Envoy's (`InaccessiblePaths`), so a
+compromised web Envoy can't use the main one's listeners to get around its filter.
+
+The unit already proves enforcement at every start. To check by hand, as root, this runs a
+throwaway unit with the web unit's exact filter:
 
 ```
 sudo systemd-run --wait --pipe --quiet \
@@ -257,7 +273,12 @@ sudo systemd-run --wait --pipe --quiet \
   inject one.
 - **Data sent anywhere public, through web.** A listener with `web` can reach any public
   host; the web log names each one. Narrow a profile to exact entries when that matters.
-- **The resolver, through web.** It is allowed by address, on every port.
+- **The resolver, through web.** It is allowed by address, on every port, and a hostile public
+  name can point at it. Harmless for a loopback resolver that strips private answers (Unbound
+  `private-address`); a resolver on a LAN address (a home router) exposes whatever that host
+  serves on 443 to web.
+- **A NAT64 prefix of your own.** The well-known `64:ff9b::/96` is denied, but web is IPv4
+  only anyway; if IPv6 comes back, add a network-specific NAT64 prefix to `internal-net`.
 - **A different site inside a matched TLS session.** Once the SNI matches, the HTTP `Host` is
   encrypted. Asking `api.anthropic.com` for another Anthropic site's `Host` is refused today by
   the CDN (403), which is its policy, not this proxy's.
