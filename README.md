@@ -210,7 +210,24 @@ dev   @anthropic web http://api.github.com http://github.com
 ```
 
 - `http <host>[:port] rules <preset> [credential <name>]` (site-wide, above its use) defines
-  the destination; a listener lists it as `http://<host>`. One credential per host, site-wide.
+  the destination; a listener lists it as `http://<host>`.
+- **Variants**: `http <host>@<variant> ...` is another definition of the same host, with its
+  own rules, credential and projects (a second identity, or narrower rules for one profile);
+  a listener lists it as `http://<host>@<variant>`. A listener uses one definition per host.
+  ```
+  http api.github.com       rules github-api    credential gh-dev
+  http api.github.com@otto  rules github-issues credential otto-app projects PVT_kwDOAB12cd
+  dev   @anthropic http://api.github.com
+  otto  @anthropic http://api.github.com@otto
+  ```
+- **Projects (v2)**: on the GitHub presets, `projects <id>[,<id>...]` (project node IDs,
+  `PVT_...`) lets four item writes through (`updateProjectV2ItemFieldValue`,
+  `clearProjectV2ItemFieldValue`, `addProjectV2ItemById`, `archiveProjectV2Item`), and only
+  when the mutation's `input.projectId` is one of them: a plain string in the query, or a
+  variable in the body's `variables` (an operation's default value is not read). Anything
+  the check can't resolve for certain is refused; project, field and view settings stay
+  refused. Without `projects`, all Projects writes are refused. That an item, field or value
+  ID belongs to the named project is GitHub's check, not this one.
   `http` is a reserved word (no listener of that name). That exact name gets no CONNECT route in
   the listener, `web` included, so the credentialed path can't be tunnelled around. Other
   names on the same front end (`www.`, aliases) are still ordinary `web` hosts: without the
