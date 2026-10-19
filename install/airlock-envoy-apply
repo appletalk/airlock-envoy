@@ -46,7 +46,6 @@ ETC=/etc/airlock-envoy
 ENVOY=/usr/local/bin/envoy
 LOG=/var/log/airlock-envoy/access.jsonl
 WEB_LOG=/var/log/airlock-envoy/web.jsonl
-WEB_SOCK=/run/airlock-envoy-web/egress.sock
 WEB_DROPIN=/etc/systemd/system/airlock-envoy-web.service.d/site.conf
 BUILTIN_INTERNAL_NAMES=(localhost local localdomain internal lan home.arpa)
 BUILTIN='anthropic api.anthropic.com:443 platform.claude.com:443'
@@ -285,7 +284,7 @@ internal_names() { printf '%s\n' "${BUILTIN_INTERNAL_NAMES[@]}" "${INTERNAL_NAME
 # here (the CONNECT authority), any other host name on 443 goes to the web Envoy, which checks
 # the TLS server name the same way and dials only what DNS gives for it, under its own kernel
 # filter. The authority and the server name may differ; each side checks its own.
-web_routes() {
+web_routes() {  # web_routes <listener>
   local n
   while IFS= read -r n; do
     cat <<EOF
@@ -306,8 +305,8 @@ EOF
                 match:
                   connect_matcher: {}
                   headers: [{ name: ":authority", string_match: { safe_regex: { regex: "(?i)[a-z0-9.-]+\\.[a-z][a-z0-9-]*:443" } } }]
-                route: { cluster: web-egress, upgrade_configs: [{ upgrade_type: CONNECT, connect_config: {} }] }
 EOF
+  printf '                route: { cluster: "web-egress-%s", upgrade_configs: [{ upgrade_type: CONNECT, connect_config: {} }] }\n' "$1"
 }
 
 render() {  # render <access log path>
@@ -407,7 +406,7 @@ EOF
                 route: { cluster: "sni-$k", upgrade_configs: [{ upgrade_type: CONNECT, connect_config: {} }] }
 EOF
     done
-    [ -z "${WEB[$l]:-}" ] || web_routes
+    [ -z "${WEB[$l]:-}" ] || web_routes "$l"
     cat <<'EOF'
               - name: deny-connect
                 match: { connect_matcher: {} }
@@ -523,15 +522,15 @@ EOF
       endpoints: [{ lb_endpoints: [{ endpoint: { address: { envoy_internal_address: { server_listener_name: "sni-$k" } } } }] }]
 EOF
   done
-  if any_web; then
+  echo "  # Web tunnels: the TLS bytes go, unread, to the profile's own listener in the web Envoy."
+  while IFS= read -r l; do
     cat <<EOF
-  # Web tunnels: the TLS bytes go, unread, to the web Envoy's socket.
-  - name: web-egress
+  - name: "web-egress-$l"
     load_assignment:
-      cluster_name: web-egress
-      endpoints: [{ lb_endpoints: [{ endpoint: { address: { pipe: { path: $WEB_SOCK } } } }] }]
+      cluster_name: "web-egress-$l"
+      endpoints: [{ lb_endpoints: [{ endpoint: { address: { pipe: { path: $(web_sock "$l") } } } }] }]
 EOF
-  fi
+  done < <(web_listeners)
   echo "  # The real upstreams: names resolved by Envoy, or a fixed address."
   for d in "${ALL[@]}"; do
     k=$(key "$d")
@@ -551,14 +550,20 @@ EOF
   done
 }
 
-# The web Envoy (airlock-envoy-web): raw TLS from the main Envoy's web-egress cluster. The
-# filter chain is chosen from the TLS server name before any filter runs, so a name that is
-# internal, or no host name at all (none sent, an IP literal, no dot), gets no chain with an
-# upstream and nothing is dialled. An allowed name is resolved here and dialled under the
-# unit's kernel filter (IPAddressDeny), which is what keeps web to public addresses whatever
-# DNS says.
+# The web Envoy (airlock-envoy-web): one listener per profile that lists web, each fed raw TLS
+# by that profile's web-egress cluster in the main Envoy, with its own DNS cache (one profile
+# filling it doesn't stall another) and its own name in the log. The filter chain is chosen
+# from the TLS server name before any filter runs, so a name that is internal, or no host
+# name at all (none sent, an IP literal, no dot), gets no chain with an upstream and nothing
+# is dialled. An allowed name is resolved here, IPv4 only (A records, no resolv.conf search
+# domains), and dialled under the unit's kernel filter (IPAddressDeny), which is what keeps
+# web to public addresses whatever DNS says. IPv6 is left out: over it "public" includes
+# this site's own rotating addresses, some of which never cross a router.
+web_listeners() { local l; for l in "${LISTENERS[@]}"; do [ -z "${WEB[$l]:-}" ] || echo "$l"; done; }
+web_sock() { printf '/run/airlock-envoy-web/%s.sock' "$1"; }
 render_web() {  # render_web <access log path>
-  local log=$1 n
+  local log=$1 n l nweb
+  nweb=$(web_listeners | wc -l)
   cat <<EOF
 # Rendered by airlock-envoy-apply from the site file (web egress). Edit the site file, not this.
 overload_manager:
@@ -566,15 +571,18 @@ overload_manager:
   - name: envoy.resource_monitors.global_downstream_max_connections
     typed_config:
       "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
-      max_active_downstream_connections: $(( PER_LISTENER * ${#LISTENERS[@]} ))
+      max_active_downstream_connections: $(( PER_LISTENER * (nweb > 0 ? nweb : 1) ))
 
 admin:
   address: { pipe: { path: /run/airlock-envoy-web/admin.sock, mode: 0600 } }
 
 static_resources:
   listeners:
-  - name: web
-    address: { pipe: { path: $WEB_SOCK, mode: 0600 } }
+EOF
+  while IFS= read -r l; do
+    cat <<EOF
+  - name: "web-$l"
+    address: { pipe: { path: $(web_sock "$l"), mode: 0600 } }
     listener_filters:
     - name: envoy.filters.listener.tls_inspector
       typed_config: { "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector }
@@ -586,7 +594,7 @@ static_resources:
         log_format:
           json_format:
             time: "%START_TIME%"
-            listener: web
+            listener: "$l"
             sni: "%REQUESTED_SERVER_NAME%"
             route: "%FILTER_CHAIN_NAME%"
             flags: "%RESPONSE_FLAGS%"
@@ -606,13 +614,22 @@ static_resources:
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.sni_dynamic_forward_proxy.v3.FilterConfig
           port_value: 443
-          dns_cache_config: &dns { name: web, dns_lookup_family: ALL, max_hosts: 4096 }
+          dns_cache_config: &dns-$l
+            name: "web-$l"
+            dns_lookup_family: V4_ONLY
+            max_hosts: 4096
+            host_ttl: 60s
+            typed_dns_resolver_config:
+              name: envoy.network.dns_resolver.cares
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+                dns_resolver_options: { no_default_search_domain: true }
       - name: envoy.filters.network.tcp_proxy
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
-          stat_prefix: web
+          stat_prefix: "web-$l"
           idle_timeout: 3600s
-          cluster: web-dfp
+          cluster: "web-dfp-$l"
     filter_chain_matcher:
       matcher_tree:
         input: { name: transport, typed_config: { "@type": type.googleapis.com/envoy.extensions.matching.common_inputs.network.v3.TransportProtocolInput } }
@@ -626,29 +643,34 @@ static_resources:
                       or_matcher:
                         predicate:
 EOF
-  while IFS= read -r n; do
-    cat <<EOF
+    while IFS= read -r n; do
+      cat <<EOF
                         - single_predicate: { input: { name: sni, typed_config: { "@type": type.googleapis.com/envoy.extensions.matching.common_inputs.network.v3.ServerNameInput } }, value_match: { exact: "$n" } }
                         - single_predicate: { input: { name: sni, typed_config: { "@type": type.googleapis.com/envoy.extensions.matching.common_inputs.network.v3.ServerNameInput } }, value_match: { suffix: ".$n" } }
 EOF
-  done < <(internal_names)
-  cat <<'EOF'
+    done < <(internal_names)
+    cat <<'EOF'
                     on_match: { action: { name: deny, typed_config: { "@type": type.googleapis.com/google.protobuf.StringValue, value: deny-internal-name } } }
                   - predicate:
                       single_predicate:
                         input: { name: sni, typed_config: { "@type": type.googleapis.com/envoy.extensions.matching.common_inputs.network.v3.ServerNameInput } }
                         value_match: { safe_regex: { google_re2: {}, regex: "[a-z0-9.-]+\\.[a-z][a-z0-9-]*" } }
                     on_match: { action: { name: web, typed_config: { "@type": type.googleapis.com/google.protobuf.StringValue, value: web } } }
-
-  clusters:
-  - name: web-dfp
+EOF
+  done < <(web_listeners)
+  echo
+  echo "  clusters:"
+  while IFS= read -r l; do
+    cat <<EOF
+  - name: "web-dfp-$l"
     lb_policy: CLUSTER_PROVIDED
     cluster_type:
       name: envoy.clusters.dynamic_forward_proxy
       typed_config:
         "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
-        dns_cache_config: *dns
+        dns_cache_config: *dns-$l
 EOF
+  done < <(web_listeners)
 }
 
 # The web unit's site drop-in: the site's internal-net ranges on top of the unit's built-in
@@ -665,8 +687,10 @@ render_web_dropin() {
     if [[ "$r" == *:* ]]; then echo "IPAddressAllow=$r/128"; else echo "IPAddressAllow=$r/32"; fi
   done < <(resolvers)
 }
-resolvers() {  # nameserver addresses in /etc/resolv.conf (what Envoy's resolver reads)
-  awk '$1 == "nameserver" && $2 != "" { print $2 }' "${RESOLV_CONF:-/etc/resolv.conf}" 2>/dev/null | head -n 3
+resolvers() {  # nameserver addresses in /etc/resolv.conf, all of them (Envoy's resolver reads it)
+  local f=/etc/resolv.conf
+  [ "$mode" != render-web-dropin ] || f="${RESOLV_CONF:-$f}"   # a test hook, never in an apply
+  awk '$1 == "nameserver" && $2 != "" { print $2 }' "$f" 2>/dev/null
 }
 
 case "$mode" in
@@ -719,6 +743,9 @@ if ! out="$(cd / && "${run_as[@]}" "$ENVOY" --mode validate -c "$work/validate.y
 fi
 if any_web; then
   [ -n "$(resolvers)" ] || die "web: /etc/resolv.conf names no nameserver, so the web Envoy could resolve nothing"
+  if [ "$mode" = apply ] && ! systemctl cat airlock-envoy-web.service >/dev/null 2>&1; then
+    die "web: no airlock-envoy-web unit: run install/install-service.sh from this version first; nothing was changed"
+  fi
   render_web /dev/null > "$work/validate-web.yaml"
   if [ "$(id -u)" = 0 ]; then chgrp "$g" "$work/validate-web.yaml"; chmod 0640 "$work/validate-web.yaml"; fi
   if ! out="$(cd / && "${run_as[@]}" "$ENVOY" --mode validate -c "$work/validate-web.yaml" 2>&1 9>&-)"; then
@@ -804,16 +831,15 @@ if any_web; then
           die "airlock-envoy-web did not start with the new config; the previous one is back (journalctl -u airlock-envoy-web)"
         fi
       fi
+      if [ ! -f "$work/envoy-web.yaml.prev" ]; then   # the first web apply: leave nothing half set up
+        systemctl disable --quiet --now airlock-envoy-web 2>/dev/null || true
+        rm -f "$ETC/envoy-web.yaml" "$WEB_DROPIN"; rmdir "${WEB_DROPIN%/*}" 2>/dev/null || true
+        systemctl daemon-reload
+      fi
       undo_start
-      die "airlock-envoy-web did not start: web egress is down (journalctl -u airlock-envoy-web)"
+      die "airlock-envoy-web did not start: web egress is down; nothing else was changed (journalctl -u airlock-envoy-web)"
     fi
   fi
-elif [ -e "$ETC/envoy-web.yaml" ] || [ -e "$WEB_DROPIN" ] || systemctl is-enabled --quiet airlock-envoy-web 2>/dev/null; then
-  echo "==> No listener lists web: stopping airlock-envoy-web"
-  systemctl disable --quiet --now airlock-envoy-web 2>/dev/null || true
-  rm -f "$ETC/envoy-web.yaml" "$WEB_DROPIN"
-  rmdir "${WEB_DROPIN%/*}" 2>/dev/null || true
-  systemctl daemon-reload
 fi
 
 changed=1
@@ -842,6 +868,15 @@ elif [ "$changed" = 1 ] || [ "$restart" = 1 ] || ! systemctl is-active --quiet a
     undo_start
     die "airlock-envoy did not start (journalctl -u airlock-envoy)"
   fi
+fi
+# Web goes only now that the main Envoy runs a config without it: torn down earlier, a main
+# Envoy rolled back to its previous config would route web to a socket that is gone.
+if ! any_web && { [ -e "$ETC/envoy-web.yaml" ] || [ -e "$WEB_DROPIN" ] || systemctl is-enabled --quiet airlock-envoy-web 2>/dev/null; }; then
+  echo "==> No listener lists web: stopping airlock-envoy-web"
+  systemctl disable --quiet --now airlock-envoy-web 2>/dev/null || true
+  rm -f "$ETC/envoy-web.yaml" "$WEB_DROPIN"
+  rmdir "${WEB_DROPIN%/*}" 2>/dev/null || true
+  systemctl daemon-reload
 fi
 inst "$work/allowed" "$ETC/allowed"
 # Only now, so a config Envoy would not start with never lands in /etc as the site file.
