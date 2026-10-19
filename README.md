@@ -209,17 +209,28 @@ dev   @anthropic web http://api.github.com http://github.com
 ```
 
 - `http <host>[:port] rules <preset> [credential <name>]` (site-wide, above its use) defines
-  the destination; a listener lists it as `http://<host>`. A host a listener reaches by plain
-  HTTP gets no CONNECT route there, `web` included, so the box can't tunnel around the rules.
+  the destination; a listener lists it as `http://<host>`. One credential per host, site-wide.
+  `http` is a reserved word (no listener of that name). That exact name gets no CONNECT route in
+  the listener, `web` included, so the credentialed path can't be tunnelled around. Other
+  names on the same front end (`www.`, aliases) are still ordinary `web` hosts: without the
+  credential that matters only for a preset without one on a public name.
 - **Presets** (default deny, in `airlock-envoy-apply`): `victoria-metrics`, `victoria-logs`
-  (the query paths), `git` (smart HTTP fetch and push; branch rules belong on the server),
+  (the query paths), `git-read` (fetch only), `git` (fetch **and push, to any branch the token
+  can write**: force-push, branch deletion and a push to `main` included, so a merge without
+  any GraphQL check; protect branches on the server, rulesets or branch protection, or use
+  `git-read`),
   `github-api` (reads; PR and issue create, edit, comment, labels, reviewers; refused: merge,
-  approve, settings, hooks, keys, deletes, anything else), `any`.
+  approve, settings, hooks, keys, deletes, anything else), `any` (every method but TRACE).
 - **GitHub writes go through `POST /graphql`**, so `github-api` runs a check on that route
   (`install/github-graphql.lua`): queries pass; a mutation passes only if every top-level field
   is on its allowlist (PR/issue create and edit, comments, labels, reviewers, reactions);
   `mergePullRequest`, review approval, ref and branch-protection changes are refused, and so is
-  any body it can't read for certain. `GET /graphql` is refused.
+  any body it can't read for certain, a query string, a Content-Type other than JSON, a
+  compressed body, and any error while checking. Every other `/graphql` form (any method,
+  case or suffix) is refused. LuaJIT's compiler is off (the unit's `MemoryDenyWriteExecute`
+  would make it panic Envoy).
+- Paths are normalized before the rules see them (dot segments, merged slashes) and an escaped
+  slash is refused; Envoy's own `x-envoy-*` headers are not sent upstream.
 - **Credentials**: `printf %s "$TOKEN" | sudo airlock-envoy-cred set github-api` (or from a
   prompt; `--format bearer|token|raw|basic:<user>`; for GitHub git, `basic:x-access-token`).
   Envoy uses a new value from the next request, no restart. `revoke` writes a value that grants

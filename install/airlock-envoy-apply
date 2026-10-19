@@ -96,7 +96,7 @@ fi
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
 declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
-PRESETS="any git github-api victoria-logs victoria-metrics"
+PRESETS="any git git-read github-api victoria-logs victoria-metrics"
 
 valid_dest() {
   local h p o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -369,15 +369,20 @@ EOF
 # method and path alone can't tell a PR from a merge.
 preset_rules() {
   case "$1" in
-    any) echo 'any * prefix /' ;;
+    any) echo 'any GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS prefix /' ;;   # no TRACE: it echoes headers
     git) cat <<'EOR'
 info-refs GET regex /[^/]+/[^/]+/info/refs
 pack POST regex /[^/]+/[^/]+/git-(upload|receive)-pack
 EOR
     ;;
+    git-read) cat <<'EOR'
+info-refs GET regex /[^/]+/[^/]+/info/refs
+pack POST regex /[^/]+/[^/]+/git-upload-pack
+EOR
+    ;;
     github-api) cat <<'EOR'
-graphql-get GET exact /graphql deny
 graphql POST exact /graphql lua
+graphql-other * regex (?i)/graphql.* deny
 read GET|HEAD prefix /
 create POST regex /repos/[^/]+/[^/]+/(pulls|issues)
 issue-sub POST regex /repos/[^/]+/[^/]+/issues/[0-9]+/(comments|labels|assignees)
@@ -581,6 +586,11 @@ EOF
           stat_prefix: "$l"
           codec_type: HTTP1
           request_headers_timeout: 10s
+          # Plain-HTTP rules match the path as the upstream will read it: dot segments resolved,
+          # slashes merged, an escaped slash refused.
+          normalize_path: true
+          merge_slashes: true
+          path_with_escaped_slashes_action: REJECT_REQUEST
           # Idle tunnels are cut by tcp_proxy's idle_timeout (1 h, on the SNI listeners), not here.
           stream_idle_timeout: 0s
           access_log_options:
@@ -666,6 +676,7 @@ EOF
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+              suppress_envoy_headers: true
 EOF
   done
 

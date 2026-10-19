@@ -393,6 +393,21 @@ ck "plain HTTP: a new credential (basic format) is used without a restart" '[ "$
 x airlock-envoy-cred revoke t-cred >/dev/null
 r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(httpget /run/airlock-envoy/extra.sock http://httpbin.org/anything/z | sed -n 's/.*"Authorization": "\([^"]*\)".*/\1/p')"; [ "$r" = airlock-envoy-revoked ] && break; sleep 0.3; done
 ck "plain HTTP: revoke replaces it with a value that grants nothing: got $r" '[ "$r" = airlock-envoy-revoked ]'
+# The GraphQL check under the real unit (MemoryDenyWriteExecute): LuaJIT must not try to
+# compile, or its panic takes the whole Envoy down.
+printf 'INSTALL-TEST-SECRET-3' | x airlock-envoy-cred set t-cred >/dev/null
+x sh -c 'printf "%s\n" "http httpbin.org rules github-api credential t-cred" "extra @anthropic example.com:443 http://httpbin.org" > /etc/airlock-envoy/site.conf'
+x airlock-envoy-apply >/dev/null
+gql() {  # gql <json body>: POST /graphql through the box socket; the HTTP status
+  x runuser -u client -- bash -c 'socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/airlock-envoy/extra.sock &
+    until grep -q ":0C38 00000000:0000 0A" /proc/net/tcp; do sleep 0.01; done
+    curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:3128 -H "Content-Type: application/json" --data "$0" http://httpbin.org/graphql; kill %1; wait' "$1" 2>/dev/null
+}
+pid0="$(x systemctl show -p MainPID --value airlock-envoy)"
+big="{\"query\":\"{ $(printf 'viewer { login } %.0s' $(seq 400)) }\"}"
+r="$(gql "$big") $(gql '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}') $(gql '{"query":"{ viewer { login } }"}')"
+ck "github-api under the unit's MemoryDenyWriteExecute ($(x systemctl show -p MemoryDenyWriteExecute --value airlock-envoy)): a long query passes, a merge is refused, Envoy stays up: got $r" \
+   '[ "$r" = "404 403 404" ] && [ "$(x systemctl show -p MainPID --value airlock-envoy)" = "$pid0" ] && [ "$(x systemctl is-active airlock-envoy)" = active ]'
 x sh -c 'printf "%s\n" "extra @anthropic example.com:443" > /etc/airlock-envoy/site.conf'
 x airlock-envoy-apply >/dev/null
 
