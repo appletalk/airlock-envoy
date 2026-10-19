@@ -284,7 +284,7 @@ ck "...and a good --start then brings it all back: got '$r'" '[ "$r" = 200 ] && 
 # web: a second Envoy, its own unit, its kernel filter in a drop-in. The unit starts only where
 # that filter is enforced; a rootless container usually can't enforce it, so first: does it?
 enforced=0
-x systemd-run --wait --pipe --quiet -p IPAddressDeny=127.0.0.2/32 /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.2/9' 2>&1 \
+x systemd-run --wait --pipe --quiet -p IPAddressDeny=127.0.0.2/32 /bin/bash -c 'timeout 3 bash -c "exec 3<>/dev/udp/127.0.0.2/9 && echo x >&3"' 2>&1 \
   | grep -q "Operation not permitted" && enforced=1
 x sh -c 'printf "%s\n" "extra @anthropic example.com:443 web" "internal-name example.net" "internal-net 192.0.3.0/24 2001:db9::/32" > /etc/airlock-envoy/site.conf'
 D=/etc/systemd/system/airlock-envoy-web.service.d/site.conf
