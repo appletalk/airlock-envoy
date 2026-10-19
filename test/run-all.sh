@@ -21,7 +21,7 @@ run() {  # run <name> <cmd...>: output to <name>.log; rc and seconds to <name>.r
 with_envoy() {  # with_envoy <name> <site file or ""> <checks script>
   if test/run-envoy.sh ${2:+"$2"} > "$logs/$1.log" 2>&1; then run "$1" "$3"
   else echo "1 0" > "$logs/$1.result"; fi
-  podman stop airlock-envoy-spike airlock-envoy-web-spike >/dev/null 2>&1 || true
+  podman stop --ignore airlock-envoy-spike airlock-envoy-web-spike >/dev/null 2>&1 || true
 }
 order=()
 for d in "${distros[@]}"; do run "install-$d" test/install-test.sh "$d" & order+=("install-$d"); done
