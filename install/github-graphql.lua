@@ -49,6 +49,10 @@ local PROJECT_MUTATIONS = {
 -- the tokens in the query.
 local MAX_BODY = 65536
 local MAX_TOKENS = 8192
+-- ...and the top-level fields of all its mutations together (each is checked on its own).
+local MAX_MUTATION_FIELDS = 50
+-- A null value (JSON null in the variables, the null literal in the query).
+local NULL = { null = true }
 
 local M = {}
 
@@ -120,7 +124,7 @@ local function json_skip(s, i, depth)
 end
 
 -- Decode the JSON value at s[i] (for the variables): a string as a Lua string, an object as
--- { obj = { key = value } }, anything else as { other = true }. Duplicate keys in an object
+-- { obj = { key = value } }, null as NULL, anything else as { other = true }. Duplicate keys in an object
 -- are refused (which one a server takes is not ours to guess). Returns value, next index.
 local function json_value(s, i, depth)
   depth = (depth or 0) + 1
@@ -146,6 +150,7 @@ local function json_value(s, i, depth)
       i = skip_ws(s, i + 1)
     end
   end
+  if s:sub(i, i + 3) == "null" then return NULL, i + 4 end
   local j = json_skip(s, i, depth - 1)
   if not j then return nil end
   return { other = true }, j
@@ -172,7 +177,7 @@ function M.query_of(body)
       vseen = vseen + 1
       local v, k = json_value(body, i); if v == nil then return nil, "bad JSON in the variables" end
       if v.obj then vars = v.obj
-      elseif not (v.other and body:sub(i, i + 3) == "null") then return nil, "variables is not an object" end
+      elseif v ~= NULL then return nil, "variables is not an object" end
       i = k
     else
       i = json_skip(body, i); if not i then return nil, "bad JSON" end
@@ -295,8 +300,9 @@ end
 
 -- A mutation field's input: its arguments must be exactly (input: <value>), the value an
 -- object literal or a $variable holding an object. Returns its top-level fields, each
--- resolved to a string (a plain string literal, or a $variable holding a string), a table (a
--- variable holding an object) or false (anything else); a duplicate field refuses. Variables
+-- resolved to a string (a plain string literal, or a $variable holding a string), NULL (the
+-- null literal, or a variable holding null), a table (a variable holding an object) or false
+-- (anything else), and, for a $variable input, the variable's name; a duplicate field refuses. Variables
 -- come only from the body (an operation's default value is not read).
 local function read_input(t, f, vars)
   if not f.a then return nil, "no input" end
@@ -307,11 +313,11 @@ local function read_input(t, f, vars)
     if not (n and n.k == "name") then return nil end
     return vars and vars[n.v]
   end
-  local fields, after = {}, nil
+  local fields, after, vname = {}, nil, nil
   if is_p(t[i], "$") then
     local v = var(t[i + 1])
     if not (type(v) == "table" and v.obj) then return nil, "input variable missing or not an object" end
-    fields = v.obj; after = i + 2
+    fields = v.obj; after = i + 2; vname = t[i + 1].v
   elseif is_p(t[i], "{") then
     local j = i + 1
     while not is_p(t[j], "}") do
@@ -325,6 +331,7 @@ local function read_input(t, f, vars)
       if is_p(val, "$") then got = var(t[j + 1]); if got == nil then got = false end; j = j + 2
       elseif is_p(val, "{") or is_p(val, "[") then j = skip_group(t, j); if not j then return nil, "unbalanced input" end
       elseif val.k == "p" then return nil, "an input field that can't be read"
+      elseif val.k == "name" and val.v == "null" then got = NULL; j = j + 1
       else got = (val.k == "str" and val.v) or false; j = j + 1 end
       fields[key.v] = got
     end
@@ -333,7 +340,7 @@ local function read_input(t, f, vars)
     return nil, "input that can't be read"
   end
   if after ~= f.b then return nil, "arguments other than input" end
-  return fields
+  return fields, nil, vname
 end
 
 -- The project a Projects mutation writes to (input.projectId, a string), or nil + reason.
@@ -344,16 +351,22 @@ local function project_of(t, f, vars)
   return fields.projectId
 end
 
--- An allowlisted mutation may not name a project at all (createIssue, updateIssue and
+-- An allowlisted mutation may not name a project (createIssue, updateIssue and
 -- updatePullRequest take projectIds/projectV2Ids): that would skip the projects pin. With
--- arguments, its input must be readable (as above) and no field may mention a project.
-local function no_project_fields(t, f, vars)
+-- arguments, its input must be readable (as above) and a field that mentions a project must
+-- be null (gh 2.102 sends "projectIds": null on every issue create with metadata). A $variable
+-- input is walked once per document (seen), however many fields use it.
+local function no_project_fields(t, f, vars, seen)
   if not f.a then return nil end
-  local fields, why = read_input(t, f, vars)
+  local fields, why, vname = read_input(t, f, vars)
   if not fields then return why end
-  for k in pairs(fields) do
-    if type(k) ~= "string" or k:lower():find("project", 1, true) then return "input field " .. tostring(k) .. " names a project" end
+  if vname and seen[vname] then return nil end
+  for k, v in pairs(fields) do
+    if type(k) ~= "string" or (k:lower():find("project", 1, true) and v ~= NULL) then
+      return "input field " .. tostring(k) .. " names a project"
+    end
   end
+  if vname then seen[vname] = true end
   return nil
 end
 
@@ -365,7 +378,7 @@ function M.check_document(doc, rules, vars, projects)
   local t = tokenize(doc)
   if not t then return "the GraphQL document does not tokenize (or has over " .. MAX_TOKENS .. " tokens)" end
   if #t == 0 then return "empty GraphQL document" end
-  local i = 1
+  local i, nfields, seen = 1, 0, {}
   while i <= #t do
     local x = t[i]
     if is_p(x, "{") then                                   -- anonymous query
@@ -384,6 +397,8 @@ function M.check_document(doc, rules, vars, projects)
         local fields, j = top_fields(t, i)
         if not fields then return j end
         if #fields == 0 then return "an empty mutation" end
+        nfields = nfields + #fields
+        if nfields > MAX_MUTATION_FIELDS then return "over " .. MAX_MUTATION_FIELDS .. " mutation fields" end
         for _, f in ipairs(fields) do
           if PROJECT_MUTATIONS[f.name] and projects and next(projects) then
             local pid, why = project_of(t, f, vars)
@@ -391,7 +406,7 @@ function M.check_document(doc, rules, vars, projects)
             if not projects[pid] then return "mutation " .. f.name .. " on a project not allowed here" end
           elseif not ALLOWED[f.name] then return "mutation " .. f.name .. " is not allowed"
           else
-            local why = no_project_fields(t, f, vars)
+            local why = no_project_fields(t, f, vars, seen)
             if why then return "mutation " .. f.name .. ": " .. why end
           end
         end
