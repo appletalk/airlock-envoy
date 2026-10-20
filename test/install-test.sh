@@ -487,6 +487,10 @@ if [ -n "${AIRLOCK_REPO:-}" ]; then
     WORKSPACE=/nonexistent AIRLOCK_MOUNT_DENY=".ssh .gnupg" _airlock_socket_check '"$O"' 2>&1; _airlock_socket_check '"$S"' 2>&1' || true)"
   ck "claude-airlock's socket check, as other: its own socket accepted, client's not found: '$(tr "\n" " " <<< "$r")'" \
      '[ "$(head -1 <<< "$r")" = "$O" ] && [[ "$(tail -1 <<< "$r")" == *"does not exist"* ]]'
+  # Its manifest reader too: the manifest sits in the user's directory (root 0700 + ACL).
+  r="$(x runuser -u other -- bash -c 'eval "$(sed -n -e "/^_airlock_hostname_ok() {/,/^}/p" -e "/^_airlock_client_manifest() {/,/^}/p" /airlock/bin/claude-airlock)"
+    _airlock_client_manifest '"$O"' 2>&1 && printf "%s" "$_CLIENT_HOSTS"' || true)"
+  ck "claude-airlock's manifest reader, as other, takes its manifest: '$r'" '[ "$r" = "httpbin.org any yes" ]'
 fi
 # The kill switch takes every user's sockets; --start brings each back where it was.
 x airlock-envoy-apply --stop >/dev/null
