@@ -59,13 +59,13 @@ refuses "extending after an include"   "already included by b" 'a example.com:44
 refuses "a host as listener name"      "bad listener name"     'example.com:443\n'
 refuses "line number in the message"   "site:3:"               '# c\na example.com:443\na Bad.com:443\n'
 
-lists "comments, blanks, tabs, no final newline" 'a example.com:443\na 10.0.0.1:6443' \
-  '# a comment\n\n a\texample.com:443   # trailing\na 10.0.0.1:6443'
+lists "comments, blanks, tabs, no final newline" 'a example.com:443\na 10.0.0.1:6443\na client t' \
+  'client a t\n# a comment\n\n a\texample.com:443   # trailing\na 10.0.0.1:6443'
 lists "include expands, duplicates collapse" \
-  "$A\na example.com:443\nb example.com:443\nb example.org:443\nc api.anthropic.com:443\nc platform.claude.com:443\nc example.com:443\nc example.org:443" \
-  'a @anthropic example.com:443 example.com:443\nb example.com:443 example.org:443\nc @a @b\n'
-lists "highest port, IPv4 edges"       'a example.com:65535\na 1.0.0.0:1\na 223.255.255.255:443' \
-  'a example.com:65535 1.0.0.0:1 223.255.255.255:443\n'
+  "$A\na example.com:443\nb example.com:443\nb example.org:443\nc api.anthropic.com:443\nc platform.claude.com:443\nc example.com:443\nc example.org:443\nc client t" \
+  'a @anthropic example.com:443 example.com:443\nb example.com:443 example.org:443\nc @a @b\nclient c t\n'
+lists "highest port, IPv4 edges"       'a example.com:65535\na 1.0.0.0:1\na 223.255.255.255:443\na client t' \
+  'a example.com:65535 1.0.0.0:1 223.255.255.255:443\nclient a t\n'
 lists "empty site file: built-in only" '' ''
 
 # web and what counts as internal for it.
@@ -92,15 +92,15 @@ refuses "internal-net IPv6 uppercase"  "only lowercase"        'internal-net FD0
 refuses "internal-net IPv6 zone"       "only lowercase"        'internal-net fe80::1%eth0/64\n'
 refuses "internal-net a host name"     "bad internal network"  'internal-net example.com/32\n'
 lists "web expands through an include, after the exact entries" \
-  'a web\nb example.com:443\nb web' 'a web\nb @a example.com:443\n'
+  'a web\nb example.com:443\nb web\nb client t' 'a web\nb @a example.com:443\nclient b t\n'
 lists "internal lines are listed while some listener has web" \
-  'a web\ninternal-name corp.example\ninternal-name lab.example.net\ninternal-net 198.51.100.0/24\ninternal-net 2001:db8:1::/48' \
-  'internal-name corp.example lab.example.net corp.example\ninternal-net 198.51.100.0/24 2001:db8:1::/48\na web\n'
-lists "internal lines without any web listener change nothing" 'a example.com:443' \
-  'internal-name corp.example\ninternal-net 10.0.0.0/8\na example.com:443\n'
+  'a web\na client t\ninternal-name corp.example\ninternal-name lab.example.net\ninternal-net 198.51.100.0/24\ninternal-net 2001:db8:1::/48' \
+  'internal-name corp.example lab.example.net corp.example\ninternal-net 198.51.100.0/24 2001:db8:1::/48\na web\nclient a t\n'
+lists "internal lines without any web listener change nothing" 'a example.com:443\na client t' \
+  'internal-name corp.example\ninternal-net 10.0.0.0/8\na example.com:443\nclient a t\n'
 lists "IPv6 CIDR forms" \
-  'a web\ninternal-net ::/0\ninternal-net fd00:10::/32\ninternal-net 2001:db8:1:2:3:4:5:6/128\ninternal-net ::ffff:0:0/96\ninternal-net 1::/16\ninternal-net 0.0.0.0/0' \
-  'a web\ninternal-net ::/0 fd00:10::/32 2001:db8:1:2:3:4:5:6/128 ::ffff:0:0/96 1::/16 0.0.0.0/0\n'
+  'a web\na client t\ninternal-net ::/0\ninternal-net fd00:10::/32\ninternal-net 2001:db8:1:2:3:4:5:6/128\ninternal-net ::ffff:0:0/96\ninternal-net 1::/16\ninternal-net 0.0.0.0/0' \
+  'a web\nclient a t\ninternal-net ::/0 fd00:10::/32 2001:db8:1:2:3:4:5:6/128 ::ffff:0:0/96 1::/16 0.0.0.0/0\n'
 
 # Plain HTTP: the http lines, http:// destinations, one mode per host.
 refuses "http without rules"           "want: http"            'http x.example\n'
@@ -116,8 +116,8 @@ refuses "http:// before its http line" "has no 'http x.example"  'a http://x.exa
 refuses "a host as http:// and CONNECT" "use one"              'http x.example rules any\na x.example:443 http://x.example\n'
 refuses "...also through an include"   "use one"               'http x.example rules any\na http://x.example\nb @a x.example:8443\n'
 lists "http destinations, through an include" \
-  'a http://x.example:443 rules git credential gh\nb http://x.example:443 rules git credential gh\nb http://y.example:8443 rules any' \
-  'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example\nb @a http://y.example\n'
+  'a http://x.example:443 rules git credential gh\nb http://x.example:443 rules git credential gh\nb http://y.example:8443 rules any\nb client t' \
+  'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example\nb @a http://y.example\nclient b t\n'
 
 # Variants: another definition of a host (its own rules, credential, projects), one per listener.
 refuses "variant: bad name"            "bad variant"           'http x.example@1v rules any\n'
@@ -128,8 +128,8 @@ refuses "two definitions of a host in one listener" "lists x.example twice" 'htt
 refuses "...also through an include"   "lists x.example twice" 'http x.example rules any\nhttp x.example@v rules git\na http://x.example\nb @a http://x.example@v\n'
 refuses "a variant and CONNECT to its host" "use one"          'http x.example@v rules any\na x.example:443 http://x.example@v\n'
 lists "variants: each listener its own definition of the host" \
-  'a http://x.example:443 rules github-api credential c1\nb http://x.example:443 variant board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9' \
-  'http x.example rules github-api credential c1\nhttp x.example@board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9\na http://x.example\nb http://x.example@board\n'
+  'a http://x.example:443 rules github-api credential c1\na client t\nb http://x.example:443 variant board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9\nb client u' \
+  'http x.example rules github-api credential c1\nhttp x.example@board rules github-issues credential c2 projects PVT_kwDOAB12cd,PVT_x-Y_9\na http://x.example\nb http://x.example@board\nclient a t\nclient b u\n'
 # projects: Projects v2 node IDs, on the GitHub presets only; mixed case only there.
 refuses "projects: not a PVT_ ID"      "bad project ID"        'http x.example rules github-api projects PR_kw12\n'
 refuses "projects: a quote"            "bad project ID"        'http x.example rules github-api projects PVT_a"b\n'
@@ -141,7 +141,7 @@ refuses "projects: a trailing comma"   "bad project ID ''"     'http x.example r
 refuses "projects: a double comma"     "bad project ID ''"     'http x.example rules github-api projects PVT_a,,PVT_b\n'
 refuses "mixed case elsewhere on an http line" "only lowercase" 'http X.example rules github-api projects PVT_abc\n'
 refuses "mixed case on a listener line" "only lowercase"       'a PVT_abc.example:443\n'
-printf 'http x.example@board rules github-issues credential c2 projects PVT_aB,PVT_cD\nb http://x.example@board\n' > "$work/site"
+printf 'http x.example@board rules github-issues credential c2 projects PVT_aB,PVT_cD\nb http://x.example@board\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"
 if grep -q 'name: "http-x.example_board"' <<< "$r" && grep -q 'host_rewrite_literal: "x.example"' <<< "$r" && grep -q 'domains: \["x.example", "x.example:80"\]' <<< "$r" \
    && grep -q 'sni: "x.example"' <<< "$r" && grep -q 'filter_metadata: { github-graphql: { rules: "github-issues", projects: "PVT_aB PVT_cD" } }' <<< "$r" \
@@ -153,7 +153,7 @@ if grep -q 'tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_pro
 else echo "FAIL upstream TLS does not offer 1.3"; fails=$((fails+1)); fi
 
 # forgejo: git routes have no request timeout or stream cap (long), the API routes do.
-printf 'http g.example.com rules forgejo credential fj\nb http://g.example.com\n' > "$work/site"
+printf 'http g.example.com rules forgejo credential fj\nb http://g.example.com\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"
 if grep -A4 'name: "g.example.com-pack"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' \
    && grep -A4 'name: "g.example.com-read"' <<< "$r" | grep -q 'timeout: 120s, idle_timeout: 300s, max_stream_duration' \
@@ -162,7 +162,7 @@ if grep -A4 'name: "g.example.com-pack"' <<< "$r" | grep -q 'timeout: 0s, idle_t
 else echo "FAIL forgejo rendering"; fails=$((fails+1)); fi
 
 # Client manifests: each listener's plain-HTTP hosts (an include's too), nothing else.
-printf 'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example example.com:443\nb @a http://y.example web\nc example.org:443\n' > "$work/site"
+printf 'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example example.com:443\nb @a http://y.example web\nc example.org:443\nclient b t\nclient c t\n' > "$work/site"
 m="$("$apply" --clients b "$work/site" | grep -v '^#')"
 if [ "$m" = "$(printf 'x.example 443 git yes\ny.example 8443 any no')" ]; then echo "ok   client manifest: the include's host and its own, port, rules, credential yes/no"
 else echo "FAIL client manifest: got: $m"; fails=$((fails+1)); fi
@@ -177,7 +177,7 @@ else echo "FAIL client manifest: an unknown listener was accepted"; fails=$((fai
 
 # No log format may name a request field other than method, authority and path: a credential
 # Envoy adds is a request header, and the log sees headers after the injection.
-printf 'http api.example.com rules github-api credential c1\nhttp g.example.com rules git credential c2\np @anthropic web http://api.example.com http://g.example.com 10.0.0.1:6443\n' > "$work/site"
+printf 'http api.example.com rules github-api credential c1\nhttp g.example.com rules git credential c2\np @anthropic web http://api.example.com http://g.example.com 10.0.0.1:6443\nclient p t\n' > "$work/site"
 fields="$({ "$apply" --render "$work/site"; "$apply" --render-web "$work/site"; } | grep -o '%REQ([^)]*)%\|%RESP([^)]*)%\|%REQ_WITHOUT_QUERY([^)]*)%\|%DOWNSTREAM_PEER[A-Z_]*%' | sort -u | tr '\n' ' ')"
 if [ "$fields" = "%REQ(:AUTHORITY)% %REQ(:METHOD)% %REQ(:PATH)% " ]; then echo "ok   logs name no request header (only method, authority, path)"
 else echo "FAIL logs name request fields beyond method, authority, path: $fields"; fails=$((fails+1)); fi
@@ -191,7 +191,7 @@ else echo "FAIL plain-HTTP rendering"; fails=$((fails+1)); fi
 
 # The web Envoy, per profile: its own listener, socket and DNS cache; IPv4 only (A records);
 # no resolv.conf search domains.
-printf 'p @anthropic web\nq web\nr example.org:443\n' > "$work/site"
+printf 'p @anthropic web\nq web\nr example.org:443\nclient p t\nclient q t\nclient r t\n' > "$work/site"
 w="$("$apply" --render-web "$work/site")"
 if [ "$(grep -c 'dns_lookup_family: V4_ONLY' <<< "$w")" = 2 ] && [ "$(grep -c 'no_default_search_domain: true' <<< "$w")" = 2 ] \
    && ! grep -qE 'dns_lookup_family: (ALL|AUTO|V6)' <<< "$w" \
@@ -208,7 +208,7 @@ if [ "$got" = "$(tr ' ' '\n' <<< "$WEB_DENY_GOLDEN" | sort)" ]; then echo "ok   
 else echo "FAIL web unit: the built-in deny list differs from the reviewed one:"; diff <(tr ' ' '\n' <<< "$WEB_DENY_GOLDEN" | sort) <(printf '%s\n' "$got"); fails=$((fails+1)); fi
 
 # The web drop-in: the site's networks denied, each resolver allowed by exact address.
-printf 'a web\ninternal-net 198.51.100.0/24 2001:db8:1::/48\n' > "$work/site"
+printf 'a web\ninternal-net 198.51.100.0/24 2001:db8:1::/48\nclient a t\n' > "$work/site"
 printf 'nameserver 127.0.0.53\nnameserver fe80::1%%eth0\noptions edns0\n' > "$work/resolv"
 want='[Service]
 IPAddressDeny=198.51.100.0/24
@@ -219,8 +219,81 @@ got="$(RESOLV_CONF="$work/resolv" "$apply" --render-web-dropin "$work/site" | gr
 if [ "$got" = "$want" ]; then echo "ok   web drop-in: site networks denied, resolvers allowed exactly"
 else echo "FAIL web drop-in, got:"; echo "$got"; fails=$((fails+1)); fi
 
+# Clients: one user per listener; a listener nothing includes needs one; the built-in has none.
+refuses "client: too few words"        "want: client"          'a example.com:443\nclient a\n'
+refuses "client: too many words"       "want: client"          'a example.com:443\nclient a t u\n'
+refuses "client: uppercase user"       "only lowercase"        'a example.com:443\nclient a Bob\n'
+refuses "client: user starting with a digit" "bad user name"   'a example.com:443\nclient a 1bob\n'
+refuses "client: machine account (\$)" "only lowercase"        'a example.com:443\nclient a host$\n'
+refuses "client: user over 32"         "bad user name"         'a example.com:443\nclient a abcdefghijabcdefghijabcdefghijabc\n'
+refuses "client: bad listener name"    "bad listener name"     'client a.b t\n'
+refuses "client: two for one listener" "already has a client (t, at" 'a example.com:443\nclient a t\nclient a u\n'
+refuses "...even the same user twice"  "already has a client"  'a example.com:443\nclient a t\nclient a t\n'
+refuses "client: for the built-in"     "built in and has no socket" 'client anthropic t\n'
+refuses "client: for no listener"      "not a listener in this file" 'a example.com:443\nclient a t\nclient b t\n'
+refuses "a listener nothing includes, without a client" "listener b has no client" 'a example.com:443\nclient a t\nb example.org:443\n'
+refuses "a credential reachable by two users" "credential gh is reachable by t (listener a) and by u (listener b)" \
+  'http x.example rules git credential gh\na http://x.example\nb http://x.example\nclient a t\nclient b u\n'
+refuses "...also through an include"   "credential gh is reachable by" \
+  'http x.example rules git credential gh\nbase http://x.example\na @base\nb @base\nclient a t\nclient b u\n'
+lists "client before its listener; underscore and dot in a user name" 'a example.com:443\na client svc_x.y-1' \
+  'client a svc_x.y-1\na example.com:443\n'
+lists "an included listener without a client is a definition only (no client line)" \
+  'base example.com:443\na example.com:443\na example.org:443\na client t' 'base example.com:443\na @base example.org:443\nclient a t\n'
+lists "a credential shared by one user's listeners, and by another's through a variant" \
+  'a http://x.example:443 rules git credential gh\na client t\nb http://x.example:443 rules git credential gh\nb client t\nc http://x.example:443 variant u rules git credential gh-u\nc client u' \
+  'http x.example rules git credential gh\nhttp x.example@u rules git credential gh-u\na http://x.example\nb http://x.example\nc http://x.example@u\nclient a t\nclient b t\nclient c u\n'
+printf 'http x.example rules git\nbase @anthropic web http://x.example 10.0.0.1:6443\nk-x @base\no-x @base example.org:443\nclient k-x k\nclient o-x o\n' > "$work/site"
+r="$("$apply" --render "$work/site")"; w="$("$apply" --render-web "$work/site")"
+if ! grep -q 'name: "base"' <<< "$r" && grep -q 'name: "k-x"' <<< "$r" && grep -q 'name: "o-x"' <<< "$r" \
+   && [ "$(grep -c 'user: "k"' <<< "$r")" = 1 ] && [ "$(grep -c 'user: "o"' <<< "$r")" = 1 ] \
+   && ! grep -q 'web-base' <<< "$r$w" && grep -q 'name: "web-k-x"' <<< "$w" && grep -q 'user: "o"' <<< "$w" \
+   && grep -q 'max_active_downstream_connections: 256$' <<< "$r"; then
+  echo "ok   render: a socket's listener per client (its user in the log), none for a definition; web per socket only"
+else echo "FAIL render with clients"; fails=$((fails+1)); fi
+r="$("$apply" --render /dev/null)"
+if grep -q '^  listeners: \[\]$' <<< "$r" && grep -q '^  clusters: \[\]$' <<< "$r" && ! grep -q 'name: "anthropic"' <<< "$r"; then
+  echo "ok   render: no site file, no sockets: no listeners at all (the built-in anthropic is a definition only)"
+else echo "FAIL render with no sockets"; fails=$((fails+1)); fi
+# A definition-only listener's own destinations, reached by no socket, get no upstream.
+printf 'x example.org:443\nk @x\nclient k t\n' > "$work/site2"
+r="$("$apply" --render "$work/site2")"
+if grep -q 'upstream-example.org"' <<< "$r" && ! grep -q 'api.anthropic.com' <<< "$r"; then
+  echo "ok   render: only destinations some socket reaches get an upstream (not the built-in's, unused here)"
+else echo "FAIL render: unused destinations rendered"; fails=$((fails+1)); fi
+
+# Users, at --check (before Envoy is needed): they must exist and be login accounts.
+check_refuses() {  # check_refuses <name> <expected message part> <site text>
+  printf '%b' "$3" > "$work/site"
+  if out="$("$apply" --check "$work/site" 2>&1)"; then echo "FAIL $1: accepted"; fails=$((fails+1))
+  elif [[ "$out" == *"$2"* ]]; then echo "ok   $1"
+  else echo "FAIL $1: wrong message: $out"; fails=$((fails+1)); fi
+}
+check_refuses "client root"                "is uid 0: only a login account"     'a example.com:443\nclient a root\n'
+check_refuses "client nobody"              "is uid 65534"                       'a example.com:443\nclient a nobody\n'
+check_refuses "client a system account"    "only a login account"               "a example.com:443\nclient a $(getent passwd | awk -F: '$3 > 0 && $3 < 1000 { print $1; exit }')\n"
+check_refuses "client that does not exist" "client no-such-user-x of a: no such user" 'a example.com:443\nclient a no-such-user-x\n'
+me="$(id -un)"; uid="$(id -u)"
+if [ "$uid" -ge 1000 ]; then
+  printf 'a example.com:443\nclient a %s\n' "$me" > "$work/site"
+  acl="$(command -v setfacl)"
+  want="[Socket]
+ListenStream=/run/airlock-envoy/$me/a.sock
+ExecStartPre=/usr/bin/install -d -m 0755 -o root -g root /run/airlock-envoy
+ExecStartPre=/usr/bin/install -d -m 0700 -o root -g root /run/airlock-envoy/$me
+ExecStartPre=$acl --set u::rwx,g::---,o::---,u:$uid:r-x /run/airlock-envoy/$me
+ExecStartPost=$acl --set u::rw-,g::---,o::---,u:$uid:rw- /run/airlock-envoy/$me/a.sock
+ExecStartPost=-/usr/bin/install -m 0644 -o root -g root /etc/airlock-envoy/clients/a.clients /run/airlock-envoy/$me/a.clients
+ExecStopPost=/usr/bin/rm -f /run/airlock-envoy/$me/a.clients"
+  got="$("$apply" --render-socket-dropin a "$work/site" | grep -v '^#')"
+  if [ "$got" = "$want" ]; then echo "ok   socket drop-in: the user's directory and the socket, for that uid alone"
+  else echo "FAIL socket drop-in, got:"; echo "$got"; fails=$((fails+1)); fi
+  if ! "$apply" --render-socket-dropin anthropic "$work/site" >/dev/null 2>&1; then echo "ok   socket drop-in: none for a listener without a client"
+  else echo "FAIL socket drop-in for the built-in"; fails=$((fails+1)); fi
+else echo "skip socket drop-in: run as a login account (uid 1000 and up)"; fi
+
 # A file shaped like a real site renders to a config Envoy accepts.
-printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues\nhttp g.example.com rules git\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\n' > "$work/site"
+printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues\nhttp g.example.com rules git\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\nclient x t\nclient y u\n' > "$work/site"
 "$apply" --render "$work/site" > "$work/envoy.yaml"
 if envoy="$(command -v envoy)"; then
   # Envoy picks the format by extension, and validate mode opens the access log.
@@ -228,7 +301,7 @@ if envoy="$(command -v envoy)"; then
   if "$envoy" --mode validate -c "$work/validate.yaml" >/dev/null 2>&1; then
     echo "ok   rendered config validates (envoy --mode validate)"
   else echo "FAIL rendered config does not validate"; fails=$((fails+1)); fi
-  printf 'w @anthropic web example.org:8443\ninternal-name corp.example\n' > "$work/site"
+  printf 'w @anthropic web example.org:8443\ninternal-name corp.example\nclient w t\n' > "$work/site"
   "$apply" --render-web "$work/site" | sed 's#path: /var/log/airlock-envoy/web.jsonl#path: /dev/null#' > "$work/validate-web.yaml"
   "$apply" --render "$work/site" | sed 's#path: /var/log/airlock-envoy/access.jsonl#path: /dev/null#' > "$work/validate.yaml"
   if "$envoy" --mode validate -c "$work/validate-web.yaml" >/dev/null 2>&1 && "$envoy" --mode validate -c "$work/validate.yaml" >/dev/null 2>&1; then

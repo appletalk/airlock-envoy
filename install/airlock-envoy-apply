@@ -13,14 +13,23 @@
 #   airlock-envoy-apply --stop           as root: cut all box egress and keep it cut, across
 #                                        applies and reboots (the kill switch)
 #   airlock-envoy-apply --start          as root: lift it, apply, and start everything
-#   airlock-envoy-apply --status         Envoy, the kill switch and each box socket (any user;
-#                                        as root also whether the site file is applied)
+#   airlock-envoy-apply --status         Envoy, the kill switch and each box socket and its user
+#                                        (any user; as root also whether the site file is applied)
 #
-# The site file names listeners and what each may reach. A listener is a box socket,
-# /run/airlock-envoy/<name>.sock, and a box gets one, so a listener is a whole access profile.
-# Repeat a name to continue it on another line; # starts a comment.
+# The site file names listeners and what each may reach. A listener is a box socket for one
+# user, /run/airlock-envoy/<user>/<name>.sock, and a box gets one, so a listener is a whole
+# access profile. Repeat a name to continue it on another line; # starts a comment.
 #
 #   infra  @anthropic  metrics.example.net:443  10.0.0.10:6443
+#   client infra alice
+#
+#   client <listener> <user>
+#               the one user whose boxes may connect: the socket is in /run/airlock-envoy/<user>/
+#               (root's, and only that user may enter it) and only that uid may connect to it.
+#               Every listener needs exactly one, except one that another listener includes,
+#               which may have none: it is then a definition only, with no socket (as is the
+#               built-in anthropic). A credential may be reachable by one user's listeners
+#               only: for a second user, define a variant (http <host>@<variant>) with its own.
 #
 #   host:port   CONNECT to exactly this host and port, and only TLS whose server name (SNI) is
 #               that host passes: another site on the same address is not reachable
@@ -41,9 +50,9 @@
 # is not public (private, loopback, link-local, CGNAT, documentation, multicast, IPv6 ULA and
 # the address-mapping prefixes; the list lives in airlock-envoy-web.service).
 #
-# Each listener also gets a client manifest, /run/airlock-envoy/<name>.clients (0644, next to
-# its socket): one line per plain-HTTP host, "<host> <port> <rules> <credential: yes|no>",
-# nothing secret. A box launcher reads it to point the box's clients (git, gh) at http://.
+# Each socket also gets a client manifest, /run/airlock-envoy/<user>/<name>.clients (0644, next
+# to it): one line per plain-HTTP host, "<host> <port> <rules> <credential: yes|no>", nothing
+# secret. A box launcher reads it to point the box's clients (git, gh) at http://.
 set -euo pipefail
 umask 077
 export LC_ALL=C
@@ -53,6 +62,7 @@ ENVOY=/usr/local/bin/envoy
 LOG=/var/log/airlock-envoy/access.jsonl
 WEB_LOG=/var/log/airlock-envoy/web.jsonl
 WEB_DROPIN=/etc/systemd/system/airlock-envoy-web.service.d/site.conf
+SOCK_DIR=/run/airlock-envoy   # box sockets: <user>/<listener>.sock, one directory per user
 BUILTIN_INTERNAL_NAMES=(localhost local localdomain internal lan home.arpa)
 BUILTIN='anthropic api.anthropic.com:443 platform.claude.com:443'
 PER_LISTENER=128   # connections from boxes at once, per listener (so per profile)
@@ -63,8 +73,9 @@ mode=apply yes=0 start=0 clients_of=
 while [ $# -gt 0 ]; do
   case "$1" in
     --check|--list|--render|--render-web|--render-web-dropin|--stop|--status) mode=${1#--} ;;
-    --clients) [ $# -ge 2 ] || { echo "airlock-envoy-apply: --clients needs a listener name" >&2; exit 1; }
-               mode=clients clients_of=$2; shift ;;
+    --clients|--render-socket-dropin)
+               [ $# -ge 2 ] || { echo "airlock-envoy-apply: $1 needs a listener name" >&2; exit 1; }
+               mode=${1#--} clients_of=$2; shift ;;
     --start) mode=apply start=1 ;;
     --yes) yes=1 ;;
     --restart) restart=1 ;;   # install-service.sh: the unit may have changed; start egress
@@ -103,7 +114,9 @@ fi
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
 declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=()
+declare -A CLIENT=() CLIENT_AT=() CLIENT_UID=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
+SOCKETS=()   # the listeners with a client, in file order: each gets a box socket
 PRESETS="any forgejo git git-read github-api github-issues victoria-logs victoria-metrics"
 
 valid_dest() {
@@ -170,6 +183,8 @@ parse() {  # parse <source label>, text on stdin
     if [[ "$line" =~ ^[[:blank:]]*http[[:blank:]] ]]; then
       while [[ "$chk" =~ (^|[[:blank:]])projects[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
     fi
+    # User names may have an underscore; the client line checks its words itself.
+    [[ ! "$line" =~ ^[[:blank:]]*client[[:blank:]] ]] || chk=${chk//_/}
     [[ "$chk" =~ ^[a-z0-9.:@/[:blank:]-]*$ ]] || charset_ok=0
     # A slash only in http:// destinations and in internal-net CIDRs.
     if [[ "${chk//http:\/\//}" == */* ]] && ! [[ "$line" =~ ^[[:blank:]]*internal-net[[:blank:]] ]]; then charset_ok=0; fi
@@ -192,6 +207,17 @@ parse() {  # parse <source label>, text on stdin
         done
         continue ;;
       http) parse_http "$src:$n" "${words[@]:1}"; continue ;;
+      client)
+        [ "${#words[@]}" = 3 ] || die "$src:$n: want: client <listener> <user>"
+        [[ "${words[1]}" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die "$src:$n: bad listener name '${words[1]}'"
+        # A login name as shadow-utils and Debian allow them (no trailing $: machine accounts).
+        [[ "${words[2]}" =~ ^[a-z_][a-z0-9_.-]{0,31}$ ]] || die "$src:$n: bad user name '${words[2]}'"
+        [ -z "${BUILT[${words[1]}]:-}" ] \
+          || die "$src:$n: ${words[1]} is built in and has no socket; define your own (say, ${words[2]}-${words[1]} @${words[1]}) and name its client"
+        [ -z "${CLIENT[${words[1]}]+x}" ] \
+          || die "$src:$n: listener ${words[1]} already has a client (${CLIENT[${words[1]}]}, at ${CLIENT_AT[${words[1]}]}): one listener, one user; give each user a listener of its own"
+        CLIENT[${words[1]}]=${words[2]} CLIENT_AT[${words[1]}]=$src:$n
+        continue ;;
       web) die "$src:$n: 'web' is a destination, not a listener name" ;;
     esac
     [[ "$name" =~ ^[a-z][a-z0-9-]{0,31}$ ]] \
@@ -310,17 +336,30 @@ status_units() {  # what systemd and /run say; needs no access to $ETC (nor, as 
     else echo "==> Kill switch: off"; fi
   else echo "==> Kill switch: unknown (run as root)"; fi
   echo "==> Box sockets:"
-  # The socket units systemd knows, and the socket files there are (a non-root user without
-  # D-Bus sees only the files).
-  while read -r l; do
-    st="$(systemctl is-active "airlock-envoy-proxy@$l.socket" 2>/dev/null || true)"
-    [ -S "/run/airlock-envoy/$l.sock" ] || st="${st:-gone} (no socket file)"
-    acl="$(getfacl -cp "/run/airlock-envoy/$l.sock" 2>/dev/null | sed -n 's/^user:\([^:][^:]*\):rw-$/\1/p' | tr "\n" " " || true)"
-    printf '    %-36s %-10s %s\n' "/run/airlock-envoy/$l.sock" "${st:-unknown}" "${acl:+for: $acl}"
+  # The socket units systemd knows (with the path each listens on), and the socket files there
+  # are (a user without D-Bus sees only the files, and only in a directory it may enter: its own).
+  local p u f
+  local -A path=()
+  while read -r l p; do
+    [[ "$l" =~ ^[a-z][a-z0-9-]*$ ]] || continue
+    [ -n "${path[$l]:-}" ] || path[$l]=$p
   done < <({
-    systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' 2>/dev/null | awk '{ print $1 }' || true
-    for f in /run/airlock-envoy/*.sock; do [ -S "$f" ] && echo "airlock-envoy-proxy@$(basename "$f" .sock).socket"; done
-  } | sed -n 's/^airlock-envoy-proxy@\([a-z][a-z0-9-]*\)\.socket$/\1/p' | sort -u)
+    systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' 2>/dev/null | awk '{ print $1 }' \
+      | sed -n 's/^airlock-envoy-proxy@\([a-z][a-z0-9-]*\)\.socket$/\1/p' | while read -r l; do
+        printf '%s %s\n' "$l" "$(systemctl show -p Listen --value "airlock-envoy-proxy@$l.socket" 2>/dev/null | awk '{ print $1; exit }')"
+      done || true
+    for f in "$SOCK_DIR"/*/*.sock "$SOCK_DIR"/*.sock; do [ -S "$f" ] && printf '%s %s\n' "$(basename "$f" .sock)" "$f"; done
+  } | sort)
+  for l in $(printf '%s\n' "${!path[@]}" | sort); do
+    p=${path[$l]:-} u=
+    st="$(systemctl is-active "airlock-envoy-proxy@$l.socket" 2>/dev/null || true)"
+    [[ "$p" == "$SOCK_DIR"/*/"$l.sock" ]] && u=${p#"$SOCK_DIR"/} u=${u%%/*}
+    if [ -n "$p" ] && [ -d "${p%/*}" ] && ! [ -x "${p%/*}" ]; then
+      st="${st:-unknown} (${p%/*} is not yours to enter)"
+    elif [ -z "$p" ] || ! [ -S "$p" ]; then st="${st:-gone} (no socket file)"; fi
+    acl="$(getfacl -cp "$p" 2>/dev/null | sed -n 's/^user:\([^:][^:]*\):rw-$/\1/p' | tr "\n" " " || true)"
+    printf '    %-48s %-10s %s\n' "${p:-$l (no path)}" "${st:-unknown}" "${u:+user: $u}${acl:+, ACL: $acl}"
+  done
 }
 if [ "$mode" = status ]; then
   status_units   # first, so it shows even if the site file then fails to parse
@@ -347,6 +386,63 @@ parse built-in <<< "$BUILTIN"
 for l in "${LISTENERS[@]}"; do BUILT[$l]=1; done
 parse "$site_src" <<< "$site_text"
 
+# Who each socket is for. One user per listener, so a socket is never shared (each user's
+# boxes reach only their own listeners), and a credential is reachable by one user only.
+check_clients() {
+  local l d c k
+  local -A cred_of=()
+  for l in "${!CLIENT[@]}"; do
+    [ -n "${DESTS[$l]+x}" ] || die "${CLIENT_AT[$l]}: client for '$l', which is not a listener in this file"
+  done
+  for l in "${LISTENERS[@]}"; do
+    [ -z "${BUILT[$l]:-}" ] || continue
+    if [ -n "${CLIENT[$l]:-}" ]; then SOCKETS+=("$l")
+    elif [ -z "${INCLUDED_BY[$l]:-}" ]; then
+      die "$site_src: listener $l has no client: add 'client $l <user>' (only a listener another one includes may go without, as a definition with no socket)"
+    fi
+  done
+  for l in "${SOCKETS[@]}"; do
+    for d in ${HDESTS[$l]:-}; do
+      c=${HTTP_CRED[$d]}
+      [ -n "$c" ] || continue
+      k=${cred_of[$c]:-}
+      if [ -z "$k" ]; then cred_of[$c]="${CLIENT[$l]} $l"
+      elif [ "${k%% *}" != "${CLIENT[$l]}" ]; then
+        die "$site_src: credential $c is reachable by ${k%% *} (listener ${k#* }) and by ${CLIENT[$l]} (listener $l): a credential belongs to one user; give the other a variant (http <host>@<variant>) with a credential of its own"
+      fi
+    done
+  done
+}
+check_clients
+in_sockets() { [ -n "${CLIENT[$1]:-}" ]; }
+# The destinations some socket reaches: only those get an internal listener and an upstream.
+USED=()
+for d in "${ALL[@]}"; do
+  for l in "${SOCKETS[@]}"; do
+    case " ${DESTS[$l]} " in *" $d "*) USED+=("$d"); break ;; esac
+  done
+done
+sock_path() { printf '%s/%s/%s.sock' "$SOCK_DIR" "${CLIENT[$1]}" "$1"; }
+
+# The users must exist and be ordinary accounts; the ACLs name them by uid, never by name.
+resolve_clients() {
+  local l u ent uid uid_min
+  uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
+  case "$uid_min" in ''|*[!0-9]*) uid_min=1000 ;; esac
+  for l in "${SOCKETS[@]}"; do
+    u=${CLIENT[$l]}
+    ent="$(getent passwd -- "$u" 2>/dev/null)" || die "${CLIENT_AT[$l]}: client $u of $l: no such user"
+    # The entry must be that name's own (a directory service may answer for another spelling).
+    [ "${ent%%:*}" = "$u" ] || die "${CLIENT_AT[$l]}: client $u of $l: the user database answers as '${ent%%:*}'"
+    uid="$(cut -d: -f3 <<< "$ent")"
+    [[ "$uid" =~ ^[0-9]+$ ]] || die "${CLIENT_AT[$l]}: client $u of $l: bad uid '$uid'"
+    if [ "$uid" = 0 ] || [ "$uid" = 65534 ] || [ "$uid" -lt "$uid_min" ]; then
+      die "${CLIENT_AT[$l]}: client $u of $l is uid $uid: only a login account (uid $uid_min and up, not root or nobody) may be a client"
+    fi
+    CLIENT_UID[$l]=$uid
+  done
+}
+
 listing() {
   local l d
   for l in "${LISTENERS[@]}"; do
@@ -356,17 +452,17 @@ listing() {
         "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}"
     done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
+    [ -z "${CLIENT[$l]:-}" ] || printf '%s client %s\n' "$l" "${CLIENT[$l]}"
   done
   if any_web; then
     for d in "${INTERNAL_NAMES[@]}"; do printf 'internal-name %s\n' "$d"; done
     for d in "${INTERNAL_NETS[@]}"; do printf 'internal-net %s\n' "$d"; done
   fi
 }
-any_web() { [ "${#WEB[@]}" -gt 0 ]; }
+any_web() { [ -n "$(web_listeners)" ]; }   # web for some socket (a definition alone runs nothing)
 
 # Listener $1's client manifest. Only names the parser already validated go in, so a reader
 # can hold every line to the same strict form.
-CLIENTS_RUN=/run/airlock-envoy
 CLIENTS_ETC=$ETC/clients
 render_clients() {
   local d
@@ -492,7 +588,7 @@ lua_file() {  # the GraphQL check: next to this script in a checkout, else where
 }
 creds_used() {  # every credential some listener's http destinations use, once each
   local l d c seen=" "
-  for l in "${LISTENERS[@]}"; do
+  for l in "${SOCKETS[@]}"; do
     for d in ${HDESTS[$l]:-}; do
       c=${HTTP_CRED[$d]}
       [ -n "$c" ] || continue
@@ -639,7 +735,7 @@ EOF
 # system CAs and its name.
 http_clusters() {
   local l d h seen=" "
-  for l in "${LISTENERS[@]}"; do
+  for l in "${SOCKETS[@]}"; do
     for d in ${HDESTS[$l]:-}; do
       case "$seen" in *" $d "*) continue ;; esac
       seen="$seen$d "
@@ -694,7 +790,7 @@ overload_manager:
       "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
       # Each listener has its own cap (connection_limit below), so one profile cannot starve
       # another; this total is just their sum.
-      max_active_downstream_connections: $(( PER_LISTENER * ${#LISTENERS[@]} ))
+      max_active_downstream_connections: $(( PER_LISTENER * (${#SOCKETS[@]} > 0 ? ${#SOCKETS[@]} : 1) ))
 
 admin:
   address:
@@ -703,9 +799,9 @@ admin:
       mode: 0600
 
 static_resources:
-  listeners:
+  listeners:$([ ${#SOCKETS[@]} -gt 0 ] || printf " []")
 EOF
-  for l in "${LISTENERS[@]}"; do
+  for l in "${SOCKETS[@]}"; do
     cat <<EOF
   - name: "$l"
     address:
@@ -750,6 +846,7 @@ EOF
                 json_format:
                   time: "%START_TIME%"
                   listener: "$l"
+                  user: "${CLIENT[$l]}"
                   connection: "%CONNECTION_ID%"
                   method: "%REQ(:METHOD)%"
                   authority: "%REQ(:AUTHORITY)%"
@@ -841,7 +938,7 @@ EOF
   echo
   echo "  # One internal listener per destination, shared by every box listener that allows it."
   echo "  # A connection that matches no filter chain is closed, logged with flag NR."
-  for d in "${ALL[@]}"; do
+  for d in "${USED[@]}"; do
     k=$(key "$d")
     cat <<EOF
   - name: "sni-$k"
@@ -910,9 +1007,9 @@ EOF
   done
 
   echo
-  echo "  clusters:"
+  if [ ${#SOCKETS[@]} -gt 0 ]; then echo "  clusters:"; else echo "  clusters: []"; fi
   echo "  # Where the HTTP routes send allowed tunnels: the destination's internal listener."
-  for d in "${ALL[@]}"; do
+  for d in "${USED[@]}"; do
     k=$(key "$d")
     cat <<EOF
   - name: "sni-$k"
@@ -939,7 +1036,7 @@ EOF
   done < <(web_listeners)
   http_clusters
   echo "  # The real upstreams: names resolved by Envoy, or a fixed address."
-  for d in "${ALL[@]}"; do
+  for d in "${USED[@]}"; do
     k=$(key "$d")
     if is_ip "$d"; then
       echo "  - name: \"upstream-$k\""
@@ -966,7 +1063,7 @@ EOF
 # domains), and dialled under the unit's kernel filter (IPAddressDeny), which is what keeps
 # web to public addresses whatever DNS says. IPv6 is left out: over it "public" includes
 # this site's own rotating addresses, some of which never cross a router.
-web_listeners() { local l; for l in "${LISTENERS[@]}"; do [ -z "${WEB[$l]:-}" ] || echo "$l"; done; }
+web_listeners() { local l; for l in "${SOCKETS[@]}"; do [ -z "${WEB[$l]:-}" ] || echo "$l"; done; }
 web_sock() { printf '/run/airlock-envoy-web/%s.sock' "$1"; }
 render_web() {  # render_web <access log path>
   local log=$1 n l nweb
@@ -1002,6 +1099,7 @@ EOF
           json_format:
             time: "%START_TIME%"
             listener: "$l"
+            user: "${CLIENT[$l]}"
             sni: "%REQUESTED_SERVER_NAME%"
             route: "%FILTER_CHAIN_NAME%"
             flags: "%RESPONSE_FLAGS%"
@@ -1100,18 +1198,53 @@ resolvers() {  # nameserver addresses in /etc/resolv.conf, all of them (Envoy's 
   awk '$1 == "nameserver" && $2 != "" { print $2 }' "$f" 2>/dev/null
 }
 
+# Listener $1's box socket unit drop-in: where its socket is, and who may reach it. The user's
+# directory is root's, 0700 with an ACL letting that uid alone enter it (no group to get
+# wrong), recreated with it on every socket start; the socket's ACL lets that uid alone
+# connect. Root owns the directory and everything in it, so nothing running as the user can
+# swap the socket (claude-airlock requires that), and no other user can even see its sockets.
+socket_dropin_path() { printf '/etc/systemd/system/airlock-envoy-proxy@%s.socket.d/client.conf' "$1"; }
+render_socket_dropin() {
+  local l=$1 u=${CLIENT[$1]} uid=${CLIENT_UID[$1]} d acl
+  d="$SOCK_DIR/$u"
+  acl="$(command -v setfacl)" || die "missing setfacl (Ubuntu/Debian: apt install acl)"
+  cat <<EOF
+# Rendered by airlock-envoy-apply from the site file. Edit the site file, not this.
+# Listener $l's box socket, for $u (uid $uid) alone.
+[Socket]
+ListenStream=$d/$l.sock
+ExecStartPre=/usr/bin/install -d -m 0755 -o root -g root $SOCK_DIR
+ExecStartPre=/usr/bin/install -d -m 0700 -o root -g root $d
+ExecStartPre=$acl --set u::rwx,g::---,o::---,u:$uid:r-x $d
+ExecStartPost=$acl --set u::rw-,g::---,o::---,u:$uid:rw- $d/$l.sock
+# Its client manifest, next to it and gone with it; airlock-envoy-apply keeps the /etc copy.
+ExecStartPost=-/usr/bin/install -m 0644 -o root -g root $CLIENTS_ETC/$l.clients $d/$l.clients
+ExecStopPost=/usr/bin/rm -f $d/$l.clients
+EOF
+}
+
 case "$mode" in
   list) listing; exit 0 ;;
   clients)
     [ -n "${DESTS[$clients_of]+x}" ] || die "no listener '$clients_of'"
     render_clients "$clients_of"; exit 0 ;;
+  render-socket-dropin)
+    in_sockets "$clients_of" || die "no listener '$clients_of' with a client"
+    resolve_clients; render_socket_dropin "$clients_of"; exit 0 ;;
   render-web) render_web "$WEB_LOG"; exit 0 ;;
   render-web-dropin) render_web_dropin; exit 0 ;;
   render) render "$LOG"; exit 0 ;;
   status)
     echo "==> Listeners in $site_src (and built in): ${LISTENERS[*]}"
+    for l in "${SOCKETS[@]}"; do echo "    $l: $(sock_path "$l")"; done
     if [ -r "$ETC/envoy.yaml" ]; then
       web_ok=1
+      # As root: each socket's drop-in is this site file's (it names the user and the uid).
+      if [ "$(id -u)" = 0 ]; then
+        ( resolve_clients 2>/dev/null; for l in "${SOCKETS[@]}"; do
+            [ -r "$(socket_dropin_path "$l")" ] && [ "$(render_socket_dropin "$l" | sha256sum)" = "$(sha256sum < "$(socket_dropin_path "$l")")" ] || exit 1
+          done ) || web_ok=0
+      fi
       if any_web; then
         { [ -r "$ETC/envoy-web.yaml" ] && [ "$(render_web "$WEB_LOG" | sha256sum)" = "$(sha256sum < "$ETC/envoy-web.yaml")" ] \
           && [ -r "$WEB_DROPIN" ] && [ "$(render_web_dropin | sha256sum)" = "$(sha256sum < "$WEB_DROPIN")" ]; } || web_ok=0
@@ -1127,10 +1260,17 @@ esac
 
 # ---- check and apply ------------------------------------------------------------------------
 
+resolve_clients
 [ -x "$ENVOY" ] || die "no Envoy at $ENVOY (install/install-envoy.sh)"
+SOCKET_UNIT=/etc/systemd/system/airlock-envoy-proxy@.socket
 if [ "$mode" = apply ]; then
   lock
   getent passwd airlock-envoy >/dev/null || die "no airlock-envoy account: run install/install-service.sh first"
+  # Units from before per-user sockets listen in /run/airlock-envoy/ itself, for one global
+  # client: this version's sockets would not start with them.
+  if grep -q '^ListenStream=' "$SOCKET_UNIT" 2>/dev/null || [ -e "${SOCKET_UNIT}.d/client.conf" ]; then
+    die "the installed socket unit is from an earlier version: run install/install-service.sh from this one; nothing was changed"
+  fi
 fi
 unset TMPDIR
 work="$(mktemp -d /tmp/airlock-envoy-apply.XXXXXX)"
@@ -1297,18 +1437,54 @@ if ! any_web && { [ -e "$ETC/envoy-web.yaml" ] || [ -e "$WEB_DROPIN" ] || system
   systemctl daemon-reload
 fi
 inst "$work/allowed" "$ETC/allowed"
-# Client manifests: kept in /etc, from where each box socket's unit copies its own into /run
-# when it starts (at boot too); the running sockets' copies are written here.
+# Client manifests: kept in /etc, from where each box socket's unit copies its own next to the
+# socket when it starts (at boot too); the running sockets' copies are written below.
 install -d -m 0750 -o root -g "$grp" "$CLIENTS_ETC"
-for l in "${LISTENERS[@]}"; do
+for l in "${SOCKETS[@]}"; do
   render_clients "$l" > "$work/$l.clients"
   inst "$work/$l.clients" "$CLIENTS_ETC/$l.clients"
 done
 # Only now, so a config Envoy would not start with never lands in /etc as the site file.
 if [ "$from_elsewhere" = 1 ]; then printf '%s\n' "$site_text" > "$work/site.conf"; inst "$work/site.conf" "$ETC/site.conf"; fi
 
-# A box socket per listener; the client's ACL comes from the unit's drop-in.
-for l in "${LISTENERS[@]}"; do
+# Each box socket's drop-in: where it is and who may connect. A socket whose drop-in changes
+# (a new user, say) is stopped first, so it goes from where it was; it starts at its new place
+# below, as a new socket file.
+reload=0
+for l in "${SOCKETS[@]}"; do
+  render_socket_dropin "$l" > "$work/$l.dropin"
+  f="$(socket_dropin_path "$l")"
+  if [ -f "$f" ] && same "$work/$l.dropin" "$f"; then continue; fi
+  if [ -f "$f" ] && systemctl is-active --quiet "airlock-envoy-proxy@$l.socket"; then
+    echo "==> Listener $l: its socket is now $(sock_path "$l") (boxes set to the old one need a relaunch)"
+  fi
+  systemctl stop "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
+  install -d -m 0755 -o root -g root "${f%/*}"
+  install -m 0644 -o root -g root "$work/$l.dropin" "$f.new" && mv -f "$f.new" "$f"
+  reload=1
+done
+# Listeners no longer in the site file (or now a definition only): their sockets go, so a box
+# set to one fails to launch.
+declare -A keep=()
+for l in "${SOCKETS[@]}"; do keep[$l]=1; done
+mapfile -t current < <({
+  systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' | awk '{ print $1 }' || true
+  ls /etc/systemd/system/sockets.target.wants/ /etc/systemd/system/ 2>/dev/null
+} | sed -n 's/^airlock-envoy-proxy@\([a-z][a-z0-9-]*\)\.socket\(\.d\)\{0,1\}$/\1/p' | sort -u)
+for l in "${current[@]}"; do
+  [ -n "${keep[$l]:-}" ] && continue
+  echo "==> Removing listener $l (its socket goes; boxes set to it no longer launch)"
+  systemctl disable --quiet --now "airlock-envoy-proxy@$l.socket" 2>/dev/null || true
+  systemctl stop "airlock-envoy-proxy@$l.service" 2>/dev/null || true
+  # A failed unit stays loaded (and would be "removed" again by every apply) until reset.
+  systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
+  f="$(socket_dropin_path "$l")"
+  if [ -e "$f" ]; then rm -f "$f"; rmdir "${f%/*}" 2>/dev/null || true; reload=1; fi
+done
+[ "$reload" = 0 ] || systemctl daemon-reload
+
+# A box socket per listener with a client.
+for l in "${SOCKETS[@]}"; do
   systemctl enable --quiet "airlock-envoy-proxy@$l.socket"
   [ "$held" = 0 ] || continue
   # A socket fails if its relay cannot start (Envoy down): recover it, as a new socket file.
@@ -1316,36 +1492,32 @@ for l in "${LISTENERS[@]}"; do
     systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
   fi
   systemctl start "airlock-envoy-proxy@$l.socket"
-  # Only next to a socket that runs (a --stop in between leaves none, nor its directory).
+  # Only next to a socket that runs (a --stop in between leaves none).
   if systemctl is-active --quiet "airlock-envoy-proxy@$l.socket"; then
-    install -m 0644 -o root -g root "$work/$l.clients" "$CLIENTS_RUN/$l.clients.new"
-    mv -f "$CLIENTS_RUN/$l.clients.new" "$CLIENTS_RUN/$l.clients"
+    d="$SOCK_DIR/${CLIENT[$l]}"
+    install -m 0644 -o root -g root "$work/$l.clients" "$d/$l.clients.new"
+    mv -f "$d/$l.clients.new" "$d/$l.clients"
   fi
 done
-# Listeners no longer in the site file: their sockets go, so a box set to one fails to launch.
-declare -A keep=()
-for l in "${LISTENERS[@]}"; do keep[$l]=1; done
-mapfile -t current < <({
-  systemctl list-units --all --plain --no-legend 'airlock-envoy-proxy@*.socket' | awk '{ print $1 }' || true
-  ls /etc/systemd/system/sockets.target.wants/ 2>/dev/null
-} | sed -n 's/^airlock-envoy-proxy@\([a-z][a-z0-9-]*\)\.socket$/\1/p' | sort -u)
-for l in "${current[@]}"; do
-  [ -n "${keep[$l]:-}" ] && continue
-  echo "==> Removing listener $l (its socket goes; boxes set to it no longer launch)"
-  systemctl disable --quiet --now "airlock-envoy-proxy@$l.socket" || true
-  systemctl stop "airlock-envoy-proxy@$l.service" 2>/dev/null || true
-  # A failed unit stays loaded (and would be "removed" again by every apply) until reset.
-  systemctl reset-failed "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
-  rm -f "/run/airlock-envoy/$l.sock"
-done
-# Manifests of listeners that are gone (the socket's stop removes its /run copy; this covers
-# one that never started).
+# Whatever else is in the socket directories goes: sockets and manifests of listeners that are
+# gone or moved, the directories of users with no listener left, and the flat files of
+# versions before per-user directories. Only names this script makes are touched.
 shopt -s nullglob
-for f in "$CLIENTS_ETC"/*.clients "$CLIENTS_RUN"/*.clients; do
+rm -f "$SOCK_DIR"/*.sock "$SOCK_DIR"/*.clients "$SOCK_DIR"/*.clients.new
+for d in "$SOCK_DIR"/*/; do
+  d=${d%/}; u=${d##*/}
+  [ ! -L "$d" ] || continue
+  for f in "$d"/*.sock "$d"/*.clients "$d"/*.clients.new; do
+    l=${f##*/}; l=${l%.new}; l=${l%.clients}; l=${l%.sock}
+    [ -n "${keep[$l]:-}" ] && [ "${CLIENT[$l]}" = "$u" ] || rm -f "$f"
+  done
+  rmdir "$d" 2>/dev/null || true   # only once empty: a user with no listener left
+done
+for f in "$CLIENTS_ETC"/*.clients; do
   l=${f##*/}; l=${l%.clients}
   [ -n "${keep[$l]:-}" ] || rm -f "$f"
 done
 shopt -u nullglob
-if [ "$held" = 1 ]; then echo "    listeners (stopped): ${LISTENERS[*]}"
-else for l in "${LISTENERS[@]}"; do echo "    /run/airlock-envoy/$l.sock"; done; fi
+if [ "$held" = 1 ]; then echo "    listeners (stopped): ${SOCKETS[*]}"
+else for l in "${SOCKETS[@]}"; do echo "    $(sock_path "$l")   (for ${CLIENT[$l]})"; done; fi
 lifted=0   # done: a --start that got here keeps egress on

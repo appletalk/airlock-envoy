@@ -1,15 +1,17 @@
 #!/bin/bash
 # Spike test 2: from a --network none client, the allowlist passes and everything else fails.
-# Needs Envoy running with the built-in config (test/run-envoy.sh, or the installed service).
+# Needs Envoy running with test/t2.conf (test/run-envoy.sh test/t2.conf), or the installed service
+# with a listener that is @anthropic alone.
 # Each check has one exact expectation, so a weaker allowlist fails a check instead of passing
 # it by accident. Exits non-zero if any check fails.
-#   SOCK  the proxy socket (default ./run/anthropic.sock; service: /run/airlock-envoy/anthropic.sock,
+#   SOCK  the proxy socket (default ./run/t2.sock; service: /run/airlock-envoy/<you>/<listener>.sock,
 #         with SOCK_MOUNT_OPTS= so a system socket is not SELinux-relabelled)
 #   LOG   a command printing the access log (default: cat run/access.jsonl;
 #         service: "sudo cat /var/log/airlock-envoy/access.jsonl")
 set -u
 cd "$(dirname "$0")/.." || exit
-SOCK="${SOCK:-$PWD/run/anthropic.sock}"
+SOCK="${SOCK:-$PWD/run/t2.sock}"
+LISTENER="${LISTENER:-t2}"   # its name in the log (service: the listener's)
 LOG="${LOG:-cat run/access.jsonl}"
 readlog() { bash -c "$LOG"; }
 # Only log lines written during this run count: the log appends across runs, and connection
@@ -80,7 +82,7 @@ logchecks() {
   for sni in www.anthropic.com console.anthropic.com; do
     line="$(log | jq -c --arg s "$sni" 'select(.sni == $s and .flags == "NR")' | tail -1)"
     conn="$(jq -r '.connection' <<<"${line:-null}")"
-    if [ -n "$line" ] && log | jq -e --arg c "$conn" 'select(.listener == "anthropic" and (.connection | tostring) == $c and .route == "allow-api.anthropic.com")' >/dev/null; then
+    if [ -n "$line" ] && log | jq -e --arg c "$conn" --arg l "$LISTENER" 'select(.listener == $l and (.connection | tostring) == $c and .route == "allow-api.anthropic.com")' >/dev/null; then
       echo "ok   log: SNI $sni refused (NR), joined to HTTP connection $conn"
     else
       echo "FAIL log: no NR line for SNI $sni joined to its CONNECT"
@@ -90,8 +92,8 @@ logchecks() {
   # allowed CONNECT of this run, and the CONNECT's bytes_in (the ClientHello, which grows with
   # the SNI) minus the SNI's length the same for every pair. A shared, reused or swapped ID
   # breaks one of these.
-  read -r nlines nids nmatched nsizes < <(log | jq -s -r --arg t "$tag-" '
-    (map(select(.listener == "anthropic" and .route == "allow-api.anthropic.com" and .log_type == "DownstreamEnd"))
+  read -r nlines nids nmatched nsizes < <(log | jq -s -r --arg t "$tag-" --arg l "$LISTENER" '
+    (map(select(.listener == $l and .route == "allow-api.anthropic.com" and .log_type == "DownstreamEnd"))
       | map({ key: (.connection | tostring), value: .bytes_in }) | from_entries) as $http
     | [ .[] | select((.sni // "") | startswith($t)) | select(.flags == "NR") ] as $sni
     | [ $sni[] | select($http[.connection] != null) ] as $joined

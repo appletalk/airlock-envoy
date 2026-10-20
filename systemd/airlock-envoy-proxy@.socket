@@ -5,19 +5,19 @@ Documentation=https://github.com/appletalk/airlock-envoy
 ConditionPathExists=!/etc/airlock-envoy/stopped
 
 [Socket]
+# Where the socket is and who may connect come from the listener's drop-in, which
+# airlock-envoy-apply writes from the site file (airlock-envoy-proxy@<listener>.socket.d/
+# client.conf): /run/airlock-envoy/<user>/<listener>.sock, that user's directory root's and
+# entered by that uid alone, the socket's ACL that uid alone. Without the drop-in this unit
+# has nowhere to listen and does not start.
 # Created by systemd in a root-owned directory, so neither Envoy nor anything running as
 # the client can swap it for something else (claude-airlock requires exactly this). It
 # outlives Envoy restarts, so running boxes keep a working socket.
-ListenStream=/run/airlock-envoy/%i.sock
-DirectoryMode=0755
 SocketUser=airlock-envoy
 SocketGroup=airlock-envoy
 SocketMode=0600
-# install-service.sh adds the client's uid ACL in a drop-in (ExecStartPost=setfacl ...).
-# The listener's client manifest (its plain-HTTP hosts, nothing secret), public next to the
-# socket and gone with it; airlock-envoy-apply keeps it in /etc and updates a running one.
-ExecStartPost=-/usr/bin/install -m 0644 -o root -g root /etc/airlock-envoy/clients/%i.clients /run/airlock-envoy/%i.clients
-ExecStopPost=/usr/bin/rm -f /run/airlock-envoy/%i.clients
+# A stopped socket leaves no file behind: a box set to it fails at launch, not at connect.
+RemoveOnStop=yes
 
 [Install]
 WantedBy=sockets.target
