@@ -74,6 +74,7 @@ site() {  # site <line>...: /etc/airlock-envoy/site.conf: client's c-anthropic, 
 }
 TUSER=client
 UPGRADE_SITE=()
+xsum() { x sha256sum "$1" | cut -d' ' -f1; }   # inside the container (a redirect would be the host's)
 tunnel() {  # tunnel [socket [host...]]: through a box socket as $TUSER, each CONNECT's status
   local sock="${1:-$S}"; shift || true
   [ $# -gt 0 ] || set -- api.anthropic.com example.com
@@ -109,6 +110,13 @@ if [ -n "${OLD_REPO:-}" ]; then
   x sh -c 'echo "c-anthropic @anthropic" > /root/bad-site.conf'
   ck "--site: a file this version rejects, or no confirmation (no terminal, no --yes): refused, the earlier install as it was" \
      '! x /repo/install/install-service.sh --site /root/bad-site.conf --yes >/dev/null 2>&1 && ! x /repo/install/install-service.sh --site /root/new-site.conf >/dev/null 2>&1 && [ "$(x sha256sum /etc/systemd/system/airlock-envoy.service)" = "$unit" ] && [ "$(x stat -c %i "$OLD_S")" = "$old_ino" ]'
+  x ln -sf /root/new-site.conf /root/link-site.conf
+  x mkfifo /root/fifo-site.conf
+  ck "--site refuses a symlink, a FIFO (no hang), an empty name, an unknown option, --site twice; nothing changed" \
+     '! x /repo/install/install-service.sh --site /root/link-site.conf --yes >/dev/null 2>&1 && ! timeout 10 x /repo/install/install-service.sh --site /root/fifo-site.conf --yes >/dev/null 2>&1 && ! x /repo/install/install-service.sh --site "" --yes >/dev/null 2>&1 && ! x /repo/install/install-service.sh --site=/root/new-site.conf >/dev/null 2>&1 && ! x /repo/install/install-service.sh --site /root/new-site.conf --site /root/new-site.conf --yes >/dev/null 2>&1 && [ "$(x sha256sum /etc/systemd/system/airlock-envoy.service)" = "$unit" ] && [ "$(x stat -c %i "$OLD_S")" = "$old_ino" ]'
+  out="$(x /repo/install/install-service.sh --site /root/bad-site.conf --yes 2>&1 || true)"
+  ck "--site: a rejected file's errors name it, not the temp copy" '[[ "$out" == *"/root/bad-site.conf"* && "$out" != *"/tmp/airlock-envoy-site."* ]]'
+  oldsite="$(xsum /etc/airlock-envoy/site.conf)"
   UPGRADE_SITE=(--site /root/new-site.conf --yes)
 fi
 echo "== $distro: install-service.sh"
@@ -117,8 +125,8 @@ printf '%s\n' "$out"
 ck "install-service.sh warns that it takes no client user any more, and goes on" '[[ "$out" == *"takes no client user any more (ignored: client)"* ]]'
 echo "== $distro: checks"
 if [ -n "${OLD_REPO:-}" ]; then
-  ck "upgrade with --site: the file installed as the site file (root:airlock-envoy 0640), as it was given" \
-     '[ "$(x stat -c %U:%G:%a /etc/airlock-envoy/site.conf)" = root:airlock-envoy:640 ] && [ "$(x sha256sum < /etc/airlock-envoy/site.conf)" = "$(x sha256sum < /root/new-site.conf)" ]'
+  ck "upgrade with --site: the file installed as the site file (root:airlock-envoy 0640), as it was given; the old one kept as site.conf.prev" \
+     '[ "$(x stat -c %U:%G:%a /etc/airlock-envoy/site.conf)" = root:airlock-envoy:640 ] && [ -n "$oldsite" ] && [ "$(xsum /etc/airlock-envoy/site.conf)" = "$(xsum /root/new-site.conf)" ] && [ "$(xsum /etc/airlock-envoy/site.conf.prev)" = "$oldsite" ]'
   ck "upgrade: the earlier flat socket, its manifest, unit and global client drop-in go, and the old config file" \
      '! x test -e "$OLD_S" && ! x test -e /run/airlock-envoy/anthropic.clients && ! x test -e /etc/systemd/system/airlock-envoy-proxy@.socket.d && [ "$(x systemctl is-enabled airlock-envoy-proxy@anthropic.socket 2>/dev/null)" != enabled ] && ! x test -e /etc/airlock-envoy/tunnel-anthropic.yaml'
 else
