@@ -515,8 +515,60 @@ for extra_lines in "client o-x client" "client o-x ghost" "o-y @anthropic http:/
     "o-x @anthropic example.org:443 http://httpbin.org@o" "$([ "$extra_lines" = "client o-x ghost" ] || echo "client o-x other")" "$extra_lines" "$([[ "$extra_lines" != o-y* ]] || echo "client o-y other")"
   if x airlock-envoy-apply >/dev/null 2>&1; then bad=1; echo "  (accepted: $extra_lines)"; fi
 done
-ck "two clients for a listener, a user that doesn't exist, or one credential for two users: refused, nothing changed" \
+ck "two clients for a listener, a new client that doesn't exist (a typo), or one credential for two users: refused, nothing changed (the applied client's socket stays)" \
    '[ "$bad" = 0 ] && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ] && [ "$(x sha256sum /etc/systemd/system/airlock-envoy-proxy@o-x.socket.d/client.conf)" = "$dropin" ] && [ "$(TUSER=other tunnel "$O" example.org)" = 200 ]'
+# The site as it stands here, again (after each test below that changes it).
+base_site() {
+  site "http httpbin.org rules any credential t-cred" "http httpbin.org@o rules any credential o-cred" \
+    "extra @anthropic example.com:443 http://httpbin.org" "client extra client" \
+    "o-x @anthropic example.org:443 http://httpbin.org@o" "client o-x other"
+}
+back_to_base() { base_site; x airlock-envoy-apply >/dev/null; }
+U=/etc/systemd/system/airlock-envoy-proxy@.socket
+x cp "$U" /root/socket-unit.keep
+x sh -c 'echo "ListenStream=/run/airlock-envoy/%i.sock" >> "$0"' "$U"
+r1=0; x airlock-envoy-apply >/dev/null 2>&1 || r1=$?
+x cp /root/socket-unit.keep "$U"
+x sh -c 'mkdir -p "$0.d" && touch "$0.d/client.conf"' "$U"
+r2=0; x airlock-envoy-apply >/dev/null 2>&1 || r2=$?
+x sh -c 'rm -r "$0.d"' "$U"
+ck "apply refuses the previous version's socket unit (a ListenStream in it, or its global client drop-in), nothing changed" \
+   '[ "$r1" != 0 ] && [ "$r2" != 0 ] && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ] && [ "$(TUSER=other tunnel "$O" example.org)" = 200 ]'
+# A move interrupted after Envoy runs the new config (here: apply fails right after, at the
+# client manifests): the moved socket was stopped before, so the old user's box can't use the
+# listener as it now is, the new user's credential included.
+x sh -c 'rm -r /etc/airlock-envoy/clients && touch /etc/airlock-envoy/clients'
+site "http httpbin.org@o rules any credential o-cred" "extra @anthropic example.com:443 http://httpbin.org@o" "client extra other" \
+  "o-x @anthropic example.org:443" "client o-x client"
+r=0; x airlock-envoy-apply >/dev/null 2>&1 || r=$?
+ck "a move interrupted after the Envoy restart: the old user's sockets of the moved listeners are already stopped" \
+   '[ "$r" != 0 ] && ! x test -e "$O" && ! x test -e "$E" && [ "$(x systemctl is-active airlock-envoy-proxy@extra.socket)" != active ]'
+x rm -f /etc/airlock-envoy/clients
+back_to_base
+ck "...and an apply of the old site puts them back for their users" '[ "$(TUSER=other tunnel "$O" example.org)" = 200 ] && [ "$(tunnel "$E" example.com)" = 200 ]'
+# A client inside another user's subordinate uids (whose rootless containers could become
+# it): refused, and its socket stops (fail closed).
+uo="$(x id -u other)"
+x sh -c 'cp /etc/subuid /root/subuid.keep; echo "client:$0:1" >> /etc/subuid' "$uo"
+out="$(x airlock-envoy-apply 2>&1)" && r=0 || r=$?
+ck "a client whose uid is in another user's /etc/subuid range: refused, its socket stopped, the others left" \
+   '[ "$r" != 0 ] && [[ "$out" == *"lies in client"*"subordinate uids"* ]] && ! x test -e "$O" && [ "$(tunnel "$E" example.com)" = 200 ]'
+x cp /root/subuid.keep /etc/subuid
+back_to_base
+# A deleted user: the apply refuses and stops its socket; a new account given its uid does not
+# inherit it, not even when the socket is started by hand (or at boot).
+x userdel other
+out="$(x airlock-envoy-apply 2>&1)" && r=0 || r=$?
+ck "a client deleted: the apply refuses and stops its socket" \
+   '[ "$r" != 0 ] && [[ "$out" == *"client other of o-x: no such user"* && "$out" == *"Stopped listener o-x"* ]] && ! x test -e "$O"'
+x useradd -M -u "$uo" mallory
+r=0; x systemctl start airlock-envoy-proxy@o-x.socket 2>/dev/null || r=$?
+ck "...its uid given to another account: the socket does not start for it" '[ "$r" != 0 ] && ! x test -e "$O"'
+x userdel mallory
+x useradd -M -u "$uo" other
+x systemctl reset-failed airlock-envoy-proxy@o-x.socket 2>/dev/null || true
+back_to_base
+ck "...and the user back: the socket is back" '[ "$(TUSER=other tunnel "$O" example.org)" = 200 ]'
 # A listener given to another user: its socket moves there; a user with no listener left loses
 # its directory.
 site "http httpbin.org@o rules any credential o-cred" "extra @anthropic example.com:443" "client extra client" \

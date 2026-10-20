@@ -269,8 +269,8 @@ check_refuses() {  # check_refuses <name> <expected message part> <site text>
   elif [[ "$out" == *"$2"* ]]; then echo "ok   $1"
   else echo "FAIL $1: wrong message: $out"; fails=$((fails+1)); fi
 }
-check_refuses "client root"                "is uid 0: only a login account"     'a example.com:443\nclient a root\n'
-check_refuses "client nobody"              "is uid 65534"                       'a example.com:443\nclient a nobody\n'
+check_refuses "client root"                "uid 0: only a login account"     'a example.com:443\nclient a root\n'
+check_refuses "client nobody"              "uid 65534: only a login account"                       'a example.com:443\nclient a nobody\n'
 check_refuses "client a system account"    "only a login account"               "a example.com:443\nclient a $(getent passwd | awk -F: '$3 > 0 && $3 < 1000 { print $1; exit }')\n"
 check_refuses "client that does not exist" "client no-such-user-x of a: no such user" 'a example.com:443\nclient a no-such-user-x\n'
 me="$(id -un)"; uid="$(id -u)"
@@ -279,14 +279,15 @@ if [ "$uid" -ge 1000 ]; then
   acl="$(command -v setfacl)"
   want="[Socket]
 ListenStream=/run/airlock-envoy/$me/a.sock
+ExecStartPre=/bin/sh -c '[ \"\$\$(getent passwd $me | cut -d: -f3)\" = $uid ]'
 ExecStartPre=/usr/bin/install -d -m 0755 -o root -g root /run/airlock-envoy
-ExecStartPre=/usr/bin/install -d -m 0700 -o root -g root /run/airlock-envoy/$me
+ExecStartPre=/usr/bin/mkdir -p -m 0700 /run/airlock-envoy/$me
 ExecStartPre=$acl --set u::rwx,g::---,o::---,u:$uid:r-x /run/airlock-envoy/$me
 ExecStartPost=$acl --set u::rw-,g::---,o::---,u:$uid:rw- /run/airlock-envoy/$me/a.sock
 ExecStartPost=-/usr/bin/install -m 0644 -o root -g root /etc/airlock-envoy/clients/a.clients /run/airlock-envoy/$me/a.clients
 ExecStopPost=/usr/bin/rm -f /run/airlock-envoy/$me/a.clients"
   got="$("$apply" --render-socket-dropin a "$work/site" | grep -v '^#')"
-  if [ "$got" = "$want" ]; then echo "ok   socket drop-in: the user's directory and the socket, for that uid alone"
+  if [ "$got" = "$want" ]; then echo "ok   socket drop-in: the uid still the name's at start, the user's directory and the socket, for that uid alone"
   else echo "FAIL socket drop-in, got:"; echo "$got"; fails=$((fails+1)); fi
   if ! "$apply" --render-socket-dropin anthropic "$work/site" >/dev/null 2>&1; then echo "ok   socket drop-in: none for a listener without a client"
   else echo "FAIL socket drop-in for the built-in"; fails=$((fails+1)); fi
