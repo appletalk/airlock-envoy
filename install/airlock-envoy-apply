@@ -620,6 +620,9 @@ http_clusters() {
         "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
         sni: "$h"
         common_tls_context:
+          # Envoy's client default stops at TLS 1.2; a host that requires 1.3 (Traefik with a
+          # 1.3 floor) would fail every handshake.
+          tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_protocol_version: TLSv1_3 }
           validation_context:
             trusted_ca: { filename: /etc/ssl/certs/ca-certificates.crt }
             match_typed_subject_alt_names: [{ san_type: DNS, matcher: { exact: "$h" } }]
