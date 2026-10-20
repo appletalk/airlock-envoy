@@ -12,11 +12,15 @@
 # built-in allowlist from here.
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
-site="" yes=0 ignored=()
+site="" site_set=0 yes=0 ignored=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --site) [ $# -ge 2 ] || { echo "install-service.sh: --site needs a file" >&2; exit 1; }; site=$2; shift ;;
+    --site) { [ $# -ge 2 ] && [ -n "$2" ]; } || { echo "install-service.sh: --site needs a file" >&2; exit 1; }
+            [ "$site_set" = 0 ] || { echo "install-service.sh: --site given twice" >&2; exit 1; }
+            site=$2 site_set=1; shift ;;
     --yes) yes=1 ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "install-service.sh: unknown option $1 (--site FILE, --yes)" >&2; exit 1 ;;
     *) ignored+=("$1") ;;
   esac
   shift
@@ -46,12 +50,21 @@ uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
 # installed: the file itself may be writable by more than root (a checkout), so a person
 # confirms what it changes.
 if [ -n "$site" ]; then
-  { [ -f "$site" ] && [ -r "$site" ]; } || { echo "install-service.sh: cannot read $site" >&2; exit 1; }
+  # Opened once, not through a link, and a regular file: whoever can write the checkout can't
+  # swap in a device, a pipe or root's own files between a check and the read. 1 MiB at most.
+  [ ! -L "$site" ] || { echo "install-service.sh: $site is a symlink; name the file itself" >&2; exit 1; }
+  exec 4< "$site" || { echo "install-service.sh: cannot read $site" >&2; exit 1; }
+  [ -f /proc/self/fd/4 ] || { echo "install-service.sh: $site is not a regular file" >&2; exit 1; }
   site_copy="$(umask 077; mktemp /tmp/airlock-envoy-site.XXXXXX)"
   trap 'rm -f "$site_copy"' EXIT
-  cat -- "$site" > "$site_copy"
-  "$repo/install/airlock-envoy-apply" --check "$site_copy" \
-    || { echo "$site was rejected (above); the installed service is unchanged" >&2; exit 1; }
+  head -c 1048577 <&4 > "$site_copy"; exec 4<&-
+  [ "$(stat -c %s "$site_copy")" -le 1048576 ] || { echo "install-service.sh: $site is over 1 MiB" >&2; exit 1; }
+  # Messages name FILE, not the copy.
+  if ! out="$("$repo/install/airlock-envoy-apply" --check "$site_copy" 2>&1)"; then
+    printf '%s\n' "${out//"$site_copy"/"$site"}" >&2
+    echo "$site was rejected (above); the installed service is unchanged" >&2; exit 1
+  fi
+  printf '%s\n' "${out//"$site_copy"/"$site"}"
   if [ "$yes" = 0 ]; then
     { exec 3</dev/tty; } 2>/dev/null || { echo "no terminal to confirm on; check the change above, then rerun with --yes" >&2; exit 1; }
     read -r -u 3 -p "Install this version with $site as /etc/airlock-envoy/site.conf? [y/N] " a || a=
@@ -85,6 +98,8 @@ systemctl daemon-reload
 systemctl enable airlock-envoy.service
 # The --site file, as checked, goes in now: the units it needs are in place.
 if [ -n "$site" ]; then
+  # The one it replaces is kept (site.conf.prev): an earlier version reads only that format.
+  [ ! -f /etc/airlock-envoy/site.conf ] || cp -p /etc/airlock-envoy/site.conf /etc/airlock-envoy/site.conf.prev
   install -m 0640 -o root -g airlock-envoy "$site_copy" /etc/airlock-envoy/site.conf.new
   mv -f /etc/airlock-envoy/site.conf.new /etc/airlock-envoy/site.conf
 fi

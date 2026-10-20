@@ -68,7 +68,9 @@ sudo install/install-service.sh               # system account, units, airlock-e
   shows what it changes and asks (`--yes` skips), and installs it as the site file in the same
   step, since the earlier version's tools can't read the new format and this version refuses
   the old file (a client user given to it is ignored, with a warning). A site file it rejects
-  changes nothing. The old sockets, their manifests and the global ACL drop-in go;
+  changes nothing. The file it replaces is kept as `site.conf.prev` (an earlier version reads
+  only that). If the apply itself fails after that (Envoy won't start, say), egress stays shut
+  and `--status` says "Applied: NO": fix the cause and rerun `install-service.sh` (no `--site`). The old sockets, their manifests and the global ACL drop-in go;
   boxes need their new socket path and a relaunch.
 - **Two layers of sockets.** Envoy cannot take a listening socket from systemd, so systemd
   creates each box socket (`airlock-envoy-proxy@<listener>.socket`, where and for whom from the
