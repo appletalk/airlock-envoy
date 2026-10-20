@@ -148,6 +148,9 @@ if grep -q 'name: "http-x.example_board"' <<< "$r" && grep -q 'host_rewrite_lite
    && [ "$("$apply" --clients b "$work/site" | grep -v '^#')" = "x.example 443 github-issues yes" ]; then
   echo "ok   a variant renders to its host (Host, SNI, SAN, domains), its own cluster, its projects; the manifest names the host"
 else echo "FAIL variant rendering"; fails=$((fails+1)); fi
+if grep -q 'tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_protocol_version: TLSv1_3 }' <<< "$r"; then
+  echo "ok   upstream TLS offers 1.3 (Envoy's client default stops at 1.2; a 1.3-only host refused every handshake)"
+else echo "FAIL upstream TLS does not offer 1.3"; fails=$((fails+1)); fi
 
 # Client manifests: each listener's plain-HTTP hosts (an include's too), nothing else.
 printf 'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example example.com:443\nb @a http://y.example web\nc example.org:443\n' > "$work/site"
