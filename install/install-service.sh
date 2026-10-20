@@ -2,14 +2,27 @@
 # Install or update the airlock-envoy service: system account, units, airlock-envoy-apply,
 # and through it the config and a box-facing socket per listener
 # (airlock-envoy-proxy@<listener>.socket) from /etc/airlock-envoy/site.conf, if there is one.
-# Run install-envoy.sh first. Usage, as root:  install/install-service.sh
+# Run install-envoy.sh first. Usage, as root:
+#   install/install-service.sh                         the site file in /etc, if any
+#   install/install-service.sh --site FILE [--yes]     with FILE as the site file: checked by
+#       this version, shown and confirmed (--yes skips), and installed with it. For a site
+#       file this version needs (a new format) where the one in /etc is the old version's.
 # Who may connect to which socket is the site file's (client <listener> <user>), one user per
 # listener. Run it from a clean clone that no box mounts: as root it installs code and the
 # built-in allowlist from here.
 set -euo pipefail
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
-if [ $# -gt 0 ]; then
-  echo "install-service.sh: WARNING: it takes no client user any more (ignored: $*). Each listener names its" >&2
+site="" yes=0 ignored=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --site) [ $# -ge 2 ] || { echo "install-service.sh: --site needs a file" >&2; exit 1; }; site=$2; shift ;;
+    --yes) yes=1 ;;
+    *) ignored+=("$1") ;;
+  esac
+  shift
+done
+if [ ${#ignored[@]} -gt 0 ]; then
+  echo "install-service.sh: WARNING: it takes no client user any more (ignored: ${ignored[*]}). Each listener names its" >&2
   echo "    own in the site file: client <listener> <user> (airlock-envoy-apply --help)" >&2
 fi
 [ -x /usr/local/bin/envoy ] || { echo "install Envoy first: install/install-envoy.sh <version>" >&2; exit 1; }
@@ -28,9 +41,26 @@ uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
   || { echo "airlock-envoy exists as a login account (uid $(id -u airlock-envoy)); remove it or rename it" >&2; exit 1; }
 
 # Check the site file, if there is one, with this repo's airlock-envoy-apply before anything
-# else is installed: a file it rejects then leaves the running install as it was.
-"$repo/install/airlock-envoy-apply" --check >/dev/null \
-  || { echo "the site file was rejected (above); the installed service is unchanged" >&2; exit 1; }
+# else is installed: a file it rejects then leaves the running install as it was. A --site
+# file is read once, into a copy only root can change, and that copy is what is checked and
+# installed: the file itself may be writable by more than root (a checkout), so a person
+# confirms what it changes.
+if [ -n "$site" ]; then
+  { [ -f "$site" ] && [ -r "$site" ]; } || { echo "install-service.sh: cannot read $site" >&2; exit 1; }
+  site_copy="$(umask 077; mktemp /tmp/airlock-envoy-site.XXXXXX)"
+  trap 'rm -f "$site_copy"' EXIT
+  cat -- "$site" > "$site_copy"
+  "$repo/install/airlock-envoy-apply" --check "$site_copy" \
+    || { echo "$site was rejected (above); the installed service is unchanged" >&2; exit 1; }
+  if [ "$yes" = 0 ]; then
+    { exec 3</dev/tty; } 2>/dev/null || { echo "no terminal to confirm on; check the change above, then rerun with --yes" >&2; exit 1; }
+    read -r -u 3 -p "Install this version with $site as /etc/airlock-envoy/site.conf? [y/N] " a || a=
+    [[ "$a" == [yY]* ]] || { echo "not installed; the installed service is unchanged" >&2; exit 1; }
+  fi
+else
+  "$repo/install/airlock-envoy-apply" --check >/dev/null \
+    || { echo "the site file was rejected (above); the installed service is unchanged" >&2; exit 1; }
+fi
 
 install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy
 install -m 0755 -o root -g root "$repo/install/airlock-envoy-apply" /usr/local/sbin/airlock-envoy-apply.new
@@ -53,6 +83,11 @@ rmdir /etc/systemd/system/airlock-envoy-proxy@.socket.d 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl enable airlock-envoy.service
+# The --site file, as checked, goes in now: the units it needs are in place.
+if [ -n "$site" ]; then
+  install -m 0640 -o root -g airlock-envoy "$site_copy" /etc/airlock-envoy/site.conf.new
+  mv -f /etc/airlock-envoy/site.conf.new /etc/airlock-envoy/site.conf
+fi
 # Renders the config from the site file, restarts Envoy, and starts or removes the box sockets
 # (each with its user's drop-in; sockets from an earlier version, in /run/airlock-envoy/ itself,
 # go); with the kill switch on, it starts nothing.

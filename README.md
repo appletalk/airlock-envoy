@@ -42,6 +42,7 @@ install code, the release key and the egress allowlist from it; check `git statu
 ```
 sudo install/install-envoy.sh 1.40.0          # binary -> /usr/local/libexec/airlock-envoy/envoy-1.40.0
 sudo install/install-service.sh               # system account, units, airlock-envoy-apply, config
+                                              #   (--site FILE: with FILE as the site file)
 ```
 
 - `install-envoy.sh` downloads the binary and the signed checksum list, verifies the
@@ -61,10 +62,13 @@ sudo install/install-service.sh               # system account, units, airlock-e
   alone (rootless containers drop supplementary groups, so a group would not work). Running it
   again, say to update the built-in list, keeps the sockets that running boxes hold.
 - **Upgrading from one global client** (`install-service.sh <user>`, sockets in
-  `/run/airlock-envoy/` itself): add a `client` line for every listener (and a listener of your
-  own for the built-in `anthropic`, which has no socket now), then rerun `install-service.sh`
-  (a client user given to it is ignored, with a warning). A site file without them is refused
-  before anything changes. The old sockets, their manifests and the global ACL drop-in go;
+  `/run/airlock-envoy/` itself): write the site file with a `client` line for every listener
+  (and a listener of your own for the built-in `anthropic`, which has no socket now), and
+  install with it: `sudo install/install-service.sh --site FILE`. This version checks FILE,
+  shows what it changes and asks (`--yes` skips), and installs it as the site file in the same
+  step, since the earlier version's tools can't read the new format and this version refuses
+  the old file (a client user given to it is ignored, with a warning). A site file it rejects
+  changes nothing. The old sockets, their manifests and the global ACL drop-in go;
   boxes need their new socket path and a relaunch.
 - **Two layers of sockets.** Envoy cannot take a listening socket from systemd, so systemd
   creates each box socket (`airlock-envoy-proxy@<listener>.socket`, where and for whom from the
