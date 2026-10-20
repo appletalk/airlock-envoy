@@ -1,21 +1,23 @@
-# /etc/airlock-envoy/site.conf: this host's listeners, beyond the built-in `anthropic`.
-# Each listener is a box socket, /run/airlock-envoy/<name>.sock, and a box gets one socket, so a
-# listener is a whole access profile. Apply with `sudo airlock-envoy-apply` (see --help).
+# /etc/airlock-envoy/site.conf: this host's listeners. Each listener is a box socket for one
+# user, /run/airlock-envoy/<user>/<name>.sock, and a box gets one socket, so a listener is a
+# whole access profile. Apply with `sudo airlock-envoy-apply` (see --help).
 #
 #   <listener>  <destination>...      repeat the name to continue on another line
 #   host:port   only TLS for exactly this host (its SNI) passes
 #   IPv4:port   only TLS without a server name passes: for hosts you run, not shared edges
 #   @name       everything a listener defined above allows (anthropic is built in)
+#   client <listener> <user>          the one user whose boxes may connect (each listener has
+#                                     one, unless another listener includes it)
 
-# Claude, plus the monitoring stack and the cluster API.
+# Claude, plus the monitoring stack and the cluster API: a definition the users' listeners share.
 infra  @anthropic
 infra  metrics.example.net:443 logs.example.net:443
 infra  10.0.0.10:6443
 
 # Claude plus the public internet (any host on 443, public addresses only); infra's internal
 # hosts stay out of reach through it.
-research  @anthropic web
-infra     web
+alice-research  @anthropic web
+client alice-research alice
 
 # What web treats as internal, beyond the built-ins (local, lan, internal, home.arpa, ...,
 # and every non-public address): your own domains, internal ranges that are publicly
@@ -24,7 +26,11 @@ internal-name  example.net
 internal-net   198.51.100.0/24 2001:db8:1::/48
 
 # Plain HTTP with a credential the box never sees (airlock-envoy-cred set <name>): GitHub's API
-# under the github-api rules (no merges or approvals) and git over smart HTTP.
+# under the github-api rules (no merges or approvals) and git over smart HTTP. A credential
+# belongs to one user: the agent account gets these, alice's infra listener none.
 http  api.github.com  rules github-api  credential github-api
 http  github.com      rules git         credential github-git
-dev   @anthropic web http://api.github.com http://github.com
+alice-infra  @infra web
+client alice-infra alice
+agent-dev  @infra http://api.github.com http://github.com
+client agent-dev agent

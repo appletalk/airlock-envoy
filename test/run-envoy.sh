@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run Envoy for the spike: rootless podman; ./run stands in for both /run/airlock-envoy-internal
 # (sockets, admin) and /var/log/airlock-envoy (access log).
-# Usage: test/run-envoy.sh [SITE]     the rendered config: built-in listeners plus SITE's
+# Usage: test/run-envoy.sh [SITE]     the rendered config: SITE's listeners (each one's socket here)
 #        test/run-envoy.sh capture    the log-only capture tunnel (configs/tunnel-capture.yaml)
 # Stop: podman stop airlock-envoy-spike airlock-envoy-web-spike
 # A site with web also gets the web Envoy (airlock-envoy-web-spike), on ./run/web; its kernel
