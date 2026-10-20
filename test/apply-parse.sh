@@ -152,6 +152,15 @@ if grep -q 'tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_pro
   echo "ok   upstream TLS offers 1.3 (Envoy's client default stops at 1.2; a 1.3-only host refused every handshake)"
 else echo "FAIL upstream TLS does not offer 1.3"; fails=$((fails+1)); fi
 
+# forgejo: git routes have no request timeout or stream cap (long), the API routes do.
+printf 'http g.example.com rules forgejo credential fj\nb http://g.example.com\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+if grep -A4 'name: "g.example.com-pack"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' \
+   && grep -A4 'name: "g.example.com-read"' <<< "$r" | grep -q 'timeout: 120s, idle_timeout: 300s, max_stream_duration' \
+   && grep -q '"inject-fj"' <<< "$r" && ! grep -q 'github-graphql' <<< "$r"; then
+  echo "ok   forgejo: git routes long, API routes capped, credential injected, no GraphQL check"
+else echo "FAIL forgejo rendering"; fails=$((fails+1)); fi
+
 # Client manifests: each listener's plain-HTTP hosts (an include's too), nothing else.
 printf 'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example example.com:443\nb @a http://y.example web\nc example.org:443\n' > "$work/site"
 m="$("$apply" --clients b "$work/site" | grep -v '^#')"

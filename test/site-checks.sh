@@ -196,7 +196,7 @@ slot; { r="$(curl -s -x http://127.0.0.1:3132 -H "X-Envoy-Upstream-Rq-Timeout-Ms
   verdict "box-sent x-envoy-*, forwarding and method-override headers stripped" "none reached the host" "${r:0:300}" > "$f"; } &
 pids+=($!)
 slot; { r="$(head -c 70000 /dev/zero | tr "\0" a | sed "s/^/{\"query\":\"{ viewer { login } }\",\"v\":\"/; s/\$/\"}/" | \
-    curl -s -o /dev/null -w "http=%{http_code}" -x http://127.0.0.1:3132 -H "Content-Type: application/json" --data-binary @- http://httpbin.org/graphql)"
+    curl -s -o /dev/null -w "http=%{http_code}" -x http://127.0.0.1:3132 -H "Content-Type: application/json" -H "Expect: 100-continue" --data-binary @- http://httpbin.org/graphql)"
   verdict "a GraphQL body over 64 KiB is refused before the check reads it" "http=413" "$r" > "$f"; } &
 pids+=($!)
 # github-issues (httpbingo): issues pass to the host (its 404), PR writes are refused here.
@@ -222,6 +222,21 @@ slot; { r="$(curl -s -x http://127.0.0.1:3132 http://httpbingo.org/anything/v | 
   verdict "variants: one host, each listener its own credential (t-http t-cred, t-other t-gh)" "*SITE-TEST-TOKEN-1*dummy-not-a-github-token*" "$(echo $r)" > "$f"; } &
 pids+=($!)
 check 3130 "variants: t-other has the full rules (PR create passes)" "$P http=404 exit=0" -X POST http://httpbingo.org/repos/o/r/pulls
+# forgejo (httpbin.org@fj on t-other): allowed requests reach the host (its 404), the rest 403 here.
+for c in "git info/refs:GET:/o/r.git/info/refs:404" "git receive-pack:POST:/o/r.git/git-receive-pack:404" \
+         "api read:GET:/api/v1/repos/o/r:404" "pr create:POST:/api/v1/repos/o/r/pulls:404" \
+         "pr edit:PATCH:/api/v1/repos/o/r/pulls/1:404" "pr comment:POST:/api/v1/repos/o/r/issues/1/comments:404" \
+         "reviewers:POST:/api/v1/repos/o/r/pulls/1/requested_reviewers:404" \
+         "merge:POST:/api/v1/repos/o/r/pulls/1/merge:403" "review (approve):POST:/api/v1/repos/o/r/pulls/1/reviews:403" \
+         "contents write:PUT:/api/v1/repos/o/r/contents/f:403" "contents create:POST:/api/v1/repos/o/r/contents/f:403" \
+         "branch delete:DELETE:/api/v1/repos/o/r/branches/b:403" "branch protection:POST:/api/v1/repos/o/r/branch_protections:403" \
+         "hooks:POST:/api/v1/repos/o/r/hooks:403" "repo settings:PATCH:/api/v1/repos/o/r:403" "repo delete:DELETE:/api/v1/repos/o/r:403" \
+         "tokens:POST:/api/v1/users/u/tokens:403" "keys:POST:/api/v1/user/keys:403" "admin:POST:/api/v1/admin/users:403" \
+         "web UI:GET:/user/settings:403" "api internal:GET:/api/internal/x:403" "release:POST:/api/v1/repos/o/r/releases:403" \
+         "pr via dot segments to merge:POST:/api/v1/repos/o/r/pulls/../pulls/1/merge:403"; do
+  IFS=: read -r cn cm cp cw <<< "$c"
+  check 3130 "forgejo: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" "http://httpbin.org$cp"
+done
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle
 # Alone: 40 GraphQL requests at once on one listener, 20 to each of two GitHub-rule hosts; one
