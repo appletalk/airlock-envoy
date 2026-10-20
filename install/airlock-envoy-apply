@@ -425,22 +425,49 @@ done
 sock_path() { printf '%s/%s/%s.sock' "$SOCK_DIR" "${CLIENT[$1]}" "$1"; }
 
 # The users must exist and be ordinary accounts; the ACLs name them by uid, never by name.
+# A uid inside another user's subordinate range (/etc/subuid) is refused: that user's rootless
+# containers can take it on, and with it the client's sockets. Each problem is printed;
+# BAD lists the listeners with one, and the return is 1 if there are any.
+uid_in_subuid() {  # uid_in_subuid <uid> <user>: another user's range holding uid, if any
+  local o st c
+  while IFS=: read -r o st c; do
+    [[ "$st" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ ]] || continue
+    [ "$o" != "$2" ] && [ "$o" != "${3:-x}" ] || continue
+    if (( $1 >= st && $1 < st + c )); then printf '%s (%s-%s)' "$o" "$st" "$((st + c - 1))"; return 0; fi
+  done < <(cat /etc/subuid 2>/dev/null)
+  return 1
+}
+BAD=()
 resolve_clients() {
-  local l u ent uid uid_min
+  local l u ent uid uid_min uid_max r why
   uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
   case "$uid_min" in ''|*[!0-9]*) uid_min=1000 ;; esac
+  uid_max="$(awk '$1 == "UID_MAX" { print $2 }' /etc/login.defs 2>/dev/null)"
+  case "$uid_max" in ''|*[!0-9]*) uid_max=60000 ;; esac
+  BAD=()
+  # The service account owns every socket: no one's containers may become it.
+  if uid="$(id -u airlock-envoy 2>/dev/null)" && r="$(uid_in_subuid "$uid" airlock-envoy)"; then
+    echo "airlock-envoy-apply: the airlock-envoy account (uid $uid) lies in $r's subordinate uids: $r could reach every socket" >&2
+    BAD=("${SOCKETS[@]}"); return 1
+  fi
   for l in "${SOCKETS[@]}"; do
-    u=${CLIENT[$l]}
-    ent="$(getent passwd -- "$u" 2>/dev/null)" || die "${CLIENT_AT[$l]}: client $u of $l: no such user"
+    u=${CLIENT[$l]} why=
+    if ! ent="$(getent passwd -- "$u" 2>/dev/null)"; then why="no such user"
     # The entry must be that name's own (a directory service may answer for another spelling).
-    [ "${ent%%:*}" = "$u" ] || die "${CLIENT_AT[$l]}: client $u of $l: the user database answers as '${ent%%:*}'"
-    uid="$(cut -d: -f3 <<< "$ent")"
-    [[ "$uid" =~ ^[0-9]+$ ]] || die "${CLIENT_AT[$l]}: client $u of $l: bad uid '$uid'"
-    if [ "$uid" = 0 ] || [ "$uid" = 65534 ] || [ "$uid" -lt "$uid_min" ]; then
-      die "${CLIENT_AT[$l]}: client $u of $l is uid $uid: only a login account (uid $uid_min and up, not root or nobody) may be a client"
+    elif [ "${ent%%:*}" != "$u" ]; then why="the user database answers as '${ent%%:*}'"
+    else
+      uid="$(cut -d: -f3 <<< "$ent")"
+      if ! [[ "$uid" =~ ^[0-9]+$ ]]; then why="bad uid '$uid'"
+      elif [ "$uid" = 0 ] || [ "$uid" = 65534 ] || [ "$uid" -lt "$uid_min" ] || [ "$uid" -gt "$uid_max" ]; then
+        why="uid $uid: only a login account (uid $uid_min to $uid_max, not root or nobody) may be a client"
+      elif r="$(uid_in_subuid "$uid" "$u" "$uid")"; then
+        why="uid $uid lies in $r's subordinate uids (/etc/subuid): its containers could act as $u"
+      fi
     fi
+    if [ -n "$why" ]; then echo "airlock-envoy-apply: ${CLIENT_AT[$l]}: client $u of $l: $why" >&2; BAD+=("$l"); continue; fi
     CLIENT_UID[$l]=$uid
   done
+  [ "${#BAD[@]}" = 0 ]
 }
 
 listing() {
@@ -1200,9 +1227,13 @@ resolvers() {  # nameserver addresses in /etc/resolv.conf, all of them (Envoy's 
 
 # Listener $1's box socket unit drop-in: where its socket is, and who may reach it. The user's
 # directory is root's, 0700 with an ACL letting that uid alone enter it (no group to get
-# wrong), recreated with it on every socket start; the socket's ACL lets that uid alone
-# connect. Root owns the directory and everything in it, so nothing running as the user can
-# swap the socket (claude-airlock requires that), and no other user can even see its sockets.
+# wrong), made (if missing) and its ACL set on every socket start; the socket's ACL lets that
+# uid alone connect. Root owns the directory and everything in it, so nothing running as the
+# user can swap the socket (claude-airlock requires that), and no other user can enter it,
+# list it or reach a socket in it. Names are not secret: user and listener names show in
+# /run/airlock-envoy, in these drop-ins and through systemd. At start (at boot too) the name
+# must still have the uid the apply saw, or the socket does not start: a deleted user's uid
+# given to someone else does not inherit the sockets.
 socket_dropin_path() { printf '/etc/systemd/system/airlock-envoy-proxy@%s.socket.d/client.conf' "$1"; }
 render_socket_dropin() {
   local l=$1 u=${CLIENT[$1]} uid=${CLIENT_UID[$1]} d acl
@@ -1213,8 +1244,9 @@ render_socket_dropin() {
 # Listener $l's box socket, for $u (uid $uid) alone.
 [Socket]
 ListenStream=$d/$l.sock
+ExecStartPre=/bin/sh -c '[ "\$\$(getent passwd $u | cut -d: -f3)" = $uid ]'
 ExecStartPre=/usr/bin/install -d -m 0755 -o root -g root $SOCK_DIR
-ExecStartPre=/usr/bin/install -d -m 0700 -o root -g root $d
+ExecStartPre=/usr/bin/mkdir -p -m 0700 $d
 ExecStartPre=$acl --set u::rwx,g::---,o::---,u:$uid:r-x $d
 ExecStartPost=$acl --set u::rw-,g::---,o::---,u:$uid:rw- $d/$l.sock
 # Its client manifest, next to it and gone with it; airlock-envoy-apply keeps the /etc copy.
@@ -1230,7 +1262,7 @@ case "$mode" in
     render_clients "$clients_of"; exit 0 ;;
   render-socket-dropin)
     in_sockets "$clients_of" || die "no listener '$clients_of' with a client"
-    resolve_clients; render_socket_dropin "$clients_of"; exit 0 ;;
+    resolve_clients || exit 1; render_socket_dropin "$clients_of"; exit 0 ;;
   render-web) render_web "$WEB_LOG"; exit 0 ;;
   render-web-dropin) render_web_dropin; exit 0 ;;
   render) render "$LOG"; exit 0 ;;
@@ -1241,7 +1273,7 @@ case "$mode" in
       web_ok=1
       # As root: each socket's drop-in is this site file's (it names the user and the uid).
       if [ "$(id -u)" = 0 ]; then
-        ( resolve_clients 2>/dev/null; for l in "${SOCKETS[@]}"; do
+        ( resolve_clients 2>/dev/null || exit 1; for l in "${SOCKETS[@]}"; do
             [ -r "$(socket_dropin_path "$l")" ] && [ "$(render_socket_dropin "$l" | sha256sum)" = "$(sha256sum < "$(socket_dropin_path "$l")")" ] || exit 1
           done ) || web_ok=0
       fi
@@ -1260,11 +1292,26 @@ esac
 
 # ---- check and apply ------------------------------------------------------------------------
 
-resolve_clients
-[ -x "$ENVOY" ] || die "no Envoy at $ENVOY (install/install-envoy.sh)"
 SOCKET_UNIT=/etc/systemd/system/airlock-envoy-proxy@.socket
+[ "$mode" != apply ] || lock
+if ! resolve_clients; then
+  # Fail closed: a socket whose applied client is the one refused (deleted, renumbered, now
+  # inside someone's subordinate uids) stops now, whatever else is refused. A site file that
+  # names a new client that is refused (a typo) leaves the applied one's socket alone.
+  if [ "$mode" = apply ]; then
+    for l in "${BAD[@]}"; do
+      f="$(socket_dropin_path "$l")"
+      [ -f "$f" ] || continue
+      [ "$(sed -n 's#^ListenStream='"$SOCK_DIR"'/\([^/]*\)/.*#\1#p' "$f")" = "${CLIENT[$l]}" ] || continue
+      systemctl disable --quiet --now "airlock-envoy-proxy@$l.socket" 2>/dev/null || true
+      systemctl stop "airlock-envoy-proxy@$l.service" 2>/dev/null || true
+      echo "==> Stopped listener $l's socket: its client is refused (above); it stays off until an apply succeeds" >&2
+    done
+  fi
+  die "nothing else was changed"
+fi
+[ -x "$ENVOY" ] || die "no Envoy at $ENVOY (install/install-envoy.sh)"
 if [ "$mode" = apply ]; then
-  lock
   getent passwd airlock-envoy >/dev/null || die "no airlock-envoy account: run install/install-service.sh first"
   # Units from before per-user sockets listen in /run/airlock-envoy/ itself, for one global
   # client: this version's sockets would not start with them.
@@ -1362,6 +1409,26 @@ elif [ -e "$STOPPED" ]; then held=1; fi
 
 same() { [ "$(sha256sum < "$1")" = "$(sha256sum < "$2")" ]; }   # no cmp on minimal systems
 
+# A socket whose drop-in changes (a new user, a new uid) stops before any Envoy runs the new
+# config: until then its old socket, still the old user's, would lead into the listener as it
+# now is (another user's reach, another user's credential). It starts at its new place once
+# Envoy runs the new config, or again as it was if the previous config is put back; an apply
+# that stops in between leaves it stopped.
+early=()
+for l in "${SOCKETS[@]}"; do
+  render_socket_dropin "$l" > "$work/$l.dropin"
+  f="$(socket_dropin_path "$l")"
+  { [ -f "$f" ] && ! same "$work/$l.dropin" "$f"; } || continue
+  systemctl is-active --quiet "airlock-envoy-proxy@$l.socket" || continue
+  echo "==> Listener $l: its socket is now $(sock_path "$l") (boxes set to the old one need a relaunch)"
+  systemctl stop "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service"
+  early+=("$l")
+done
+reopen_early() {  # the previous config is back: so are the sockets stopped above, unchanged
+  local l
+  for l in "${early[@]}"; do systemctl start "airlock-envoy-proxy@$l.socket" || true; done
+}
+
 # The web Envoy first, so web tunnels work as soon as the main Envoy routes them. Its kernel
 # filter is the unit's built-in deny list plus the site drop-in; the drop-in is root's, 0644.
 put_dropin() { install -d -m 0755 "${WEB_DROPIN%/*}"; install -m 0644 -o root -g root "$1" "$WEB_DROPIN.new" && mv -f "$WEB_DROPIN.new" "$WEB_DROPIN"; }
@@ -1385,7 +1452,7 @@ if any_web; then
         inst "$work/envoy-web.yaml.prev" "$ETC/envoy-web.yaml"
         if [ -f "$work/web-dropin.prev" ]; then put_dropin "$work/web-dropin.prev"; systemctl daemon-reload; fi
         if restart_web; then
-          undo_start
+          undo_start; [ "$start" = 1 ] || reopen_early
           die "airlock-envoy-web did not start with the new config; the previous one is back (journalctl -u airlock-envoy-web)"
         fi
       fi
@@ -1417,7 +1484,7 @@ elif [ "$changed" = 1 ] || [ "$restart" = 1 ] || ! systemctl is-active --quiet a
     if [ -f "$work/envoy.yaml.prev" ]; then
       inst "$work/envoy.yaml.prev" "$ETC/envoy.yaml"
       if restart_envoy; then
-        undo_start
+        undo_start; [ "$start" = 1 ] || reopen_early
         die "airlock-envoy did not start with the new config; the previous one is back (journalctl -u airlock-envoy)"
       fi
       undo_start
@@ -1452,12 +1519,8 @@ if [ "$from_elsewhere" = 1 ]; then printf '%s\n' "$site_text" > "$work/site.conf
 # below, as a new socket file.
 reload=0
 for l in "${SOCKETS[@]}"; do
-  render_socket_dropin "$l" > "$work/$l.dropin"
   f="$(socket_dropin_path "$l")"
   if [ -f "$f" ] && same "$work/$l.dropin" "$f"; then continue; fi
-  if [ -f "$f" ] && systemctl is-active --quiet "airlock-envoy-proxy@$l.socket"; then
-    echo "==> Listener $l: its socket is now $(sock_path "$l") (boxes set to the old one need a relaunch)"
-  fi
   systemctl stop "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service" 2>/dev/null || true
   install -d -m 0755 -o root -g root "${f%/*}"
   install -m 0644 -o root -g root "$work/$l.dropin" "$f.new" && mv -f "$f.new" "$f"

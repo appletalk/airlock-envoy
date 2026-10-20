@@ -180,8 +180,16 @@ client infra alice
   may connect, exactly one per listener. Its socket is `/run/airlock-envoy/<user>/<listener>.sock`
   in a directory only that uid may enter (root's, 0700 with an ACL, so no group membership
   matters and nothing running as the user can swap the socket), with an ACL for that uid alone.
-  The user must exist and be a login account (uid `UID_MIN` from `/etc/login.defs`, else 1000,
-  and up; not root or nobody), checked at `--check` and apply; the ACLs name it by uid. A
+  Names are not secret: other users see user and listener names (in `/run/airlock-envoy/`, the
+  units' drop-ins, systemd), but cannot enter, list or connect.
+  The user must exist and be a login account (uid `UID_MIN` to `UID_MAX` from
+  `/etc/login.defs`, else 1000 to 60000; not root or nobody), outside every other user's
+  subordinate uids in `/etc/subuid` (whose rootless containers could take that uid on, and
+  with it the sockets; ranges served by NSS instead of the file are not seen), checked at
+  `--check` and apply; the ACLs name it by uid, and the socket starts (at boot too) only while
+  the name still has that uid. Before deleting or renumbering a client, take its `client`
+  lines out and apply; an apply that finds the applied client gone, renumbered or inside
+  someone's subordinate uids refuses and stops that listener's socket. A
   listener that another one includes may go without a client: it is then a definition only,
   with no socket, Envoy listener or upstreams of its own (the built-in `anthropic` is one). A
   listener that nothing includes must have a client, so a forgotten line is an error, not a
@@ -208,8 +216,10 @@ client infra alice
 service account), prints the change in allowed destinations against the last apply, swaps the
 config in atomically and restarts Envoy (only if the config changed or Envoy is down; with the
 kill switch on, nothing is started). Then it writes each socket's drop-in, starts a socket
-for each new listener, moves the socket of a listener whose user changed (stopped, then
-started in the new user's directory: boxes set to the old path need a relaunch), and removes
+for each new listener, moves the socket of a listener whose user changed (stopped before
+any Envoy runs the new config, so the old user's box never reaches the listener as it now is;
+started in the new user's directory once Envoy runs it: boxes set to the old path need a
+relaunch), and removes
 the socket of each listener that is gone (and a user's directory once it has none), so a box
 set to it no longer launches. If Envoy does not start with the new config, the previous one
 goes back.
