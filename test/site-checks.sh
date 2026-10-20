@@ -191,7 +191,7 @@ slot; { mkdir -p /tmp/ghc; r="$(GH_CONFIG_DIR=/tmp/ghc GH_TOKEN=dummy sh -c "gh 
   verdict "gh over the socket reaches GitHub with the injected (dummy) credential" "*Bad credentials*" "$r" > "$f"; } &
 pids+=($!)
 slot; { r="$(curl -s -x http://127.0.0.1:3132 -H "X-Envoy-Upstream-Rq-Timeout-Ms: 1" -H "X-Envoy-Box: marker-e" -H "X-Forwarded-For: 10.9.9.9" -H "X-Forwarded-Host: marker-h" \
-    -H "Forwarded: for=marker-f" -H "X-HTTP-Method-Override: DELETE" -H "X-Method-Override: DELETE" http://httpbin.org/anything/headers | tr -d "\n")"
+    -H "Forwarded: for=marker-f" -H "Sudo: marker-s" -H "X-HTTP-Method-Override: DELETE" -H "X-Method-Override: DELETE" http://httpbin.org/anything/headers | tr -d "\n")"
   if [[ "$r" == *"\"url\""* && "$r" != *X-Envoy* && "$r" != *10.9.9.9* && "$r" != *marker-* && "$r" != *Override* ]]; then r="none reached the host"; fi
   verdict "box-sent x-envoy-*, forwarding and method-override headers stripped" "none reached the host" "${r:0:300}" > "$f"; } &
 pids+=($!)
@@ -233,10 +233,15 @@ for c in "git info/refs:GET:/o/r.git/info/refs:404" "git receive-pack:POST:/o/r.
          "hooks:POST:/api/v1/repos/o/r/hooks:403" "repo settings:PATCH:/api/v1/repos/o/r:403" "repo delete:DELETE:/api/v1/repos/o/r:403" \
          "tokens:POST:/api/v1/users/u/tokens:403" "keys:POST:/api/v1/user/keys:403" "admin:POST:/api/v1/admin/users:403" \
          "web UI:GET:/user/settings:403" "api internal:GET:/api/internal/x:403" "release:POST:/api/v1/repos/o/r/releases:403" \
-         "pr via dot segments to merge:POST:/api/v1/repos/o/r/pulls/../pulls/1/merge:403"; do
+         "pr via dot segments to merge:POST:/api/v1/repos/o/r/pulls/../pulls/1/merge:403" \
+         "token in the query:GET:/api/v1/repos/o/r?token=x:403" "access_token in the query:POST:/o/r.git/git-receive-pack?access_token=x:403" \
+         "sudo in the query:GET:/api/v1/user?sudo=someone:403" "wiki push:POST:/o/r.wiki.git/git-receive-pack:403" \
+         "wiki fetch:GET:/o/r.wiki/info/refs:403"; do
   IFS=: read -r cn cm cp cw <<< "$c"
   check 3130 "forgejo: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" "http://httpbin.org$cp"
 done
+check 3130 "forgejo: a form body (token= could ride in it) refused" "$P http=403 exit=0" --data "token=x&body=hi" http://httpbin.org/api/v1/repos/o/r/issues/1/comments
+check 3130 "forgejo: a JSON comment passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{}" http://httpbin.org/api/v1/repos/o/r/issues/1/comments
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle
 # Alone: 40 GraphQL requests at once on one listener, 20 to each of two GitHub-rule hosts; one

@@ -461,6 +461,7 @@ EOR
     # comments, labels, reviewers on issues and PRs. Refused: merge, reviews (approve), files
     # written through the API, branches, tags, releases, settings, hooks, keys, deletes, admin.
     forgejo) cat <<'EOR'
+wiki * regex /[^/]+/[^/]+\\.wiki(\\.git)?/.* deny
 info-refs GET regex /[^/]+/[^/]+/info/refs long
 pack POST regex /[^/]+/[^/]+/git-(upload|receive)-pack long
 read GET|HEAD prefix /api/v1/
@@ -514,6 +515,24 @@ http_vhost() {
             - name: "http-$id"
               domains: ["$h", "$h:80"]
               routes:
+EOF
+  # Forgejo reads a token from the query string or a form body before the Authorization header
+  # Envoy sets, so a box holding another token could act as its owner: refused, with sudo.
+  [ "$rules" != forgejo ] || cat <<EOF
+              - name: "$id-query-token"
+                match: { prefix: "/", query_parameters: [{ name: "token", present_match: true }] }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: no token parameters here\\n" } }
+              - name: "$id-query-access-token"
+                match: { prefix: "/", query_parameters: [{ name: "access_token", present_match: true }] }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: no token parameters here\\n" } }
+              - name: "$id-query-sudo"
+                match: { prefix: "/", query_parameters: [{ name: "sudo", present_match: true }] }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: no sudo here\\n" } }
+              - name: "$id-form-body"
+                match:
+                  prefix: "/"
+                  headers: [{ name: "content-type", string_match: { safe_regex: { regex: "(?i)\\\\s*(application/x-www-form-urlencoded|multipart/form-data).*" } } }]
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: no form bodies here (JSON only)\\n" } }
 EOF
   while read -r name methods kind pat flag; do
     [ -n "$name" ] || continue
@@ -807,7 +826,8 @@ EOF
                 request_mutations:
                 - remove_on_match: { key_matcher: { prefix: "x-envoy-", ignore_case: true } }
                 - remove_on_match: { key_matcher: { prefix: "x-forwarded-", ignore_case: true } }
-                - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)forwarded|x-real-ip|x-client-ip|x-original-url|x-rewrite-url|x-http-method|x-http-method-override|x-method-override|x-request-id" } } }
+                - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)forwarded|x-real-ip|x-client-ip|x-original-url|x-rewrite-url|x-request-id|sudo" } } }
+                - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)x-http-method|x-http-method-override|x-method-override" } } }
 EOF
     http_filters "$l"
     cat <<'EOF'
