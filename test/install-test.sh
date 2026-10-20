@@ -541,11 +541,25 @@ x sh -c 'rm -r /etc/airlock-envoy/clients && touch /etc/airlock-envoy/clients'
 site "http httpbin.org@o rules any credential o-cred" "extra @anthropic example.com:443 http://httpbin.org@o" "client extra other" \
   "o-x @anthropic example.org:443" "client o-x client"
 r=0; x airlock-envoy-apply >/dev/null 2>&1 || r=$?
-ck "a move interrupted after the Envoy restart: the old user's sockets of the moved listeners are already stopped" \
-   '[ "$r" != 0 ] && ! x test -e "$O" && ! x test -e "$E" && [ "$(x systemctl is-active airlock-envoy-proxy@extra.socket)" != active ]'
+x systemctl start sockets.target   # as at a boot before the next apply
+ck "a move interrupted after the Envoy restart: the moved listeners' old sockets are stopped and disabled (a boot brings none back)" \
+   '[ "$r" != 0 ] && ! x test -e "$O" && ! x test -e "$E" && [ "$(x systemctl is-active airlock-envoy-proxy@extra.socket)" != active ] && [ "$(x systemctl is-enabled airlock-envoy-proxy@extra.socket 2>/dev/null)" != enabled ]'
 x rm -f /etc/airlock-envoy/clients
 back_to_base
 ck "...and an apply of the old site puts them back for their users" '[ "$(TUSER=other tunnel "$O" example.org)" = 200 ] && [ "$(tunnel "$E" example.com)" = 200 ]'
+# A move whose main config Envoy won't start: the previous config comes back, and with it the
+# moved socket for its old user (and web, which came with the move, goes again).
+x sh -c 'real="$(readlink -f /usr/local/bin/envoy)"; printf "%s\n" "#!/bin/sh" \
+  "case \" \$* \" in *\" --mode validate \"*) ;; *envoy.yaml*) grep -q nostart /etc/airlock-envoy/envoy.yaml && exit 1 ;; esac" \
+  "exec $real \"\$@\"" > /usr/local/bin/envoy.wrap && chmod 0755 /usr/local/bin/envoy.wrap && mv /usr/local/bin/envoy /usr/local/bin/envoy.real && mv /usr/local/bin/envoy.wrap /usr/local/bin/envoy'
+site "http httpbin.org@o rules any credential o-cred" "extra @anthropic example.com:443 http://httpbin.org@o web" "client extra other" \
+  "o-x @anthropic example.org:443" "client o-x client" "nostart @anthropic" "client nostart client"
+r=0; x airlock-envoy-apply >/dev/null 2>&1 || r=$?
+rc_="$(httpget "$E" http://httpbin.org/anything/rb | sed -n 's/.*"Authorization": "\([^"]*\)".*/\1/p')"
+ck "a move rolled back (main Envoy won't start): each socket back for its old user, its old credential ('$rc_'), web gone again" \
+   '[ "$r" != 0 ] && [ "$rc_" = "Bearer INSTALL-TEST-SECRET-3" ] && [ "$(TUSER=other tunnel "$O" example.org)" = 200 ] && [ "$(x systemctl is-enabled airlock-envoy-proxy@extra.socket)" = enabled ] && ! x test -e /etc/airlock-envoy/envoy-web.yaml && [ "$(x systemctl is-active airlock-envoy-web)" != active ]'
+x mv -f /usr/local/bin/envoy.real /usr/local/bin/envoy
+back_to_base
 # A client inside another user's subordinate uids (whose rootless containers could become
 # it): refused, and its socket stops (fail closed).
 uo="$(x id -u other)"
@@ -554,6 +568,33 @@ out="$(x airlock-envoy-apply 2>&1)" && r=0 || r=$?
 ck "a client whose uid is in another user's /etc/subuid range: refused, its socket stopped, the others left" \
    '[ "$r" != 0 ] && [[ "$out" == *"lies in client"*"subordinate uids"* ]] && ! x test -e "$O" && [ "$(tunnel "$E" example.com)" = 200 ]'
 x cp /root/subuid.keep /etc/subuid
+back_to_base
+# The same range written in hex (shadow reads base 0); a line that can't be read refuses the
+# apply without stopping anything; the service account inside someone's range refuses all.
+x sh -c 'printf "client:0x%x:1\n" "$0" >> /etc/subuid' "$uo"
+out="$(x airlock-envoy-apply 2>&1)" && r=0 || r=$?
+ck "a range in hex is read as shadow reads it: refused" '[ "$r" != 0 ] && [[ "$out" == *"lies in client"* ]]'
+x cp /root/subuid.keep /etc/subuid; back_to_base
+x sh -c 'echo "client:zz:1" >> /etc/subuid'
+out="$(x airlock-envoy-apply 2>&1)" && r=0 || r=$?
+ck "an /etc/subuid line that can't be read: refused, sockets left as they were" \
+   '[ "$r" != 0 ] && [[ "$out" == *"cannot read these /etc/subuid lines"* ]] && [ "$(TUSER=other tunnel "$O" example.org)" = 200 ]'
+x sh -c 'cp /root/subuid.keep /etc/subuid; echo "client:$0:1" >> /etc/subuid' "$(x id -u airlock-envoy)"
+out="$(x airlock-envoy-apply 2>&1)" && r=0 || r=$?
+ck "the airlock-envoy account inside another user's subordinate uids: refused" '[ "$r" != 0 ] && [[ "$out" == *"the airlock-envoy account"* ]]'
+x cp /root/subuid.keep /etc/subuid; back_to_base
+# A client above UID_MAX (a system range: DynamicUser, containers): refused. A user named like
+# a socket file is fine.
+x useradd -M -u 60100 big
+site "extra @anthropic example.com:443" "client extra client" "b-x @anthropic" "client b-x big"
+out="$(x airlock-envoy-apply 2>&1)" && r=0 || r=$?
+ck "a client above UID_MAX: refused" '[ "$r" != 0 ] && [[ "$out" == *"uid 60100: only a login account"* ]]'
+x userdel big
+x useradd -M x.sock
+site "extra @anthropic example.com:443" "client extra client" "xs @anthropic" "client xs x.sock"
+r=0; x airlock-envoy-apply >/dev/null 2>&1 && x airlock-envoy-apply >/dev/null 2>&1 || r=$?
+ck "a user named x.sock: its directory is not swept as a socket file (applies keep working)" '[ "$r" = 0 ] && x test -S /run/airlock-envoy/x.sock/xs.sock'
+x userdel x.sock 2>/dev/null || true
 back_to_base
 # A deleted user: the apply refuses and stops its socket; a new account given its uid does not
 # inherit it, not even when the socket is started by hand (or at boot).
