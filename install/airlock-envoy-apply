@@ -104,7 +104,7 @@ fi
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
 declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
-PRESETS="any git git-read github-api github-issues victoria-logs victoria-metrics"
+PRESETS="any forgejo git git-read github-api github-issues victoria-logs victoria-metrics"
 
 valid_dest() {
   local h p o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -414,8 +414,9 @@ EOF
 
 # ---- plain HTTP: presets, virtual hosts, credentials, upstreams ----------------------------
 # Each preset is default-deny: these routes, in order, then 403. A line is
-#   <name> <methods: regex, or * for any> <prefix|exact|regex> <path> [deny|lua]
-# Paths are matched without the query string. github-api's lua line runs the GraphQL write
+#   <name> <methods: regex, or * for any> <prefix|exact|regex> <path> [deny|lua|long]
+# Paths are matched without the query string. long: no request timeout or stream cap (a clone
+# or push can take long; the idle timeout still applies). github-api's lua line runs the GraphQL write
 # check (install/github-graphql.lua) on that route: GitHub writes go through POST /graphql, so
 # method and path alone can't tell a PR from a merge.
 preset_rules() {
@@ -453,6 +454,21 @@ create POST regex /repos/[^/]+/[^/]+/issues
 issue-sub POST regex /repos/[^/]+/[^/]+/issues/[0-9]+/(comments|labels|assignees)
 edit PATCH regex /repos/[^/]+/[^/]+/issues/[0-9]+
 edit-comment PATCH regex /repos/[^/]+/[^/]+/issues/comments/[0-9]+
+EOR
+    ;;
+    # Forgejo (or Gitea) for a bot account: git fetch and push (which branches it may push is
+    # the server's branch protection), API reads, PR create and edit (title, body, base, state),
+    # comments, labels, reviewers on issues and PRs. Refused: merge, reviews (approve), files
+    # written through the API, branches, tags, releases, settings, hooks, keys, deletes, admin.
+    forgejo) cat <<'EOR'
+info-refs GET regex /[^/]+/[^/]+/info/refs long
+pack POST regex /[^/]+/[^/]+/git-(upload|receive)-pack long
+read GET|HEAD prefix /api/v1/
+create POST regex /api/v1/repos/[^/]+/[^/]+/(pulls|issues)
+issue-sub POST regex /api/v1/repos/[^/]+/[^/]+/issues/[0-9]+/(comments|labels)
+edit PATCH regex /api/v1/repos/[^/]+/[^/]+/(pulls|issues)/[0-9]+
+edit-comment PATCH regex /api/v1/repos/[^/]+/[^/]+/issues/comments/[0-9]+
+reviewers POST regex /api/v1/repos/[^/]+/[^/]+/pulls/[0-9]+/requested_reviewers
 EOR
     ;;
     victoria-logs) echo 'logsql GET|POST prefix /select/logsql/' ;;
@@ -513,7 +529,11 @@ EOF
       printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules\\n" } }\n' "$rules"
       continue
     fi
-    echo "                route: { cluster: \"http-$id\", host_rewrite_literal: \"$h\", timeout: $timeout, idle_timeout: 300s$maxdur }"
+    if [ "${flag:-}" = long ]; then
+      echo "                route: { cluster: \"http-$id\", host_rewrite_literal: \"$h\", timeout: 0s, idle_timeout: 300s }"
+    else
+      echo "                route: { cluster: \"http-$id\", host_rewrite_literal: \"$h\", timeout: $timeout, idle_timeout: 300s$maxdur }"
+    fi
     # The GraphQL check reads the preset's allowlist (and any projects) from the route's metadata.
     [ "${flag:-}" != lua ] || echo "                metadata: { filter_metadata: { github-graphql: { rules: \"$rules\", projects: \"$projects\" } } }"
     if [ -n "$cred" ] || [ "${flag:-}" = lua ]; then
