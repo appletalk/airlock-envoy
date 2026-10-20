@@ -247,9 +247,13 @@ dev   @anthropic web http://api.github.com http://github.com
   `forgejo` (Forgejo or Gitea for a bot account: git fetch and push, API reads, PR create and
   edit including base and state, comments, labels, reviewers; refused: merge, reviews and
   approval, files written through the API, branch and tag API, releases, settings, hooks,
-  keys, tokens, deletes, admin, the web UI. One credential covers git and the API: a token as
-  `--format basic:<bot user>`. Which branches a push may touch is the server's branch
-  protection: a push can create, force-push or delete any branch it isn't protected from),
+  keys, tokens, deletes, admin, the web UI, wiki git, `token`/`access_token`/`sudo` query
+  parameters and form bodies (Forgejo reads a token there before the Authorization header).
+  One credential covers git and the API: a token as `--format basic:<bot user>`. Limits: which
+  branches and tags a push may touch is the server's branch and tag protection (a push can
+  create, force-push or delete any branch or tag not protected); edits reach other people's
+  issues, PRs and comments, not only the bot's (Forgejo keeps the edit history); set
+  `DISABLE_QUERY_AUTH_TOKEN` on the server too),
   `github-issues` (reads; issue create, edit, close, reopen, comments, labels, assignees,
   reactions; no PR writes), `github-api` (the same plus PR create, edit including the base
   branch, close, reopen, draft state, reviewers; refused in both: merge, approve, auto-merge,
