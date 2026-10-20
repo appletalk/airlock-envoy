@@ -187,7 +187,11 @@ client infra alice
   subordinate uids in `/etc/subuid` (whose rootless containers could take that uid on, and
   with it the sockets; ranges served by NSS instead of the file are not seen), checked at
   `--check` and apply; the ACLs name it by uid, and the socket starts (at boot too) only while
-  the name still has that uid. Before deleting or renumbering a client, take its `client`
+  the name still has that uid: make clients local accounts (`/etc/passwd`), since box sockets
+  start early at boot, before a directory service (SSSD, LDAP) answers, and a socket whose
+  user it can't look up then stays down until the next apply. `/etc/subuid` is read as shadow
+  reads it (decimal, hex, octal); a line it can't read refuses the apply. Before deleting or
+  renumbering a client, take its `client`
   lines out and apply; an apply that finds the applied client gone, renumbered or inside
   someone's subordinate uids refuses and stops that listener's socket. A
   listener that another one includes may go without a client: it is then a definition only,

@@ -428,13 +428,27 @@ sock_path() { printf '%s/%s/%s.sock' "$SOCK_DIR" "${CLIENT[$1]}" "$1"; }
 # A uid inside another user's subordinate range (/etc/subuid) is refused: that user's rootless
 # containers can take it on, and with it the client's sockets. Each problem is printed;
 # BAD lists the listeners with one, and the return is 1 if there are any.
-uid_in_subuid() {  # uid_in_subuid <uid> <user>: another user's range holding uid, if any
+# Numbers as shadow reads them (strtoul, base 0): decimal, 0x hex, 0 octal.
+subuid_num() { [[ "$1" =~ ^(0[xX][0-9a-fA-F]{1,8}|0[0-7]{0,11}|[1-9][0-9]{0,9})$ ]] && printf '%d' "$(( $1 ))"; }
+subuid_unparsed() {  # the /etc/subuid lines this script could not read as shadow does (none: 1)
+  local o st c line n=0 bad=1
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1)); line=${line%$'\r'}
+    [[ "$line" =~ ^[[:blank:]]*$ ]] && continue
+    IFS=: read -r o st c <<< "$line"
+    if [ -z "$o" ] || ! subuid_num "${st//[[:blank:]]/}" >/dev/null || ! subuid_num "${c//[[:blank:]]/}" >/dev/null; then
+      echo "/etc/subuid:$n: $line"; bad=0
+    fi
+  done < <(cat /etc/subuid 2>/dev/null)
+  return "$bad"
+}
+uid_in_subuid() {  # uid_in_subuid <uid> <user> [<uid>]: another user's range holding uid, if any
   local o st c
   while IFS=: read -r o st c; do
-    [[ "$st" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ ]] || continue
+    if ! st="$(subuid_num "${st//[[:blank:]]/}")" || ! c="$(subuid_num "${c//[[:blank:]]/}")"; then continue; fi
     [ "$o" != "$2" ] && [ "$o" != "${3:-x}" ] || continue
     if (( $1 >= st && $1 < st + c )); then printf '%s (%s-%s)' "$o" "$st" "$((st + c - 1))"; return 0; fi
-  done < <(cat /etc/subuid 2>/dev/null)
+  done < <(tr -d '\r' < /etc/subuid 2>/dev/null)
   return 1
 }
 BAD=()
@@ -445,6 +459,11 @@ resolve_clients() {
   uid_max="$(awk '$1 == "UID_MAX" { print $2 }' /etc/login.defs 2>/dev/null)"
   case "$uid_max" in ''|*[!0-9]*) uid_max=60000 ;; esac
   BAD=()
+  # A line this can't read is a range it can't check: refuse (nothing is stopped for it).
+  if r="$(subuid_unparsed)"; then
+    printf 'airlock-envoy-apply: cannot read these /etc/subuid lines, so no client can be checked against them:\n%s\n' "$r" >&2
+    return 1
+  fi
   # The service account owns every socket: no one's containers may become it.
   if uid="$(id -u airlock-envoy 2>/dev/null)" && r="$(uid_in_subuid "$uid" airlock-envoy)"; then
     echo "airlock-envoy-apply: the airlock-envoy account (uid $uid) lies in $r's subordinate uids: $r could reach every socket" >&2
@@ -1413,7 +1432,7 @@ same() { [ "$(sha256sum < "$1")" = "$(sha256sum < "$2")" ]; }   # no cmp on mini
 # config: until then its old socket, still the old user's, would lead into the listener as it
 # now is (another user's reach, another user's credential). It starts at its new place once
 # Envoy runs the new config, or again as it was if the previous config is put back; an apply
-# that stops in between leaves it stopped.
+# that stops in between leaves it stopped and disabled, across a boot too.
 early=()
 for l in "${SOCKETS[@]}"; do
   render_socket_dropin "$l" > "$work/$l.dropin"
@@ -1421,12 +1440,15 @@ for l in "${SOCKETS[@]}"; do
   { [ -f "$f" ] && ! same "$work/$l.dropin" "$f"; } || continue
   systemctl is-active --quiet "airlock-envoy-proxy@$l.socket" || continue
   echo "==> Listener $l: its socket is now $(sock_path "$l") (boxes set to the old one need a relaunch)"
-  systemctl stop "airlock-envoy-proxy@$l.socket" "airlock-envoy-proxy@$l.service"
+  # Disabled too: its drop-in on disk is still the old one until the new one is written
+  # below, and a boot (sockets.target) in between must not bring it back for the old user.
+  systemctl disable --quiet --now "airlock-envoy-proxy@$l.socket"
+  systemctl stop "airlock-envoy-proxy@$l.service"
   early+=("$l")
 done
 reopen_early() {  # the previous config is back: so are the sockets stopped above, unchanged
   local l
-  for l in "${early[@]}"; do systemctl start "airlock-envoy-proxy@$l.socket" || true; done
+  for l in "${early[@]}"; do systemctl enable --quiet --now "airlock-envoy-proxy@$l.socket" || true; done
 }
 
 # The web Envoy first, so web tunnels work as soon as the main Envoy routes them. Its kernel
@@ -1452,7 +1474,7 @@ if any_web; then
         inst "$work/envoy-web.yaml.prev" "$ETC/envoy-web.yaml"
         if [ -f "$work/web-dropin.prev" ]; then put_dropin "$work/web-dropin.prev"; systemctl daemon-reload; fi
         if restart_web; then
-          undo_start; [ "$start" = 1 ] || reopen_early
+          was=$lifted; undo_start; [ "$was" = 1 ] || reopen_early
           die "airlock-envoy-web did not start with the new config; the previous one is back (journalctl -u airlock-envoy-web)"
         fi
       fi
@@ -1467,6 +1489,21 @@ if any_web; then
   fi
 fi
 
+# The main Envoy rolled back: the web Envoy goes back too if this apply changed it, so the
+# two agree (which listener, which user) as they did before.
+rollback_web() {
+  [ "${web_changed:-0}" = 1 ] || [ "${dropin_changed:-0}" = 1 ] || return 0
+  if [ -f "$work/envoy-web.yaml.prev" ]; then
+    inst "$work/envoy-web.yaml.prev" "$ETC/envoy-web.yaml"
+    if [ -f "$work/web-dropin.prev" ]; then put_dropin "$work/web-dropin.prev"; else rm -f "$WEB_DROPIN"; fi
+    systemctl daemon-reload
+    { systemctl reset-failed airlock-envoy-web 2>/dev/null || true; systemctl restart airlock-envoy-web; } || true
+  else   # web came with this apply: it goes with it
+    systemctl disable --quiet --now airlock-envoy-web 2>/dev/null || true
+    rm -f "$ETC/envoy-web.yaml" "$WEB_DROPIN"; rmdir "${WEB_DROPIN%/*}" 2>/dev/null || true
+    systemctl daemon-reload
+  fi
+}
 changed=1
 if [ -f "$ETC/envoy.yaml" ] && same "$work/envoy.yaml" "$ETC/envoy.yaml"; then changed=0; fi
 [ -f "$ETC/envoy.yaml" ] && cp -p "$ETC/envoy.yaml" "$work/envoy.yaml.prev"
@@ -1483,8 +1520,9 @@ elif [ "$changed" = 1 ] || [ "$restart" = 1 ] || ! systemctl is-active --quiet a
   if ! restart_envoy; then
     if [ -f "$work/envoy.yaml.prev" ]; then
       inst "$work/envoy.yaml.prev" "$ETC/envoy.yaml"
+      rollback_web
       if restart_envoy; then
-        undo_start; [ "$start" = 1 ] || reopen_early
+        was=$lifted; undo_start; [ "$was" = 1 ] || reopen_early
         die "airlock-envoy did not start with the new config; the previous one is back (journalctl -u airlock-envoy)"
       fi
       undo_start
@@ -1566,7 +1604,9 @@ done
 # gone or moved, the directories of users with no listener left, and the flat files of
 # versions before per-user directories. Only names this script makes are touched.
 shopt -s nullglob
-rm -f "$SOCK_DIR"/*.sock "$SOCK_DIR"/*.clients "$SOCK_DIR"/*.clients.new
+for f in "$SOCK_DIR"/*.sock "$SOCK_DIR"/*.clients "$SOCK_DIR"/*.clients.new; do
+  [ -d "$f" ] || rm -f "$f"   # a user's directory may have such a name (user x.sock)
+done
 for d in "$SOCK_DIR"/*/; do
   d=${d%/}; u=${d##*/}
   [ ! -L "$d" ] || continue
