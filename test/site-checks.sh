@@ -16,7 +16,7 @@ webstart=$(( $(readweblog | wc -l) + 1 ))
 podman run --rm --network none --userns keep-id --user "$(id -u):$(id -g)" \
   -v "$DIR/t-site.sock:/run/proxy/t-site.sock${SOCK_MOUNT_OPTS-:z}" \
   -v "$DIR/t-other.sock:/run/proxy/t-other.sock${SOCK_MOUNT_OPTS-:z}" \
-  -v "$DIR/anthropic.sock:/run/proxy/anthropic.sock${SOCK_MOUNT_OPTS-:z}" \
+  -v "$DIR/t-anthropic.sock:/run/proxy/anthropic.sock${SOCK_MOUNT_OPTS-:z}" \
   -v "$DIR/t-web.sock:/run/proxy/t-web.sock${SOCK_MOUNT_OPTS-:z}" \
   -v "$DIR/t-http.sock:/run/proxy/t-http.sock${SOCK_MOUNT_OPTS-:z}" \
   --entrypoint bash localhost/airlock-envoy-spike-client:test -c '
@@ -281,7 +281,7 @@ logchecks() {
   }
   lc "t-site allowed the address entry by its route" '.listener == "t-site" and .route == "allow-1.1.1.1" and .status == 200'
   lc "t-site allowed the port-1012 host" '.listener == "t-site" and .route == "allow-tls-v1-2.badssl.com:1012" and .status == 200'
-  lc "anthropic refused example.com" '.listener == "anthropic" and .authority == "example.com:443" and .route == "deny-connect"'
+  lc "t-anthropic refused example.com" '.listener == "t-anthropic" and .authority == "example.com:443" and .route == "deny-connect"'
   lc "t-other refused api.anthropic.com" '.listener == "t-other" and .authority == "api.anthropic.com:443" and .route == "deny-connect"'
   lc "an SNI sent to the address entry: refused by RBAC, with the SNI" '.sni == "one.one.one.one" and .route == "tls-no-sni" and .details == "rbac_access_denied_matched_policy[server-name-sent]"'
   lc "wrong SNI on a host entry: NR, with the SNI" '.sni == "www.example.com" and .flags == "NR"'

@@ -39,7 +39,7 @@ graphql() {  # the GitHub GraphQL write check, under LuaJIT as in Envoy
 { run shellcheck lint
   run apply-parse test/apply-parse.sh
   run graphql graphql
-  with_envoy t2 "" test/t2-checks.sh
+  with_envoy t2 test/t2.conf test/t2-checks.sh
   with_envoy site-checks test/site.conf test/site-checks.sh
 } &
 order=(shellcheck apply-parse graphql t2 site-checks "${order[@]}")
