@@ -219,6 +219,17 @@ got="$(RESOLV_CONF="$work/resolv" "$apply" --render-web-dropin "$work/site" | gr
 if [ "$got" = "$want" ]; then echo "ok   web drop-in: site networks denied, resolvers allowed exactly"
 else echo "FAIL web drop-in, got:"; echo "$got"; fails=$((fails+1)); fi
 
+# Box listeners: idle connections close after 60 s; the other ways to authenticate are
+# stripped with the rest (site-checks.sh sends them through a live Envoy).
+printf 'http g.example.com rules forgejo credential fj\nb http://g.example.com\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+if grep -q 'common_http_protocol_options: { headers_with_underscores_action: REJECT_REQUEST, idle_timeout: 60s }' <<< "$r" \
+   && grep -q 'key_matcher: { prefix: "x-webauth", ignore_case: true }' <<< "$r" && grep -q 'key_matcher: { prefix: "x-authentik-", ignore_case: true }' <<< "$r" \
+   && grep -q 'key_matcher: { prefix: "x-auth-request-", ignore_case: true }' <<< "$r" \
+   && grep -qF 'regex: "(?i)cookie2?|signature(-input)?|proxy-authorization|(x-)?remote-user" }' <<< "$r"; then
+  echo "ok   box listeners: 60 s idle timeout; cookies, signatures, proxy and forward-auth identity headers stripped"
+else echo "FAIL box listener idle timeout or header strip"; fails=$((fails+1)); fi
+
 # Clients: one user per listener; a listener nothing includes needs one; the built-in has none.
 refuses "client: too few words"        "want: client"          'a example.com:443\nclient a\n'
 refuses "client: too many words"       "want: client"          'a example.com:443\nclient a t u\n'

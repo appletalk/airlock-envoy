@@ -875,7 +875,10 @@ EOF
           # A header name with an underscore is refused (400): Rack and CGI servers read
           # x_http_method_override as x-http-method-override, so it would slip past the strip
           # below (and past the GraphQL check's content-type).
-          common_http_protocol_options: { headers_with_underscores_action: REJECT_REQUEST }
+          # A connection with no request open closes about a minute after its last one (Envoy's
+          # default is an hour), so idle keep-alives cannot hold the listener's connections. A
+          # tunnel is an open request: it is not cut by this.
+          common_http_protocol_options: { headers_with_underscores_action: REJECT_REQUEST, idle_timeout: 60s }
           # No x-request-id of Envoy's own; a box-sent one is stripped below.
           generate_request_id: false
           # Idle tunnels are cut by tcp_proxy's idle_timeout (1 h, on the SNI listeners), not here.
@@ -960,8 +963,11 @@ EOF
                 format_string: { text_format_source: { inline_string: "%CONNECTION_ID%" } }
                 shared_with_upstream: ONCE
           # Headers a box may not send on: Envoy's own (x-envoy-*: retries, timeouts), the
-          # forwarding ones, and method overrides (a GET the rules allowed must not act as a
-          # write upstream). Before the router and the injectors.
+          # forwarding ones, method overrides (a GET the rules allowed must not act as a write
+          # upstream), and other ways to authenticate than the injected credential: cookies,
+          # HTTP signatures, the proxy's own credential, and the identity headers reverse-proxy
+          # and forward auth set (an upstream that trusts them would take the box's word).
+          # Before the router and the injectors.
           - name: strip-box-headers
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
@@ -969,7 +975,11 @@ EOF
                 request_mutations:
                 - remove_on_match: { key_matcher: { prefix: "x-envoy-", ignore_case: true } }
                 - remove_on_match: { key_matcher: { prefix: "x-forwarded-", ignore_case: true } }
+                - remove_on_match: { key_matcher: { prefix: "x-webauth", ignore_case: true } }
+                - remove_on_match: { key_matcher: { prefix: "x-auth-request-", ignore_case: true } }
+                - remove_on_match: { key_matcher: { prefix: "x-authentik-", ignore_case: true } }
                 - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)forwarded|x-real-ip|x-client-ip|x-original-url|x-rewrite-url|x-request-id|sudo" } } }
+                - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)cookie2?|signature(-input)?|proxy-authorization|(x-)?remote-user" } } }
                 - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)x-http-method|x-http-method-override|x-method-override" } } }
 EOF
     http_filters "$l"

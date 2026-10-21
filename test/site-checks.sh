@@ -191,9 +191,13 @@ slot; { mkdir -p /tmp/ghc; r="$(GH_CONFIG_DIR=/tmp/ghc GH_TOKEN=dummy sh -c "gh 
   verdict "gh over the socket reaches GitHub with the injected (dummy) credential" "*Bad credentials*" "$r" > "$f"; } &
 pids+=($!)
 slot; { r="$(curl -s -x http://127.0.0.1:3132 -H "X-Envoy-Upstream-Rq-Timeout-Ms: 1" -H "X-Envoy-Box: marker-e" -H "X-Forwarded-For: 10.9.9.9" -H "X-Forwarded-Host: marker-h" \
-    -H "Forwarded: for=marker-f" -H "Sudo: marker-s" -H "X-HTTP-Method-Override: DELETE" -H "X-Method-Override: DELETE" http://httpbin.org/anything/headers | tr -d "\n")"
+    -H "Forwarded: for=marker-f" -H "Sudo: marker-s" -H "X-HTTP-Method-Override: DELETE" -H "X-Method-Override: DELETE" \
+    -H "Cookie: c=marker-c" -H "Cookie2: marker-c2" -H "Signature: keyId=marker-k" -H "Signature-Input: sig=marker-si" \
+    -H "Proxy-Authorization: Basic marker-pa" -H "X-WEBAUTH-USER: marker-w" -H "X-Webauth: marker-w2" -H "Remote-User: marker-ru" \
+    -H "X-Remote-User: marker-xru" -H "X-Auth-Request-User: marker-ar" -H "X-authentik-username: marker-ak" \
+    http://httpbin.org/anything/headers | tr -d "\n")"
   if [[ "$r" == *"\"url\""* && "$r" != *X-Envoy* && "$r" != *10.9.9.9* && "$r" != *marker-* && "$r" != *Override* ]]; then r="none reached the host"; fi
-  verdict "box-sent x-envoy-*, forwarding and method-override headers stripped" "none reached the host" "${r:0:300}" > "$f"; } &
+  verdict "box-sent x-envoy-*, forwarding, method-override and other authentication headers stripped" "none reached the host" "${r:0:300}" > "$f"; } &
 pids+=($!)
 slot; { r="$(head -c 70000 /dev/zero | tr "\0" a | sed "s/^/{\"query\":\"{ viewer { login } }\",\"v\":\"/; s/\$/\"}/" | \
     curl -s -o /dev/null -w "http=%{http_code}" -x http://127.0.0.1:3132 -H "Content-Type: application/json" -H "Expect: 100-continue" --data-binary @- http://httpbin.org/graphql)"

@@ -341,8 +341,12 @@ dev   @anthropic web http://api.github.com http://github.com
 - Paths are normalized before the rules see them (dot segments, merged slashes) and an escaped
   slash is refused. Headers a box sends that steer Envoy or claim a client or method are
   removed before anything else: `x-envoy-*`, `x-forwarded-*`, `forwarded`, `x-real-ip`,
-  `x-client-ip`, `x-original-url`, `x-rewrite-url`, `x-request-id` and the method overrides
-  (`x-http-method(-override)`, `x-method-override`). A header name with an underscore is
+  `x-client-ip`, `x-original-url`, `x-rewrite-url`, `x-request-id`, the method overrides
+  (`x-http-method(-override)`, `x-method-override`), and other ways to authenticate than the
+  injected credential: `cookie`, `cookie2`, `signature`, `signature-input`,
+  `proxy-authorization`, and the identity headers of reverse-proxy and forward auth
+  (`x-webauth*`, `remote-user`, `x-remote-user`, `x-auth-request-*`, `x-authentik-*`). A
+  header name with an underscore is
   refused outright (400): Rack and CGI servers read `x_http_method_override` as the dashed
   name. Envoy adds no headers of its own.
 - **Credentials**: `printf %s "$TOKEN" | sudo airlock-envoy-cred set github-api` (or from a
@@ -400,9 +404,10 @@ another SNI reached those sites.
 Limits: 128 connections from boxes at once per listener, so a profile at its cap does not
 starve another (refusals over the cap show only in Envoy's stats,
 `connection_limit.<listener>.limited_connections`, not in the access log; `site-checks.sh`
-tests it), 10 s to send request headers,
-and a tunnel is cut after 1 h without bytes. In practice the CDN closes an idle TLS connection
-much sooner (about 15 s without a request).
+tests it), 10 s to send request headers, a connection with no request open closed about a
+minute after its last one (so idle keep-alives can't hold the cap), and a tunnel is cut after
+1 h without bytes. In practice the CDN closes an idle TLS connection much sooner (about 15 s
+without a request).
 
 ## How web decides
 
