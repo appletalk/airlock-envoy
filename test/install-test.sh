@@ -54,8 +54,10 @@ cleanup() {
 trap cleanup EXIT
 pid="$(podman inspect -f '{{.State.Pid}}' "$name")"
 # Root in the container (all its namespaces, no supplementary groups, a clean environment).
+# setsid: no controlling terminal, so a confirmation prompt (which opens /dev/tty) is refused as
+# on a host with none, instead of waiting on the terminal the test was started from.
 x() {
-  nsenter -t "$pid" -m -u -i -n -p -C -r -w setpriv --clear-groups \
+  setsid -w nsenter -t "$pid" -m -u -i -n -p -C -r -w setpriv --clear-groups \
     env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 "$@"
 }
 for _ in $(seq 100); do
