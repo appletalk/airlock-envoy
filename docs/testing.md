@@ -1,14 +1,15 @@
 # Testing
 
-Every suite runs as your own user with rootless podman, except `apply-parse.sh`, which needs
-neither.
+Every suite runs as your own user with rootless podman, except `apply-parse.sh`, shellcheck
+and the GraphQL check, which need no podman.
 
 | Command | What |
 |---|---|
 | `test/run-all.sh [distro...]` | Everything at once (below) |
 | `test/install-test.sh <distro> [envoy version]` | The whole install in a systemd-booted container |
 | `test/apply-parse.sh` | The site file parser, no Envoy needed |
-| `test/run-envoy.sh [site file]` then `test/t2-checks.sh` | The CONNECT tunnel, from a box-shaped client |
+| `test/run-envoy.sh test/t2.conf` then `test/t2-checks.sh` | The CONNECT tunnel, from a box-shaped client |
+| `luajit test/graphql-check.lua` | The GitHub GraphQL write check (skipped without luajit) |
 | `test/run-envoy.sh test/site.conf` then `test/site-checks.sh` | Site listeners, each reaching exactly its own list |
 
 ## All the tests at once
@@ -18,9 +19,9 @@ test/run-all.sh [distro...]
 ```
 
 Runs the install test on Arch, Debian 13 and Ubuntu 26.04 (the default; name others to change
-it) in parallel. Alongside them it runs shellcheck, the parser, t2 and the site checks, then
-prints each suite's result and time. About 20 s in all on a 20-thread workstation (from about
-115 s before).
+it) in parallel. Alongside them it runs shellcheck, the parser, the GraphQL check, t2 and the
+site checks, then prints each suite's result and time. About 20 s in all on a 20-thread
+workstation.
 
 - `OLD_REPO` and `AIRLOCK_REPO` pass through to the install test.
 - `SHELLCHECK=<path>` if shellcheck is not on `PATH` (skipped, and said so, if not found).
@@ -77,13 +78,13 @@ Runs Envoy in a container (the official image, pinned by digest) against a test 
 `claude-airlock:dev` image locally; the test client builds on it.
 
 ```
-./test/run-envoy.sh                      # the built-in anthropic listener only
+./test/run-envoy.sh test/t2.conf         # one listener (the built-in has no socket of its own)
 podman build -t localhost/airlock-envoy-spike-client:test test/client
 ./test/t2-checks.sh
 jq . run/access.jsonl
 podman stop airlock-envoy-spike
 
-./test/run-envoy.sh test/site.conf       # plus two test listeners, public endpoints only
+./test/run-envoy.sh test/site.conf       # the test listeners, public endpoints only
 ./test/site-checks.sh                    # each listener reaches exactly its own list
 podman stop airlock-envoy-spike
 
@@ -128,4 +129,5 @@ route list, a no-SNI chain on host entries, or a global-only connection cap.
 
 `configs/tunnel-capture.yaml` is a log-only tunnel on loopback, any host on 443, used to find
 which hosts Claude Code needs. It runs with the host network, so its loopback listener is
-reachable; the other configs run on podman's default network.
+reachable; the other configs run on podman's default network. Run it with
+`test/run-envoy.sh capture`.

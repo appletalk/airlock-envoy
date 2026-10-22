@@ -89,7 +89,15 @@ running boxes hold.
 
 ### 3. Write the site file and apply it
 
-Write `/etc/airlock-envoy/site.conf` (see [The site file](#the-site-file)), then:
+Write `/etc/airlock-envoy/site.conf` (see [The site file](#the-site-file)). The smallest useful
+one gives you a listener for Claude alone:
+
+```
+me  @anthropic
+client me alice
+```
+
+Then:
 
 ```
 sudo airlock-envoy-apply
@@ -150,14 +158,15 @@ Rules that matter most (full list in [docs/site-file.md](docs/site-file.md)):
 - **One user per listener.** Each listener with a socket needs exactly one `client` line. A
   listener that another one includes may have none; it is then a definition only, with no
   socket (like the built-in `anthropic`). A listener that nothing includes must have a client.
-- **The client must be a local login account** (in `/etc/passwd`), not root or nobody, and
-  outside every other user's `/etc/subuid` ranges.
+- **The client must be a login account** (uid in the `UID_MIN`..`UID_MAX` range), not root or
+  nobody, and outside every other user's `/etc/subuid` ranges. Make it a local account (in
+  `/etc/passwd`): box sockets start at boot, before a directory service answers.
 - **A credential belongs to one user.** If listeners of two users would reach the same
   credential, apply refuses. Give the second user a variant (`http <host>@<variant> ...`).
 - **Name listeners after their user** (`alice-infra`, `agent-infra`) so the name in a box's
   config says whose it is.
 - **Strict syntax.** Lowercase names, explicit ports, no wildcards, URLs or Windows line
-  endings, and no IPv6 destinations. `admin`, `client`, `http` and `anthropic` are reserved as
+  endings, and no IPv6 destinations. `admin`, `client`, `http`, `internal-name`, `internal-net` and `anthropic` are reserved as
   listener names, and `web` is a destination. A bad line stops the apply with its line number.
 
 ### Applying
@@ -167,9 +176,9 @@ Rules that matter most (full list in [docs/site-file.md](docs/site-file.md)):
 | `sudo airlock-envoy-apply` | root | Check, render, validate and apply `/etc/airlock-envoy/site.conf` |
 | `sudo airlock-envoy-apply [--yes] FILE` | root | Show FILE's change, ask (`--yes` skips), install it as the site file, apply |
 | `airlock-envoy-apply --check [FILE]` | root (any user: without the credential and ca checks) | Check everything and show the change, without applying |
-| `airlock-envoy-apply --list [FILE]` | any user | Print each listener's destinations |
-| `airlock-envoy-apply --render [FILE]` | any user | Print the Envoy config |
-| `airlock-envoy-apply --clients NAME [FILE]` | any user | Print listener NAME's client manifest |
+| `airlock-envoy-apply --list [FILE]` | any user who can read FILE | Print each listener's destinations |
+| `airlock-envoy-apply --render [FILE]` | any user who can read FILE | Print the Envoy config |
+| `airlock-envoy-apply --clients NAME [FILE]` | any user who can read FILE | Print listener NAME's client manifest |
 
 An apply validates the new config with `envoy --mode validate` (as the service account), prints
 the change in allowed destinations, swaps the config in atomically and restarts Envoy only if
@@ -307,7 +316,7 @@ headers Envoy strips from box requests, and the limits are in [docs/presets.md](
 | `git` | git fetch **and push to any branch the token can write**, including force-push, branch deletion and a push to `main` (so a merge, with no GraphQL check) | Everything but smart HTTP |
 | `forgejo` | Forgejo or Gitea for a bot account: git fetch and push, API reads, PR create and edit (including base and state), comments, labels, reviewers | Merge, reviews and approval, files written through the API, branch and tag API, releases, settings, hooks, keys, tokens, deletes, admin, the web UI, wiki git, token query parameters and form bodies |
 | `kubernetes-read` | A Kubernetes API server, read only, plus `kubectl auth can-i` and `whoami` | Every write, protocol upgrades, escaped paths, exec, attach, port-forward, `proxy` subresources |
-| `github-issues` | Reads; issue create, edit, close, reopen; comments, labels, assignees, reactions | PR writes, merge, approve, auto-merge, settings, hooks, keys, deletes, Projects (unless `projects`) |
+| `github-issues` | Reads; issue create, edit, close, reopen; comments, labels, assignees, reactions. GitHub numbers PRs as issues, so these also reach a PR's title, body, state, comments, labels and assignees | PR create, base, reviewers and code; merge, approve, auto-merge, settings, hooks, keys, deletes, Projects (unless `projects`) |
 | `github-api` | The same, plus PR create, edit (including base branch), close, reopen, draft state, reviewers | Merge, approve, auto-merge, settings, hooks, keys, deletes, Projects (unless `projects`) |
 | `any` | Every method but TRACE | TRACE |
 
@@ -326,6 +335,10 @@ GitHub presets check every `POST /graphql` write against an allowlist.
   issue to Copilot (`replaceActorsForAssignable`, REST assignees) makes GitHub write code and
   open a PR, even from an issues-only box. The presets do not refuse this: turn the agent off
   where the token reaches.
+- **`kubernetes-read` reads whatever the token's RBAC allows**, Secrets included if it may.
+- **`forgejo`**: a push may create, force-push or delete any branch or tag the server doesn't
+  protect; edits reach other people's issues, PRs and comments; set `DISABLE_QUERY_AUTH_TOKEN`
+  on the server too.
 
 ## Operating it
 
@@ -374,7 +387,7 @@ How the two socket layers make this work: [docs/design.md](docs/design.md#two-la
 | `/var/log/airlock-envoy/access.jsonl` | The audit log: every allowed and refused request and tunnel, with the listener and user |
 | `/var/log/airlock-envoy/web.jsonl` | The web Envoy: profile, server name, chain, upstream address |
 
-Both are JSON lines, readable by root only. **Nothing rotates or ships them yet**, so a box that
+Both are JSON lines, readable by root and the service account only. **Nothing rotates or ships them yet**, so a box that
 keeps getting refused can grow the audit log without bound (planned with the audit pipeline).
 Field-by-field detail: [docs/audit-log.md](docs/audit-log.md).
 

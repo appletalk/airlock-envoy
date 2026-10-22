@@ -38,8 +38,9 @@ Envoy and the relay run as the `airlock-envoy` system account with no capabiliti
 systemd's sandboxing:
 
 - read-only system, no home, private `/tmp` and devices;
-- a syscall allowlist (`@system-service`, plus `mincore`, which Envoy's allocator needs);
-- no core dumps, no swap;
+- a syscall allowlist (`@system-service`; the Envoy units add `mincore`, which Envoy's allocator
+  needs);
+- no core dumps; the Envoy units also no swap;
 - the relay also has no network at all.
 
 The web Envoy cannot reach the main Envoy's sockets (`InaccessiblePaths`), so a compromised web

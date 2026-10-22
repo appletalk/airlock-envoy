@@ -28,8 +28,8 @@ and `airlock-envoy-apply --help` is the built-in summary.
 
 ## `client <listener> <user>`
 
-A line of its own, anywhere in the file. It names the one user whose boxes may connect. Every
-listener has exactly one.
+A line of its own, anywhere in the file. It names the one user whose boxes may connect. A
+listener with a socket has exactly one; a listener only included by others has none (see below).
 
 **Where the socket goes.** `/run/airlock-envoy/<user>/<listener>.sock`, in a directory only that
 uid may enter (root's, 0700 with an ACL), with an ACL on the socket for that uid alone.
@@ -117,8 +117,9 @@ If Envoy does not start with the new config, the previous one goes back.
 - `--list`, `--render` and `--clients` work as any user.
 - `--status` is described in the README.
 - **A file from elsewhere**: any site file named on the command line other than the literal
-  `/etc/airlock-envoy/site.conf` counts as from elsewhere, symlinks into `/etc` included. Apply
-  shows its change and asks (`--yes` skips) before installing it.
+  `/etc/airlock-envoy/site.conf` counts as from elsewhere, symlinks into `/etc` included. When it
+  would change the allowed destinations, apply shows the change and asks (`--yes` skips) before
+  installing it.
 
 ## Upgrading from one global client
 
