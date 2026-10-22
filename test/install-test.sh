@@ -476,8 +476,8 @@ x sh -c 'mkdir -p /root/k && cd /root/k && printf "%s\n" "[req]" "distinguished_
     "printf '"'"'HTTP/1.1 200 OK\\r\\nContent-Type: text/plain\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n%s'"'"' \"\${#h}\" \"\$h\"" > echo.sh
   chmod 0755 echo.sh' "$KIP"
 kecho() {  # kecho <cert>: the stand-in API server, with that certificate
-  x systemctl stop t-kube-echo 2>/dev/null || true
-  x systemd-run -q --unit=t-kube-echo socat "OPENSSL-LISTEN:6443,reuseaddr,fork,cert=/root/k/$1,key=/root/k/srv.key,verify=0" EXEC:/root/k/echo.sh
+  x systemctl stop t-kube-echo 2>/dev/null || true; x systemctl reset-failed t-kube-echo 2>/dev/null || true
+  x systemd-run -q --collect --unit=t-kube-echo socat "OPENSSL-LISTEN:6443,reuseaddr,fork,cert=/root/k/$1,key=/root/k/srv.key,verify=0" EXEC:/root/k/echo.sh
   x sh -c 'for _ in $(seq 100); do grep -q ":192B 00000000:0000 0A" /proc/net/tcp && exit 0; sleep 0.05; done; exit 1'
 }
 kreq() {  # kreq <curl args...>: through extra's socket as client: the body, then the status
