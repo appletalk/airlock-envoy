@@ -329,8 +329,9 @@ dev   @anthropic web http://api.github.com http://github.com
   `kubernetes-read` (a Kubernetes API server, read only: GET and HEAD on `/api`, `/apis`,
   `/openapi` and `/version`, and POST only to the self access reviews and `selfsubjectreviews`,
   so `kubectl auth can-i` and `whoami` work; refused: every write, any protocol upgrade
-  (WebSocket, SPDY), any escaped character in the path (no Kubernetes name has one; the API
-  server would decode `%70roxy` to `proxy`), and exec, attach, port-forward and the pod,
+  (WebSocket, SPDY), any escaped character in the path (names never hold `%` and kubectl
+  escapes only the query, and names with a space or non-ASCII, refused here; the API server
+  would decode `%70roxy` to `proxy`), and exec, attach, port-forward and the pod,
   service and node `proxy` subresources whatever the method. What the token reads is its
   RBAC: Secrets too, if it may. Reads have no request timeout or stream cap, so watches and
   `logs -f` run on until 5 minutes pass with nothing sent),
