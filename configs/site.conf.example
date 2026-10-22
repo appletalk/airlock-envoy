@@ -9,10 +9,9 @@
 #   client <listener> <user>          the one user whose boxes may connect (each listener has
 #                                     one, unless another listener includes it)
 
-# Claude, plus the monitoring stack and the cluster API: a definition the users' listeners share.
+# Claude, plus the monitoring stack: a definition the users' listeners share.
 infra  @anthropic
 infra  metrics.example.net:443 logs.example.net:443
-infra  10.0.0.10:6443
 
 # Claude plus the public internet (any host on 443, public addresses only); infra's internal
 # hosts stay out of reach through it.
@@ -30,7 +29,11 @@ internal-net   198.51.100.0/24 2001:db8:1::/48
 # belongs to one user: the agent account gets these, alice's infra listener none.
 http  api.github.com  rules github-api  credential github-api
 http  github.com      rules git         credential github-git
-alice-infra  @infra web
+# The cluster API read-only for the agent: its token injected, the server checked against the
+# cluster's own CA (airlock-envoy-cred set kube-agent; airlock-envoy-cred ca cluster < ca.pem).
+# A listener reaches an address one way, so alice's own kubeconfig gets the CONNECT entry.
+http  10.0.0.10:6443  rules kubernetes-read  credential kube-agent  ca cluster
+alice-infra  @infra web 10.0.0.10:6443
 client alice-infra alice
-agent-dev  @infra http://api.github.com http://github.com
+agent-dev  @infra http://api.github.com http://github.com http://10.0.0.10
 client agent-dev agent

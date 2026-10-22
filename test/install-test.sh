@@ -15,14 +15,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 distro="${1:?ubuntu[-VERSION], debian or arch}"
 ver="${2:-1.40.0}"
-apt_prep='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd systemd-sysv curl gpg acl socat jq ca-certificates >/dev/null'
+apt_prep='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd systemd-sysv curl gpg acl socat jq ca-certificates openssl >/dev/null'
 case "$distro" in
   ubuntu|ubuntu-24.04) base=docker.io/library/ubuntu:24.04; prep="$apt_prep"; init=/sbin/init ;;
   ubuntu-22.04) base=docker.io/library/ubuntu:22.04; prep="$apt_prep"; init=/sbin/init ;;
   ubuntu-26.04) base=docker.io/library/ubuntu:26.04; prep="$apt_prep"; init=/sbin/init ;;
   debian) base=docker.io/library/debian:13; prep="$apt_prep"; init=/sbin/init ;;
   arch)   base=docker.io/library/archlinux:latest
-          prep='pacman -Syu --noconfirm --quiet curl gnupg acl socat jq >/dev/null'
+          prep='pacman -Syu --noconfirm --quiet curl gnupg acl socat jq openssl >/dev/null'
           init=/usr/lib/systemd/systemd ;;
   *) echo "ubuntu[-22.04|-24.04|-26.04], debian or arch" >&2; exit 2 ;;
 esac
@@ -410,8 +410,8 @@ httpget() {  # httpget <socket> <url>: a plain-HTTP request through a box socket
     until grep -q ":0C38 00000000:0000 0A" /proc/net/tcp; do sleep 0.01; done
     curl -s -x http://127.0.0.1:3128 "$1"; kill %1; wait' "$1" "$2" 2>/dev/null
 }
-ck "plain HTTP: airlock-envoy-cred root 0755, the GraphQL check installed, credentials dir root:airlock-envoy 0750" \
-   '[ "$(x stat -c %U:%G:%a /usr/local/sbin/airlock-envoy-cred)" = root:root:755 ] && x test -r /usr/local/share/airlock-envoy/github-graphql.lua && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/credentials)" = root:airlock-envoy:750 ]'
+ck "plain HTTP: airlock-envoy-cred root 0755, the GraphQL check installed, credentials and ca dirs root:airlock-envoy 0750" \
+   '[ "$(x stat -c %U:%G:%a /usr/local/sbin/airlock-envoy-cred)" = root:root:755 ] && x test -r /usr/local/share/airlock-envoy/github-graphql.lua && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/credentials)" = root:airlock-envoy:750 ] && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/ca)" = root:airlock-envoy:750 ]'
 site "http httpbin.org rules any credential t-cred" "extra @anthropic example.com:443 http://httpbin.org" "client extra client"
 cfg="$(x sha256sum /etc/airlock-envoy/envoy.yaml)"
 out="$(x airlock-envoy-apply 2>&1)" && rc=0 || rc=$?
@@ -459,6 +459,68 @@ big="{\"query\":\"{ $(printf 'viewer { login } %.0s' $(seq 400)) }\"}"
 r="$(gql "$big") $(gql '{"query":"mutation { mergePullRequest(input: {}) { clientMutationId } }"}') $(gql '{"query":"{ viewer { login } }"}')"
 ck "github-api under the unit's MemoryDenyWriteExecute ($(x systemctl show -p MemoryDenyWriteExecute --value airlock-envoy)): a long query passes, a merge is refused, Envoy stays up: got $r" \
    '[ "$r" = "404 403 404" ] && [ "$(x systemctl show -p MainPID --value airlock-envoy)" = "$pid0" ] && [ "$(x systemctl is-active airlock-envoy)" = active ]'
+# kubernetes-read against a stand-in API server: TLS on the container's own address with a
+# certificate from a CA of the test's own (IP SAN only), echoing each request's head back.
+KIP="$(x awk '/32 host LOCAL/ && p !~ /^127\./ { print p; exit } { p = $2 }' /proc/net/fib_trie)"
+x sh -c 'mkdir -p /root/k && cd /root/k && printf "%s\n" "[req]" "distinguished_name=dn" "x509_extensions=v3" "[dn]" "[v3]" \
+    "basicConstraints=critical,CA:TRUE" "keyUsage=critical,keyCertSign,cRLSign" "subjectKeyIdentifier=hash" > ca.cnf
+  for c in ca other; do openssl req -x509 -config ca.cnf -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout $c.key -out $c.pem -days 2 -subj /CN=t-$c 2>/dev/null; done
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout srv.key -out srv.csr -subj /CN=kube 2>/dev/null
+  printf "basicConstraints=CA:FALSE\nsubjectAltName=IP:%s\n" "$0" > ip.ext
+  printf "basicConstraints=CA:FALSE\nsubjectAltName=DNS:kubernetes\n" > dns.ext
+  openssl x509 -req -in srv.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out srv.pem -days 1 -extfile ip.ext 2>/dev/null
+  openssl x509 -req -in srv.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out nosan.pem -days 1 -extfile dns.ext 2>/dev/null
+  printf "%s\n" "#!/bin/bash" "h=" "while IFS= read -r l; do l=\${l%\$'"'"'\\r'"'"'}; [ -n \"\$l\" ] || break; h+=\"\$l\"\$'"'"'\\n'"'"'; done" \
+    "printf '"'"'HTTP/1.1 200 OK\\r\\nContent-Type: text/plain\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n%s'"'"' \"\${#h}\" \"\$h\"" > echo.sh
+  chmod 0755 echo.sh' "$KIP"
+kecho() {  # kecho <cert>: the stand-in API server, with that certificate
+  x systemctl stop t-kube-echo 2>/dev/null || true
+  x systemd-run -q --unit=t-kube-echo socat "OPENSSL-LISTEN:6443,reuseaddr,fork,cert=/root/k/$1,key=/root/k/srv.key,verify=0" EXEC:/root/k/echo.sh
+  x sh -c 'for _ in $(seq 100); do grep -q ":192B 00000000:0000 0A" /proc/net/tcp && exit 0; sleep 0.05; done; exit 1'
+}
+kreq() {  # kreq <curl args...>: through extra's socket as client: the body, then the status
+  x runuser -u client -- bash -c 'socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/airlock-envoy/client/extra.sock &
+    until grep -q ":0C38 00000000:0000 0A" /proc/net/tcp; do sleep 0.01; done
+    curl -s -w "\n%{http_code}" -x http://127.0.0.1:3128 "$@"; kill %1; wait' bash "$@" 2>/dev/null
+}
+kecho srv.pem
+printf 'KUBE-SECRET-1' | x airlock-envoy-cred set t-kube >/dev/null
+site "http $KIP:6443 rules kubernetes-read credential t-kube ca t-k3s" "extra @anthropic example.com:443 http://$KIP" "client extra client"
+cfg="$(x sha256sum /etc/airlock-envoy/envoy.yaml)"
+out="$(x airlock-envoy-apply 2>&1)" && rc=0 || rc=$?
+ck "kubernetes-read ($KIP): a ca that isn't set refuses the apply, nothing changed" \
+   '[ "$rc" != 0 ] && [[ "$out" == *"ca t-k3s is not set"* ]] && [ "$(x sha256sum /etc/airlock-envoy/envoy.yaml)" = "$cfg" ]'
+ck "kubernetes-read: airlock-envoy-cred ca refuses a leaf certificate and a key, takes the CA (root 0644, fingerprint shown)" \
+   '! x sh -c "airlock-envoy-cred ca t-k3s < /root/k/srv.pem" >/dev/null 2>&1 && ! x sh -c "cat /root/k/ca.pem /root/k/ca.key | airlock-envoy-cred ca t-k3s" >/dev/null 2>&1 \
+    && ! x test -e /etc/airlock-envoy/ca/t-k3s.pem && x sh -c "airlock-envoy-cred ca t-k3s < /root/k/ca.pem" | grep -q "Fingerprint=" \
+    && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/ca/t-k3s.pem)" = root:root:644 ]'
+x airlock-envoy-apply >/dev/null
+r="$(kreq "http://$KIP/api/v1/namespaces/a/pods?limit=1" -H "Authorization: Bearer box-token" -H "Impersonate-User: admin" -H "Impersonate-Group: system:masters")"
+ck "kubernetes-read: a read reaches the API server over TLS (own CA, IP SAN), with the token, not the box's, and no impersonation: got $(head -1 <<< "$r") / $(tail -1 <<< "$r")" \
+   '[ "$(tail -1 <<< "$r")" = 200 ] && [ "$(head -1 <<< "$r")" = "GET /api/v1/namespaces/a/pods?limit=1 HTTP/1.1" ] && grep -qix "authorization: Bearer KUBE-SECRET-1" <<< "$r" \
+    && ! grep -qi "box-token\|^impersonate" <<< "$r"'
+st() { kreq "$@" | tail -1; }
+r="$(st "http://$KIP/version") $(st -X POST -H "Content-Type: application/json" -d "{}" "http://$KIP/apis/authentication.k8s.io/v1/selfsubjectreviews") $(st -X POST -H "Content-Type: application/json" -d "{}" "http://$KIP/apis/authorization.k8s.io/v1/selfsubjectaccessreviews")"
+ck "kubernetes-read: version, whoami and can-i through: got $r" '[ "$r" = "200 200 200" ]'
+r="$(st "http://$KIP/api/v1/namespaces/a/pods/b/exec?command=sh") $(st -H "Connection: Upgrade" -H "Upgrade: websocket" "http://$KIP/api/v1/namespaces/a/pods/b/log") $(st "http://$KIP/api/v1/namespaces/a/services/b:80/proxy/") $(st "http://$KIP/api/v1/nodes/n/proxy/metrics")"
+r="$r $(st -X POST -H "Content-Type: application/json" -d "{}" "http://$KIP/api/v1/namespaces/a/configmaps") $(st -X DELETE "http://$KIP/api/v1/namespaces/a/pods/b") $(st -X PATCH -d "{}" "http://$KIP/api/v1/namespaces/a/pods/b") $(st "http://$KIP/healthz") $(st -X POST -d "{}" "http://$KIP/apis/authorization.k8s.io/v1/subjectaccessreviews")"
+ck "kubernetes-read: exec, an upgrade, service and node proxy, create, delete, patch, other paths and other reviews refused: got $r" '[ "$r" = "403 403 403 403 403 403 403 403 403" ]'
+ck "kubernetes-read: no CONNECT to the address the box reaches by plain HTTP" '[ "$(tunnel "$E" "$KIP:6443")" = 403 ]'
+x sh -c "airlock-envoy-cred ca t-k3s < /root/k/other.pem" >/dev/null
+x systemctl restart airlock-envoy
+r="$(st "http://$KIP/version")"
+ck "kubernetes-read: a server certificate from another CA is refused (503): got $r" '[ "$r" = 503 ]'
+x sh -c "airlock-envoy-cred ca t-k3s < /root/k/ca.pem" >/dev/null
+x systemctl restart airlock-envoy
+kecho nosan.pem
+r="$(st "http://$KIP/version")"
+ck "kubernetes-read: a certificate from the right CA without the address (DNS SAN only) is refused (503): got $r" '[ "$r" = 503 ]'
+kecho srv.pem
+r="$(st "http://$KIP/version")"
+ck "kubernetes-read: ...and with it back, through again: got $r" '[ "$r" = 200 ]'
+x systemctl stop t-kube-echo
+ck "kubernetes-read: the token is in neither the access log nor the config dump" \
+   '! x grep -q KUBE-SECRET /var/log/airlock-envoy/access.jsonl && ! x curl -s --unix-socket /run/airlock-envoy-internal/admin.sock "http://localhost/config_dump" | grep -q KUBE-SECRET'
 site "extra @anthropic example.com:443" "client extra client"
 x airlock-envoy-apply >/dev/null
 ck "plain HTTP dropped: a running socket's manifest is updated by the apply (no hosts)" 'x test -f "$EM" && ! x grep -qv "^#" "$EM"'

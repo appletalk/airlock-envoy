@@ -113,11 +113,11 @@ fi
 # ---- parse ----------------------------------------------------------------------------------
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
-declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=()
+declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=()
 declare -A CLIENT=() CLIENT_AT=() CLIENT_UID=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
 SOCKETS=()   # the listeners with a client, in file order: each gets a box socket
-PRESETS="any forgejo git git-read github-api github-issues victoria-logs victoria-metrics"
+PRESETS="any forgejo git git-read github-api github-issues kubernetes-read victoria-logs victoria-metrics"
 
 valid_dest() {
   local h p o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -267,31 +267,33 @@ parse() {  # parse <source label>, text on stdin
   done
 }
 
-# http <host>[:port][@variant] rules <preset> [credential <name>] [projects <id>[,<id>...]]:
+# http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]:
 # how the box reaches a host by plain HTTP. Envoy answers the box, checks method and path
 # against the preset, adds the credential, and is the TLS client to the host (its certificate
-# checked, Host and SNI fixed). A variant is another definition of the same host (its own
-# rules and credential, e.g. a second identity), listed as http://<host>@<variant>; a listener
-# uses one definition per host. projects (GitHub presets only) lets Projects v2 item writes
-# through for those project node IDs and no others.
+# checked, Host and SNI fixed). The host may be an IPv4 address (a Kubernetes API server, say):
+# then no SNI, and the certificate must name that address. ca: the host's certificate is
+# checked against $CA_DIR/<name>.pem alone, not the system CAs (a cluster's own CA). A variant
+# is another definition of the same host (its own rules and credential, e.g. a second
+# identity), listed as http://<host>@<variant>; a listener uses one definition per host.
+# projects (GitHub presets only) lets Projects v2 item writes through for those project node
+# IDs and no others.
 parse_http() {  # parse_http <where> <words...>
-  local where=$1 hp host port variant="" k rules="" cred="" projects="" id; local -a ids; shift
-  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [projects <id>,...]"
+  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" id; local -a ids; shift
+  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...]"
   hp=$1; shift
   if [[ "$hp" == *@* ]]; then
     variant=${hp#*@} hp=${hp%%@*}
     [[ "$variant" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die "$where: bad variant '@$variant' (a-z, 0-9 and -, starting with a letter, up to 32)"
   fi
   host=${hp%:*}; port=443; [[ "$hp" == *:* ]] && port=${hp##*:}
-  if ! valid_dest "$host:$port" || [[ "$host" =~ ^[0-9.]+$ ]]; then
-    die "$where: bad http host '$hp' (want a host name, optionally :port)"
-  fi
+  valid_dest "$host:$port" || die "$where: bad http host '$hp' (want a host name or IPv4 address, optionally :port)"
   k=$host${variant:+@$variant}
   [ -z "${HTTP_RULES[$k]+x}" ] || die "$where: http $k is defined twice"
   while [ $# -gt 0 ]; do
     case "$1" in
       rules) [ $# -ge 2 ] || die "$where: rules needs a preset"; rules=$2; shift 2 ;;
       credential) [ $# -ge 2 ] || die "$where: credential needs a name"; cred=$2; shift 2 ;;
+      ca) [ $# -ge 2 ] || die "$where: ca needs a name"; ca=$2; shift 2 ;;
       projects) [ $# -ge 2 ] || die "$where: projects needs project IDs"
         [[ "$2" != *, ]] || die "$where: bad project ID '' (a trailing comma)"
         IFS=, read -ra ids <<< "$2"
@@ -300,13 +302,14 @@ parse_http() {  # parse_http <where> <words...>
           case " $projects " in *" $id "*) ;; *) projects="${projects:+$projects }$id" ;; esac
         done
         shift 2 ;;
-      *) die "$where: unknown http option '$1' (rules, credential, projects)" ;;
+      *) die "$where: unknown http option '$1' (rules, credential, ca, projects)" ;;
     esac
   done
   case " $PRESETS " in *" $rules "*) ;; *) die "$where: unknown rules '$rules' (one of: $PRESETS)" ;; esac
   [ -z "$cred" ] || [[ "$cred" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad credential name '$cred'"
+  [ -z "$ca" ] || [[ "$ca" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad ca name '$ca'"
   case "$rules" in github-api|github-issues) ;; *) [ -z "$projects" ] || die "$where: projects only with the github-api or github-issues rules" ;; esac
-  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects
+  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca
   HTTP_HOSTS+=("$k")
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
@@ -494,8 +497,8 @@ listing() {
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
     for d in ${HDESTS[$l]:-}; do
-      printf '%s http://%s:%s%s rules %s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
-        "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}"
+      printf '%s http://%s:%s%s rules %s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
+        "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_CA[$d]:+ ca ${HTTP_CA[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}"
     done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
     [ -z "${CLIENT[$l]:-}" ] || printf '%s client %s\n' "$l" "${CLIENT[$l]}"
@@ -614,6 +617,21 @@ edit-comment PATCH regex /api/v1/repos/[^/]+/[^/]+/issues/comments/[0-9]+
 reviewers POST regex /api/v1/repos/[^/]+/[^/]+/pulls/[0-9]+/requested_reviewers
 EOR
     ;;
+    # A Kubernetes API server, read only: GET and HEAD on the API and discovery paths, and
+    # the two reviews that only ask what the caller is and may do (kubectl auth can-i,
+    # whoami). Refused before them: exec, attach, port-forward and the proxy subresources,
+    # which reach into pods, services and nodes (a GET can open them as a WebSocket). What the
+    # token may read is still its RBAC.
+    kubernetes-read) cat <<'EOR'
+pod-stream * regex /api/v1/namespaces/[^/]+/(pods|services)/[^/]+/(exec|attach|portforward|proxy)(/.*)? deny
+node-proxy * regex /api/v1/nodes/[^/]+/proxy(/.*)? deny
+legacy-proxy * regex /api/v1/proxy(/.*)? deny
+access-review POST regex /apis/authorization\\.k8s\\.io/v1/(selfsubjectaccessreviews|selfsubjectrulesreviews)
+whoami POST exact /apis/authentication.k8s.io/v1/selfsubjectreviews
+read GET|HEAD regex /(api|apis|openapi)(/.*)?
+version GET|HEAD exact /version
+EOR
+    ;;
     victoria-logs) echo 'logsql GET|POST prefix /select/logsql/' ;;
     victoria-metrics) cat <<'EOR'
 query GET|POST prefix /api/v1/query
@@ -626,11 +644,23 @@ EOR
   esac
 }
 CRED_DIR=/etc/airlock-envoy/credentials
+CA_DIR=/etc/airlock-envoy/ca
 lua_file() {  # the GraphQL check: next to this script in a checkout, else where install put it
   local f
   f="$(dirname "$(readlink -f "$0")")/github-graphql.lua"
   [ -r "$f" ] || f=/usr/local/share/airlock-envoy/github-graphql.lua
   printf '%s' "$f"
+}
+cas_used() {  # every ca some listener's http destinations use, once each
+  local l d c seen=" "
+  for l in "${SOCKETS[@]}"; do
+    for d in ${HDESTS[$l]:-}; do
+      c=${HTTP_CA[$d]}
+      [ -n "$c" ] || continue
+      case "$seen" in *" $c "*) continue ;; esac
+      seen="$seen$c "; echo "$c"
+    done
+  done
 }
 creds_used() {  # every credential some listener's http destinations use, once each
   local l d c seen=" "
@@ -675,6 +705,13 @@ EOF
                   prefix: "/"
                   headers: [{ name: "content-type", string_match: { safe_regex: { regex: "(?i)\\\\s*(application/x-www-form-urlencoded|multipart/form-data).*" } } }]
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: no form bodies here (JSON only)\\n" } }
+EOF
+  # No protocol upgrade to the API server: a WebSocket or SPDY stream is how exec, attach and
+  # port-forward run, whatever the path.
+  [ "$rules" != kubernetes-read ] || cat <<EOF
+              - name: "$id-upgrade"
+                match: { prefix: "/", headers: [{ name: "upgrade", present_match: true }] }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: no protocol upgrades here\\n" } }
 EOF
   while read -r name methods kind pat flag; do
     [ -n "$name" ] || continue
@@ -778,19 +815,25 @@ EOF
   done
 }
 # One upstream per plain-HTTP host in use: TLS, the host's certificate checked against the
-# system CAs and its name.
+# system CAs (or the host's own ca) and its name (or, for an address, that address).
 http_clusters() {
-  local l d h seen=" "
+  local l d h seen=" " ca san sni typ
   for l in "${SOCKETS[@]}"; do
     for d in ${HDESTS[$l]:-}; do
       case "$seen" in *" $d "*) continue ;; esac
       seen="$seen$d "
       h=${HTTP_HOST[$d]}
+      ca=/etc/ssl/certs/ca-certificates.crt
+      [ -z "${HTTP_CA[$d]}" ] || ca=$CA_DIR/${HTTP_CA[$d]}.pem
+      if is_ip "$h"; then
+        typ="type: STATIC" san=IP_ADDRESS sni=
+      else
+        typ=$'type: LOGICAL_DNS\n    dns_lookup_family: ALL' san=DNS sni="        sni: \"$h\""
+      fi
       cat <<EOF
   # Plain HTTP from boxes, TLS from here.
   - name: "http-$(hid "$d")"
-    type: LOGICAL_DNS
-    dns_lookup_family: ALL
+    $typ
     connect_timeout: 5s
     load_assignment:
       cluster_name: "http-$(hid "$d")"
@@ -799,14 +842,14 @@ http_clusters() {
       name: envoy.transport_sockets.tls
       typed_config:
         "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-        sni: "$h"
-        common_tls_context:
+${sni:+$sni
+}        common_tls_context:
           # Envoy's client default stops at TLS 1.2; a host that requires 1.3 (Traefik with a
           # 1.3 floor) would fail every handshake.
           tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_protocol_version: TLSv1_3 }
           validation_context:
-            trusted_ca: { filename: /etc/ssl/certs/ca-certificates.crt }
-            match_typed_subject_alt_names: [{ san_type: DNS, matcher: { exact: "$h" } }]
+            trusted_ca: { filename: $ca }
+            match_typed_subject_alt_names: [{ san_type: $san, matcher: { exact: "$h" } }]
 EOF
     done
   done
@@ -966,7 +1009,8 @@ EOF
           # forwarding ones, method overrides (a GET the rules allowed must not act as a write
           # upstream), and other ways to authenticate than the injected credential: cookies,
           # HTTP signatures, the proxy's own credential, and the identity headers reverse-proxy
-          # and forward auth set (an upstream that trusts them would take the box's word).
+          # and forward auth set (an upstream that trusts them would take the box's word), and
+          # Kubernetes impersonation (Impersonate-*: act as another user, if the token may).
           # Before the router and the injectors.
           - name: strip-box-headers
             typed_config:
@@ -978,6 +1022,7 @@ EOF
                 - remove_on_match: { key_matcher: { prefix: "x-webauth", ignore_case: true } }
                 - remove_on_match: { key_matcher: { prefix: "x-auth-request-", ignore_case: true } }
                 - remove_on_match: { key_matcher: { prefix: "x-authentik-", ignore_case: true } }
+                - remove_on_match: { key_matcher: { prefix: "impersonate-", ignore_case: true } }
                 - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)forwarded|x-real-ip|x-client-ip|x-original-url|x-rewrite-url|x-request-id|sudo" } } }
                 - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)cookie2?|signature(-input)?|proxy-authorization|(x-)?remote-user" } } }
                 - remove_on_match: { key_matcher: { safe_regex: { regex: "(?i)x-http-method|x-http-method-override|x-method-override" } } }
@@ -1352,13 +1397,17 @@ unset TMPDIR
 work="$(mktemp -d /tmp/airlock-envoy-apply.XXXXXX)"
 trap 'rm -rf "$work"' EXIT
 
-# Every credential a listener uses must exist before anything changes (Envoy would refuse
+# Every credential and ca a listener uses must exist before anything changes (Envoy would refuse
 # the config, or start with a destination that can never authenticate).
 if [ "$(id -u)" = 0 ]; then
   while IFS= read -r c; do
     [ -n "$c" ] || continue
     [ -f "$CRED_DIR/$c.yaml" ] || die "credential $c is not set: sudo airlock-envoy-cred set $c (nothing was changed)"
   done < <(creds_used)
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    [ -f "$CA_DIR/$c.pem" ] || die "ca $c is not set: sudo airlock-envoy-cred ca $c < <PEM file> (nothing was changed)"
+  done < <(cas_used)
 fi
 # Envoy's validate mode opens the access log, so the copy it checks logs to /dev/null; it is
 # otherwise the config that gets installed. As root it runs as the service account.

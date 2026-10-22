@@ -10,10 +10,16 @@
 #   airlock-envoy-cred revoke <name>   as root: replace it with a value that grants nothing
 #                                     (deleting the file would not: Envoy keeps the last one)
 #   airlock-envoy-cred list            as root: names, formats and when each was set
+#   airlock-envoy-cred ca <name>       as root: read PEM certificates from stdin, the only CAs
+#                                     Envoy trusts for a host with "ca <name>" (a cluster's own
+#                                     CA); prints each one's SHA-256 fingerprint to compare.
+#                                     Envoy reads it at start: a change to one in use needs
+#                                     systemctl restart airlock-envoy
 set -euo pipefail
 umask 077
 export LC_ALL=C
 DIR=/etc/airlock-envoy/credentials
+CA_DIR=/etc/airlock-envoy/ca
 die() { echo "airlock-envoy-cred: $*" >&2; exit 1; }
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
@@ -22,9 +28,10 @@ cmd=$1; shift
 case "$cmd" in -h|--help) usage; exit 0 ;; esac
 [ "$(id -u)" = 0 ] || die "run as root"
 [ -d "$DIR" ] || die "$DIR does not exist: run install/install-service.sh first"
+[ "$cmd" != ca ] || [ -d "$CA_DIR" ] || die "$CA_DIR does not exist: run install/install-service.sh from this version first"
 grp="$(stat -c %G "$DIR")"
 
-valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "bad credential name '$1' (a-z, 0-9 and -, starting with a letter)"; }
+valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "bad name '$1' (a-z, 0-9 and -, starting with a letter)"; }
 
 # write <name> <header value> <format label>: an SDS file, swapped in atomically (Envoy watches
 # the directory and takes the new file on the rename).
@@ -79,6 +86,42 @@ case "$cmd" in
     [ -f "$DIR/$1.yaml" ] || die "no credential $1"
     write "$1" "airlock-envoy-revoked" revoked
     echo "==> $1 revoked: requests now carry a value that grants nothing (revoke it at the issuer too)"
+    ;;
+  ca)
+    [ $# = 1 ] || die "usage: airlock-envoy-cred ca <name> < <PEM file>"
+    valid_name "$1"
+    [ ! -t 0 ] || die "give the PEM file on stdin: airlock-envoy-cred ca $1 < <file>"
+    command -v openssl >/dev/null || die "needs openssl to check the certificates"
+    pem="$(head -c 65537)"
+    [ "${#pem}" -le 65536 ] || die "over 64 KiB: not a CA certificate or two"
+    # Nothing but certificate blocks: one per BEGIN/END pair, base64 lines between them.
+    awk '/^-----BEGIN CERTIFICATE-----$/ { if (inb) exit 1; inb = 1; n++; next }
+         /^-----END CERTIFICATE-----$/ { if (!inb) exit 1; inb = 0; next }
+         inb && /^[A-Za-z0-9+\/=]+$/ { next }
+         { exit 1 }
+         END { if (inb || n == 0) exit 1 }' <<< "$pem" \
+      || die "stdin is not PEM certificates only (BEGIN/END CERTIFICATE blocks, nothing else)"
+    # Each block must parse and be a CA: a leaf certificate here would trust only itself.
+    blocks=() cur="" fps=""
+    while IFS= read -r line; do
+      cur+="$line"$'\n'
+      [ "$line" != "-----END CERTIFICATE-----" ] || { blocks+=("$cur"); cur=""; }
+    done <<< "$pem"
+    for b in "${blocks[@]}"; do
+      openssl x509 -noout -ext basicConstraints <<< "$b" 2>/dev/null | grep -q 'CA:TRUE' \
+        || die "a certificate does not parse, or is not a CA (basicConstraints CA:TRUE); nothing was changed"
+      fps+="$(openssl x509 -noout -fingerprint -sha256 -subject <<< "$b")"$'\n'
+    done
+    tmp="$(mktemp "$CA_DIR/.new.XXXXXX")"
+    # shellcheck disable=SC2064  # the path now, not at exit
+    trap "rm -f '$tmp'" EXIT
+    printf '%s' "${blocks[@]}" > "$tmp"
+    chown root:root "$tmp"; chmod 0644 "$tmp"
+    mv -f "$tmp" "$CA_DIR/$1.pem"
+    trap - EXIT
+    printf '%s' "$fps"
+    echo "==> ca $1 set: hosts with 'ca $1' trust these alone. Envoy reads it when it starts, so a"
+    echo "    first use takes it at the apply; to change one in use: systemctl restart airlock-envoy"
     ;;
   list)
     shopt -s nullglob

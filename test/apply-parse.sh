@@ -108,7 +108,13 @@ refuses "http, unknown rules"          "unknown rules"         'http x.example r
 refuses "http, unknown option"         "unknown http option"   'http x.example rules any header x\n'
 refuses "http, bad credential name"    "bad credential name"   'http x.example rules any credential 1x\n'
 refuses "http, uppercase credential"   "only lowercase"        'http x.example rules any credential Gh\n'
-refuses "http host an IP address"      "bad http host"         'http 10.0.0.1 rules any\n'
+refuses "http host a loopback address" "bad http host"         'http 127.0.0.1:6443 rules kubernetes-read\n'
+refuses "http host a link-local address" "bad http host"       'http 169.254.169.254 rules any\n'
+refuses "http host an IPv4 octet over 255" "bad http host"     'http 10.0.0.256:6443 rules any\n'
+refuses "http, bad ca name"            "bad ca name"           'http x.example rules any ca 1x\n'
+refuses "http, ca without a name"      "ca needs a name"       'http x.example rules any ca\n'
+refuses "an address both by plain HTTP and CONNECT" "lists 10.0.0.1 both" \
+  'http 10.0.0.1:6443 rules kubernetes-read\na http://10.0.0.1 10.0.0.1:6443\nclient a t\n'
 refuses "http host with a path"        "only lowercase"        'http x.example/p rules any\n'
 refuses "http defined twice"           "defined twice"         'http x.example rules any\nhttp x.example rules git\n'
 refuses "http:// with no http line"    "has no 'http x.example"  'a http://x.example\n'
@@ -160,6 +166,46 @@ if grep -A4 'name: "g.example.com-pack"' <<< "$r" | grep -q 'timeout: 0s, idle_t
    && grep -q '"inject-fj"' <<< "$r" && ! grep -q 'github-graphql' <<< "$r"; then
   echo "ok   forgejo: git routes long, API routes capped, credential injected, no GraphQL check"
 else echo "FAIL forgejo rendering"; fails=$((fails+1)); fi
+
+# kubernetes-read on an address: exec, attach, port-forward and proxy refused before the reads,
+# upgrades refused first; the address as SAN (no SNI), a static upstream, the ca file alone.
+printf 'http 10.0.0.1:6443 rules kubernetes-read credential kube ca k3s\nhttp x.example rules git\nb http://10.0.0.1 http://x.example\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+c="$(sed -n '/^  - name: "http-10.0.0.1"$/,/^  - name: /p' <<< "$r")"
+order="$(grep -o 'name: "10.0.0.1-[a-z-]*"' <<< "$r" | sed 's/^name: "10.0.0.1-//; s/"$//' | tr '\n' ' ')"
+if [ "$order" = "upgrade pod-stream node-proxy legacy-proxy access-review whoami read version refused " ] \
+   && grep -q 'type: STATIC' <<< "$c" && ! grep -q 'sni:' <<< "$c" && ! grep -q 'dns_lookup_family' <<< "$c" \
+   && grep -q 'trusted_ca: { filename: /etc/airlock-envoy/ca/k3s.pem }' <<< "$c" \
+   && grep -q 'san_type: IP_ADDRESS, matcher: { exact: "10.0.0.1" }' <<< "$c" \
+   && grep -A40 'name: "http-x.example"' <<< "$r" | grep -q 'trusted_ca: { filename: /etc/ssl/certs/ca-certificates.crt }' \
+   && grep -A40 'name: "http-x.example"' <<< "$r" | grep -q 'sni: "x.example"' \
+   && grep -q 'domains: \["10.0.0.1", "10.0.0.1:80"\]' <<< "$r" && grep -q 'name: "deny-connect-http-10.0.0.1"' <<< "$r" \
+   && grep -q 'key_matcher: { prefix: "impersonate-", ignore_case: true }' <<< "$r" \
+   && [ "$("$apply" --clients b "$work/site" | grep -v '^#' | head -1)" = "10.0.0.1 6443 kubernetes-read yes" ]; then
+  echo "ok   kubernetes-read on an address: upgrades, exec/attach/port-forward/proxy refused before reads; IP SAN, no SNI, own ca; impersonation stripped"
+else echo "FAIL kubernetes-read rendering (route order: $order)"; fails=$((fails+1)); fi
+# What the kubernetes-read paths let through, against the rendered regexes (RE2 and ERE agree
+# on these): reads and the two reviews yes, the streaming and proxy subresources no.
+krx() { grep -A3 "name: \"10.0.0.1-$1\"" <<< "$r" | sed -n 's/.*regex: "\(.*\)" }$/\1/p' | head -1 | sed 's/\\\\/\\/g'; }
+deny="$(krx pod-stream)|$(krx node-proxy)|$(krx legacy-proxy)"
+kfail=""
+for p in /api/v1/namespaces/a/pods/b/exec /api/v1/namespaces/a/pods/b/attach /api/v1/namespaces/a/pods/b/portforward \
+         /api/v1/namespaces/a/pods/b/proxy/x /api/v1/namespaces/a/services/b:80/proxy/ /api/v1/nodes/n1/proxy/metrics /api/v1/proxy/namespaces/a; do
+  [[ "$p" =~ ^($deny)$ ]] || kfail+=" not-denied:$p"
+done
+for p in /api/v1/namespaces/a/pods/b/log /api/v1/namespaces/a/pods /apis/apps/v1/deployments /api/v1/namespaces/proxy/configmaps/exec /openapi/v3; do
+  [[ "$p" =~ ^($deny)$ ]] && kfail+=" denied:$p"
+  [[ "$p" =~ ^($(krx read))$ ]] || kfail+=" not-read:$p"
+done
+[[ /apis/authorization.k8s.io/v1/selfsubjectaccessreviews =~ ^($(krx access-review))$ ]] || kfail+=" review"
+[[ /apis/authorizationxk8s.io/v1/selfsubjectaccessreviews =~ ^($(krx access-review))$ ]] && kfail+=" review-dot"
+[[ /apis/authorization.k8s.io/v1/subjectaccessreviews =~ ^($(krx access-review))$ ]] && kfail+=" sar"
+[[ /healthz =~ ^($(krx read))$ ]] && kfail+=" healthz"
+if [ -z "$kfail" ]; then echo "ok   kubernetes-read paths: streams and proxies refused, reads and self reviews through, dots literal"
+else echo "FAIL kubernetes-read paths:$kfail"; fails=$((fails+1)); fi
+
+lists "kubernetes-read on an address, its ca listed" 'b http://10.0.0.1:6443 rules kubernetes-read credential kube ca k3s\nb client t' \
+  'http 10.0.0.1:6443 rules kubernetes-read credential kube ca k3s\nb http://10.0.0.1\nclient b t\n'
 
 # Client manifests: each listener's plain-HTTP hosts (an include's too), nothing else.
 printf 'http x.example rules git credential gh\nhttp y.example:8443 rules any\na http://x.example example.com:443\nb @a http://y.example web\nc example.org:443\nclient b t\nclient c t\n' > "$work/site"

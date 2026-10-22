@@ -84,6 +84,8 @@ mv -f /usr/local/sbin/airlock-envoy-cred.new /usr/local/sbin/airlock-envoy-cred
 install -D -m 0644 -o root -g root "$repo/install/github-graphql.lua" /usr/local/share/airlock-envoy/github-graphql.lua
 # Credentials for plain-HTTP destinations (airlock-envoy-cred): root writes, Envoy reads.
 install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/credentials
+# CAs for plain-HTTP hosts with their own (airlock-envoy-cred ca): not secret, root writes.
+install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/ca
 
 # airlock-envoy-web is enabled and started by airlock-envoy-apply, only while a listener lists web.
 for u in airlock-envoy.service airlock-envoy-web.service airlock-envoy-proxy@.socket airlock-envoy-proxy@.service; do

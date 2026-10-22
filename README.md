@@ -270,8 +270,17 @@ http  metrics.example.net rules victoria-metrics
 dev   @anthropic web http://api.github.com http://github.com
 ```
 
-- `http <host>[:port] rules <preset> [credential <name>]` (site-wide, above its use) defines
-  the destination; a listener lists it as `http://<host>`.
+- `http <host>[:port] rules <preset> [credential <name>] [ca <name>]` (site-wide, above its
+  use) defines the destination; a listener lists it as `http://<host>`. The host may be an
+  IPv4 address (a Kubernetes API server named by address, as kubeconfigs do): Envoy then
+  sends no server name and the certificate must name that address (an IP SAN). A listener
+  cannot list an address both as `http://` and as a CONNECT entry.
+- `ca <name>`: the host's certificate is checked against `/etc/airlock-envoy/ca/<name>.pem`
+  alone instead of the system CAs, for a service with its own CA (a cluster's). Set it with
+  `sudo airlock-envoy-cred ca <name> < ca.pem` (CA certificates only; it prints each one's
+  SHA-256 fingerprint to compare with the source). Apply refuses a listener whose ca isn't set.
+  Envoy reads the file when it starts: changing a ca already in use needs
+  `sudo systemctl restart airlock-envoy`.
 - **Variants**: `http <host>@<variant> ...` is another definition of the same host, with its
   own rules, credential and projects (a second identity, or narrower rules for one profile);
   a listener lists it as `http://<host>@<variant>`. A listener uses one definition per host.
@@ -315,6 +324,12 @@ dev   @anthropic web http://api.github.com http://github.com
   create, force-push or delete any branch or tag not protected); edits reach other people's
   issues, PRs and comments, not only the bot's (Forgejo keeps the edit history); set
   `DISABLE_QUERY_AUTH_TOKEN` on the server too),
+  `kubernetes-read` (a Kubernetes API server, read only: GET and HEAD on `/api`, `/apis`,
+  `/openapi` and `/version`, and POST only to the self access reviews and `selfsubjectreviews`,
+  so `kubectl auth can-i` and `whoami` work; refused: every write, any protocol upgrade
+  (WebSocket, SPDY), and exec, attach, port-forward and the pod, service and node `proxy`
+  subresources whatever the method. What the token reads is its RBAC: Secrets too, if it may.
+  Watches and `logs -f` end after 2 minutes, as on every capped route),
   `github-issues` (reads; issue create, edit, close, reopen, comments, labels, assignees,
   reactions; no PR writes), `github-api` (the same plus PR create, edit including the base
   branch, close, reopen, draft state, reviewers; refused in both: merge, approve, auto-merge,
@@ -345,7 +360,8 @@ dev   @anthropic web http://api.github.com http://github.com
   (`x-http-method(-override)`, `x-method-override`), and other ways to authenticate than the
   injected credential: `cookie`, `cookie2`, `signature`, `signature-input`,
   `proxy-authorization`, and the identity headers of reverse-proxy and forward auth
-  (`x-webauth*`, `remote-user`, `x-remote-user`, `x-auth-request-*`, `x-authentik-*`). A
+  (`x-webauth*`, `remote-user`, `x-remote-user`, `x-auth-request-*`, `x-authentik-*`), and
+  Kubernetes impersonation (`impersonate-*`). A
   header name with an underscore is
   refused outright (400): Rack and CGI servers read `x_http_method_override` as the dashed
   name. Envoy adds no headers of its own.
@@ -372,7 +388,9 @@ dev   @anthropic web http://api.github.com http://github.com
   URLs. git keeps its ssh remotes on the host: in the box only, a config rewrites them, e.g.
   `url.http://github.com/.insteadOf git@github.com:`. gh: `http_unix_socket
   /run/airlock-envoy/<user>/<listener>.sock` in a box gh config, and any placeholder `GH_TOKEN`
-  (Envoy replaces it). claude-airlock sets both up at launch from the client manifest.
+  (Envoy replaces it). kubectl: a box kubeconfig with `server: http://<host>` and no user
+  (kubectl takes `http_proxy`; Envoy adds the token). claude-airlock sets these up at launch
+  from the client manifest.
 - **Client manifest**: apply writes `/run/airlock-envoy/<user>/<listener>.clients` next to each
   box socket (root, 0644, in the directory only that user may enter; `--clients <listener>`
   prints it): one line per plain-HTTP host,
