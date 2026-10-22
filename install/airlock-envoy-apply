@@ -619,16 +619,19 @@ EOR
     ;;
     # A Kubernetes API server, read only: GET and HEAD on the API and discovery paths, and
     # the two reviews that only ask what the caller is and may do (kubectl auth can-i,
-    # whoami). Refused before them: exec, attach, port-forward and the proxy subresources,
-    # which reach into pods, services and nodes (a GET can open them as a WebSocket). What the
-    # token may read is still its RBAC.
+    # whoami). Refused before them: any escaped character in the path (no Kubernetes name has
+    # one, kubectl escapes only the query, and the API server would decode %70roxy to proxy),
+    # then exec, attach, port-forward and the proxy subresources, which reach into pods,
+    # services and nodes (a GET can open them as a WebSocket). Reads are long (watch, logs -f).
+    # What the token may read is still its RBAC.
     kubernetes-read) cat <<'EOR'
+escaped * regex .*%.* deny
 pod-stream * regex /api/v1/namespaces/[^/]+/(pods|services)/[^/]+/(exec|attach|portforward|proxy)(/.*)? deny
 node-proxy * regex /api/v1/nodes/[^/]+/proxy(/.*)? deny
 legacy-proxy * regex /api/v1/proxy(/.*)? deny
 access-review POST regex /apis/authorization\\.k8s\\.io/v1/(selfsubjectaccessreviews|selfsubjectrulesreviews)
 whoami POST exact /apis/authentication.k8s.io/v1/selfsubjectreviews
-read GET|HEAD regex /(api|apis|openapi)(/.*)?
+read GET|HEAD regex /(api|apis|openapi)(/.*)? long
 version GET|HEAD exact /version
 EOR
     ;;

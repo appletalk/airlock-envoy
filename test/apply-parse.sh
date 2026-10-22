@@ -173,7 +173,9 @@ printf 'http 10.0.0.1:6443 rules kubernetes-read credential kube ca k3s\nhttp x.
 r="$("$apply" --render "$work/site")"
 c="$(sed -n '/^  - name: "http-10.0.0.1"$/,/^  - name: /p' <<< "$r")"
 order="$(grep -o 'name: "10.0.0.1-[a-z-]*"' <<< "$r" | sed 's/^name: "10.0.0.1-//; s/"$//' | tr '\n' ' ')"
-if [ "$order" = "upgrade pod-stream node-proxy legacy-proxy access-review whoami read version refused " ] \
+if [ "$order" = "upgrade escaped pod-stream node-proxy legacy-proxy access-review whoami read version refused " ] \
+   && grep -A4 'name: "10.0.0.1-read"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' \
+   && grep -A4 'name: "10.0.0.1-version"' <<< "$r" | grep -q 'timeout: 120s, idle_timeout: 300s, max_stream_duration' \
    && grep -q 'type: STATIC' <<< "$c" && ! grep -q 'sni:' <<< "$c" && ! grep -q 'dns_lookup_family' <<< "$c" \
    && grep -q 'trusted_ca: { filename: /etc/airlock-envoy/ca/k3s.pem }' <<< "$c" \
    && grep -q 'san_type: IP_ADDRESS, matcher: { exact: "10.0.0.1" }' <<< "$c" \
@@ -182,15 +184,16 @@ if [ "$order" = "upgrade pod-stream node-proxy legacy-proxy access-review whoami
    && grep -q 'domains: \["10.0.0.1", "10.0.0.1:80"\]' <<< "$r" && grep -q 'name: "deny-connect-http-10.0.0.1"' <<< "$r" \
    && grep -q 'key_matcher: { prefix: "impersonate-", ignore_case: true }' <<< "$r" \
    && [ "$("$apply" --clients b "$work/site" | grep -v '^#' | head -1)" = "10.0.0.1 6443 kubernetes-read yes" ]; then
-  echo "ok   kubernetes-read on an address: upgrades, exec/attach/port-forward/proxy refused before reads; IP SAN, no SNI, own ca; impersonation stripped"
+  echo "ok   kubernetes-read on an address: upgrades, escapes, exec/attach/port-forward/proxy refused before reads (long: watch, logs -f); IP SAN, no SNI, own ca; impersonation stripped"
 else echo "FAIL kubernetes-read rendering (route order: $order)"; fails=$((fails+1)); fi
 # What the kubernetes-read paths let through, against the rendered regexes (RE2 and ERE agree
 # on these): reads and the two reviews yes, the streaming and proxy subresources no.
 krx() { grep -A3 "name: \"10.0.0.1-$1\"" <<< "$r" | sed -n 's/.*regex: "\(.*\)" }$/\1/p' | head -1 | sed 's/\\\\/\\/g'; }
-deny="$(krx pod-stream)|$(krx node-proxy)|$(krx legacy-proxy)"
+deny="$(krx escaped)|$(krx pod-stream)|$(krx node-proxy)|$(krx legacy-proxy)"
 kfail=""
 for p in /api/v1/namespaces/a/pods/b/exec /api/v1/namespaces/a/pods/b/attach /api/v1/namespaces/a/pods/b/portforward \
-         /api/v1/namespaces/a/pods/b/proxy/x /api/v1/namespaces/a/services/b:80/proxy/ /api/v1/nodes/n1/proxy/metrics /api/v1/proxy/namespaces/a; do
+         /api/v1/namespaces/a/pods/b/proxy/x /api/v1/namespaces/a/services/b:80/proxy/ /api/v1/nodes/n1/proxy/metrics /api/v1/proxy/namespaces/a \
+         /api/v1/namespaces/a/pods/b/%70roxy/ /api/v1/namespaces/a/pods/b/%65xec /api/v1/nodes/n/%70roxy /api/%2e%2e/x; do
   [[ "$p" =~ ^($deny)$ ]] || kfail+=" not-denied:$p"
 done
 for p in /api/v1/namespaces/a/pods/b/log /api/v1/namespaces/a/pods /apis/apps/v1/deployments /api/v1/namespaces/proxy/configmaps/exec /openapi/v3; do
@@ -201,7 +204,7 @@ done
 [[ /apis/authorizationxk8s.io/v1/selfsubjectaccessreviews =~ ^($(krx access-review))$ ]] && kfail+=" review-dot"
 [[ /apis/authorization.k8s.io/v1/subjectaccessreviews =~ ^($(krx access-review))$ ]] && kfail+=" sar"
 [[ /healthz =~ ^($(krx read))$ ]] && kfail+=" healthz"
-if [ -z "$kfail" ]; then echo "ok   kubernetes-read paths: streams and proxies refused, reads and self reviews through, dots literal"
+if [ -z "$kfail" ]; then echo "ok   kubernetes-read paths: streams, proxies and escaped forms refused, reads and self reviews through, dots literal"
 else echo "FAIL kubernetes-read paths:$kfail"; fails=$((fails+1)); fi
 
 lists "kubernetes-read on an address, its ca listed" 'b http://10.0.0.1:6443 rules kubernetes-read credential kube ca k3s\nb client t' \

@@ -498,13 +498,17 @@ x airlock-envoy-apply >/dev/null
 r="$(kreq "http://$KIP/api/v1/namespaces/a/pods?limit=1" -H "Authorization: Bearer box-token" -H "Impersonate-User: admin" -H "Impersonate-Group: system:masters")"
 ck "kubernetes-read: a read reaches the API server over TLS (own CA, IP SAN), with the token, not the box's, and no impersonation: got $(head -1 <<< "$r") / $(tail -1 <<< "$r")" \
    '[ "$(tail -1 <<< "$r")" = 200 ] && [ "$(head -1 <<< "$r")" = "GET /api/v1/namespaces/a/pods?limit=1 HTTP/1.1" ] && grep -qix "authorization: Bearer KUBE-SECRET-1" <<< "$r" \
+    && grep -qix "host: $KIP" <<< "$r" \
     && ! grep -qi "box-token\|^impersonate" <<< "$r"'
 st() { kreq "$@" | tail -1; }
 r="$(st "http://$KIP/version") $(st -X POST -H "Content-Type: application/json" -d "{}" "http://$KIP/apis/authentication.k8s.io/v1/selfsubjectreviews") $(st -X POST -H "Content-Type: application/json" -d "{}" "http://$KIP/apis/authorization.k8s.io/v1/selfsubjectaccessreviews")"
 ck "kubernetes-read: version, whoami and can-i through: got $r" '[ "$r" = "200 200 200" ]'
 r="$(st "http://$KIP/api/v1/namespaces/a/pods/b/exec?command=sh") $(st -H "Connection: Upgrade" -H "Upgrade: websocket" "http://$KIP/api/v1/namespaces/a/pods/b/log") $(st "http://$KIP/api/v1/namespaces/a/services/b:80/proxy/") $(st "http://$KIP/api/v1/nodes/n/proxy/metrics")"
+r="$r $(st "http://$KIP/api/v1/namespaces/a/pods/b/attach") $(st "http://$KIP/api/v1/namespaces/a/pods/b/portforward") $(st "http://$KIP/api/v1/namespaces/a/pods/b/proxy/") $(st "http://$KIP/api/v1/proxy/namespaces/a/pods/b")"
+r="$r $(st -I "http://$KIP/api/v1/namespaces/a/pods/b/exec") $(st "http://$KIP/api/v1/namespaces/a/pods/b/%70roxy/") $(st "http://$KIP/api/v1/namespaces/a/pods/b/%65xec")"
 r="$r $(st -X POST -H "Content-Type: application/json" -d "{}" "http://$KIP/api/v1/namespaces/a/configmaps") $(st -X DELETE "http://$KIP/api/v1/namespaces/a/pods/b") $(st -X PATCH -d "{}" "http://$KIP/api/v1/namespaces/a/pods/b") $(st "http://$KIP/healthz") $(st -X POST -d "{}" "http://$KIP/apis/authorization.k8s.io/v1/subjectaccessreviews")"
-ck "kubernetes-read: exec, an upgrade, service and node proxy, create, delete, patch, other paths and other reviews refused: got $r" '[ "$r" = "403 403 403 403 403 403 403 403 403" ]'
+ck "kubernetes-read: exec, an upgrade, service and node proxy, attach, port-forward, pod and legacy proxy, HEAD on exec, escaped names, create, delete, patch, other paths and other reviews refused: got $r" \
+   '[ "$r" = "403 403 403 403 403 403 403 403 403 403 403 403 403 403 403 403" ]'
 ck "kubernetes-read: no CONNECT to the address the box reaches by plain HTTP" '[ "$(tunnel "$E" "$KIP:6443")" = 403 ]'
 x sh -c "airlock-envoy-cred ca t-k3s < /root/k/other.pem" >/dev/null
 x systemctl restart airlock-envoy
@@ -519,8 +523,10 @@ kecho srv.pem
 r="$(st "http://$KIP/version")"
 ck "kubernetes-read: ...and with it back, through again: got $r" '[ "$r" = 200 ]'
 x systemctl stop t-kube-echo
-ck "kubernetes-read: the token is in neither the access log nor the config dump" \
-   '! x grep -q KUBE-SECRET /var/log/airlock-envoy/access.jsonl && ! x curl -s --unix-socket /run/airlock-envoy-internal/admin.sock "http://localhost/config_dump" | grep -q KUBE-SECRET'
+alog="$(x cat /var/log/airlock-envoy/access.jsonl)"
+dump="$(x curl -s --unix-socket /run/airlock-envoy-internal/admin.sock "http://localhost/config_dump")"
+ck "kubernetes-read: the token is in neither the access log (which has the requests) nor the config dump" \
+   '[[ "$alog" == *"/api/v1/namespaces/a/pods"* && "$alog" != *KUBE-SECRET* && "$dump" == *credential_injector* && "$dump" != *KUBE-SECRET* ]]'
 site "extra @anthropic example.com:443" "client extra client"
 x airlock-envoy-apply >/dev/null
 ck "plain HTTP dropped: a running socket's manifest is updated by the apply (no hosts)" 'x test -f "$EM" && ! x grep -qv "^#" "$EM"'

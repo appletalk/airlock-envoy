@@ -280,7 +280,9 @@ dev   @anthropic web http://api.github.com http://github.com
   `sudo airlock-envoy-cred ca <name> < ca.pem` (CA certificates only; it prints each one's
   SHA-256 fingerprint to compare with the source). Apply refuses a listener whose ca isn't set.
   Envoy reads the file when it starts: changing a ca already in use needs
-  `sudo systemctl restart airlock-envoy`.
+  `sudo systemctl restart airlock-envoy`. The ca is the whole trust anchor: anything it signs
+  for that address passes (a k3s server CA also signs the node's kubelet certificate, which
+  Envoy never dials, being pinned to the API port).
 - **Variants**: `http <host>@<variant> ...` is another definition of the same host, with its
   own rules, credential and projects (a second identity, or narrower rules for one profile);
   a listener lists it as `http://<host>@<variant>`. A listener uses one definition per host.
@@ -327,9 +329,11 @@ dev   @anthropic web http://api.github.com http://github.com
   `kubernetes-read` (a Kubernetes API server, read only: GET and HEAD on `/api`, `/apis`,
   `/openapi` and `/version`, and POST only to the self access reviews and `selfsubjectreviews`,
   so `kubectl auth can-i` and `whoami` work; refused: every write, any protocol upgrade
-  (WebSocket, SPDY), and exec, attach, port-forward and the pod, service and node `proxy`
-  subresources whatever the method. What the token reads is its RBAC: Secrets too, if it may.
-  Watches and `logs -f` end after 2 minutes, as on every capped route),
+  (WebSocket, SPDY), any escaped character in the path (no Kubernetes name has one; the API
+  server would decode `%70roxy` to `proxy`), and exec, attach, port-forward and the pod,
+  service and node `proxy` subresources whatever the method. What the token reads is its
+  RBAC: Secrets too, if it may. Reads have no request timeout or stream cap, so watches and
+  `logs -f` run on until 5 minutes pass with nothing sent),
   `github-issues` (reads; issue create, edit, close, reopen, comments, labels, assignees,
   reactions; no PR writes), `github-api` (the same plus PR create, edit including the base
   branch, close, reopen, draft state, reviewers; refused in both: merge, approve, auto-merge,

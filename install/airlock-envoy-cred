@@ -9,7 +9,7 @@
 #       basic:<user> "Basic base64(<user>:<s>)". Envoy picks it up within a second, no restart.
 #   airlock-envoy-cred revoke <name>   as root: replace it with a value that grants nothing
 #                                     (deleting the file would not: Envoy keeps the last one)
-#   airlock-envoy-cred list            as root: names, formats and when each was set
+#   airlock-envoy-cred list            as root: names, formats and when each was set (and the cas)
 #   airlock-envoy-cred ca <name>       as root: read PEM certificates from stdin, the only CAs
 #                                     Envoy trusts for a host with "ca <name>" (a cluster's own
 #                                     CA); prints each one's SHA-256 fingerprint to compare.
@@ -92,8 +92,14 @@ case "$cmd" in
     valid_name "$1"
     [ ! -t 0 ] || die "give the PEM file on stdin: airlock-envoy-cred ca $1 < <file>"
     command -v openssl >/dev/null || die "needs openssl to check the certificates"
-    pem="$(head -c 65537)"
-    [ "${#pem}" -le 65536 ] || die "over 64 KiB: not a CA certificate or two"
+    raw="$(mktemp "$CA_DIR/.raw.XXXXXX")"
+    # shellcheck disable=SC2064  # the path now, not at exit
+    trap "rm -f '$raw'" EXIT
+    head -c 65537 > "$raw"
+    [ "$(stat -c %s "$raw")" -le 65536 ] || die "over 64 KiB: not a CA certificate or two"
+    # Windows line endings and blank lines (as copied out of some tools) are dropped.
+    pem="$(tr -d '\r' < "$raw" | sed '/^[[:blank:]]*$/d')"
+    rm -f "$raw"; trap - EXIT
     # Nothing but certificate blocks: one per BEGIN/END pair, base64 lines between them.
     awk '/^-----BEGIN CERTIFICATE-----$/ { if (inb) exit 1; inb = 1; n++; next }
          /^-----END CERTIFICATE-----$/ { if (!inb) exit 1; inb = 0; next }
@@ -128,6 +134,11 @@ case "$cmd" in
     for f in "$DIR"/*.yaml; do
       sed -n '1s/^# airlock-envoy credential \([^,]*\), format \([^,]*\), set \(.*\)$/\1  \2  \3/p' "$f"
     done
+    if [ -d "$CA_DIR" ]; then
+      for f in "$CA_DIR"/*.pem; do
+        printf 'ca %s  %s certificate(s)  set %s\n' "$(basename "$f" .pem)" "$(grep -c '^-----BEGIN CERTIFICATE-----$' "$f")" "$(date -u -r "$f" +%Y-%m-%dT%H:%M:%SZ)"
+      done
+    fi
     ;;
   *) usage >&2; exit 2 ;;
 esac
