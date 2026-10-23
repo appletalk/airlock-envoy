@@ -1,7 +1,7 @@
 #!/bin/bash
 # Every test, as fast as this machine allows: the install test on each distribution at once,
-# and alongside them shellcheck, the parser, t2 and the site checks (in turn: they share one
-# test Envoy).
+# and alongside them shellcheck, the site-details checks, the parser, t2 and the site checks
+# (in turn: they share one test Envoy).
 # Prints each suite's result and time; exits non-zero if any failed. Logs stay in a temp dir.
 # Usage: test/run-all.sh [distro...]     default: arch debian ubuntu-26.04
 #   OLD_REPO=<earlier checkout> and AIRLOCK_REPO=<claude-airlock checkout> reach install-test.sh.
@@ -29,7 +29,15 @@ for d in "${distros[@]}"; do run "install-$d" test/install-test.sh "$d" & order+
 lint() {
   local sc="${SHELLCHECK:-$(command -v shellcheck)}"
   [ -n "$sc" ] || { echo "skipped: no shellcheck (set SHELLCHECK=)"; return 3; }
-  "$sc" install/*.sh install/airlock-envoy-apply install/airlock-envoy-cred test/*.sh test/client/entry.sh && echo "ok   shellcheck"
+  "$sc" install/*.sh install/airlock-envoy-apply install/airlock-envoy-cred test/*.sh test/client/entry.sh \
+    scripts/private-names-check hooks/* && echo "ok   shellcheck"
+}
+# shellcheck disable=SC2329  # run via run()
+names() {  # no site details in the tracked files (this repo is public; the patterns are private)
+  local rc=0; scripts/private-names-check --tree HEAD || rc=$?
+  [ "$rc" = 2 ] && { echo "skipped: no private pattern list (scripts/private-names-check)"; return 3; }
+  [ "$rc" = 0 ] && echo "ok   no site details in the tree"
+  return "$rc"
 }
 # shellcheck disable=SC2329  # run via run()
 graphql() {  # the GitHub GraphQL write check, under LuaJIT as in Envoy
@@ -37,12 +45,14 @@ graphql() {  # the GitHub GraphQL write check, under LuaJIT as in Envoy
   luajit test/graphql-check.lua
 }
 { run shellcheck lint
+  run private-names names
+  run private-names-check test/private-names-check-test.sh
   run apply-parse test/apply-parse.sh
   run graphql graphql
   with_envoy t2 test/t2.conf test/t2-checks.sh
   with_envoy site-checks test/site.conf test/site-checks.sh
 } &
-order=(shellcheck apply-parse graphql t2 site-checks "${order[@]}")
+order=(shellcheck private-names private-names-check apply-parse graphql t2 site-checks "${order[@]}")
 wait
 failed=0
 for name in "${order[@]}"; do

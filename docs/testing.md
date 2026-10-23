@@ -19,9 +19,11 @@ test/run-all.sh [distro...]
 ```
 
 Runs the install test on Arch, Debian 13 and Ubuntu 26.04 (the default; name others to change
-it) in parallel. Alongside them it runs shellcheck, the parser, the GraphQL check, t2 and the
-site checks, then prints each suite's result and time. About 20 s in all on a 20-thread
-workstation.
+it) in parallel. Alongside them it runs shellcheck, the site-details checks
+(`scripts/private-names-check --tree HEAD`, skipped without a private pattern list, and the
+checker's own tests, `test/private-names-check-test.sh`), the parser, the GraphQL check, t2
+and the site checks, then prints each suite's result and time. About 20 s in all on a
+20-thread workstation.
 
 - `OLD_REPO` and `AIRLOCK_REPO` pass through to the install test.
 - `SHELLCHECK=<path>` if shellcheck is not on `PATH` (skipped, and said so, if not found).

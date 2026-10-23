@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Refuse site details in this public repo: names, domains, hosts, addresses of any one site.
+# The patterns are never in this repo (that would publish them): one extended regex per line,
+# '#' comments, from the first of
+#   $AIRLOCK_PRIVATE_NAMES, `git config airlock.privateNames`,
+#   ~/.config/claude-airlock/private-names
+# Matching is case-insensitive, on whole file contents read twice (NUL bytes removed, for UTF-16
+# text; NUL bytes as line breaks, for strings packed in a binary), never through
+# .gitattributes, diff drivers or textconv.
+#
+#   private-names-check --staged          the index: changed paths and their whole contents
+#   private-names-check --msg FILE        a commit message (the commit-msg hook)
+#   private-names-check --range A..B      each commit in the range (root and merges included):
+#                                         the whole commit object, changed paths, contents
+#   private-names-check --tree [REV]      every path and file at REV (default HEAD)
+#
+# Exit 0: clean. 1: a match (each printed). 2: no usable pattern list, or a usage error.
+set -euo pipefail
+# Bytes, not characters: under a UTF-8 locale [^a-z] never matches an invalid byte, so a name
+# between such bytes would slip through. -i still folds ASCII case.
+export LC_ALL=C
+
+usage() { echo "usage: private-names-check --staged | --msg FILE | --range A..B | --tree [REV]" >&2; exit 2; }
+case "${1:-}" in --staged|--msg|--range|--tree) ;; *) usage ;; esac
+
+list="${AIRLOCK_PRIVATE_NAMES:-}"
+[ -n "$list" ] || list="$(git config --get airlock.privateNames 2>/dev/null || true)"
+[ -n "$list" ] || list="$HOME/.config/claude-airlock/private-names"
+if [ ! -r "$list" ]; then
+  echo "private-names-check: no pattern file ($list): set AIRLOCK_PRIVATE_NAMES or git config airlock.privateNames" >&2
+  exit 2
+fi
+# CR line ends and indentation are not part of a pattern (a CRLF list would otherwise match nothing)
+pat="$(tr -d '\r' < "$list" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | { grep -vE '^(#|$)' || true; } | paste -sd'|' -)"
+[ -n "$pat" ] || { echo "private-names-check: $list holds no patterns" >&2; exit 2; }
+# An invalid pattern would make every grep fail, which reads as "no match": refuse it instead.
+rc=0; grep -qiE -- "$pat" </dev/null || rc=$?
+[ "$rc" -le 1 ] || { echo "private-names-check: $list has an invalid pattern" >&2; exit 2; }
+
+if [ "$1" != --msg ]; then
+  git rev-parse --git-dir >/dev/null 2>&1 || { echo "private-names-check: not in a git repository" >&2; exit 2; }
+  if top="$(git rev-parse --show-toplevel 2>/dev/null)"; then cd "$top"; fi
+fi
+
+hits=0
+tmp="$(mktemp)"; trap 'rm -f "$tmp" "$tmp".*' EXIT
+match() {  # match <label>: stdin bytes, read twice: NULs removed (UTF-16 text) and NULs as line
+           # breaks (strings packed in a binary); prints each matching line
+  local out rc=0
+  cat > "$tmp"
+  out="$({ tr -d '\000' < "$tmp"; echo; tr '\000' '\n' < "$tmp"; } | grep -aniE -- "$pat")" || rc=$?
+  [ "$rc" -le 1 ] || { echo "private-names-check: grep failed ($rc) on $1" >&2; exit 2; }
+  # the label is printed as data, never put into a sed script (a path may hold anything)
+  if [ -n "$out" ]; then
+    while IFS= read -r l; do printf '%s:%s\n' "$1" "$l"; done < <(printf '%s\n' "$out" | sort -u)
+    hits=1
+  fi
+}
+blobs() {  # blobs <label>: stdin raw -z output of diff-tree/diff-index; each added or changed
+           # file's path and content (deletions and submodules left out)
+  local meta path m
+  while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+    read -r -a m <<< "$meta"   # :oldmode newmode oldsha newsha status
+    match "$1 path" <<< "$path"
+    [[ "${m[4]}" == D* || "${m[1]}" == 160000 ]] || content "$1 $path" "${m[3]}"
+  done
+}
+treeblobs() {  # treeblobs <label> <file of ls-tree -r -z output>: every file's path and content
+  local meta path m
+  while IFS=$'\t' read -r -d '' meta path; do
+    read -r -a m <<< "$meta"   # mode type sha
+    match "$1 path" <<< "$path"
+    [ "${m[1]}" != blob ] || content "$1 $path" "${m[2]}"
+  done < "$2"
+}
+content() {  # content <label> <blob sha>: read in this shell, so a failure stops the check
+  git cat-file blob "$2" > "$tmp.b" || { echo "private-names-check: can't read $1" >&2; exit 2; }
+  match "$1" < "$tmp.b"
+}
+commitobj() {  # commitobj <label> <commit>: the whole commit object (message, author, committer,
+               # every other header: a mergetag carries a tag's message, a signature header can
+               # carry anything); base64 has no dots or colons and a name needs non-letters
+               # around it, so a real signature practically never matches
+  git cat-file commit "$2" > "$tmp.c" || { echo "private-names-check: can't read commit $2" >&2; exit 2; }
+  match "$1" < "$tmp.c"
+}
+
+case "$1" in
+  --staged)
+    base=HEAD; git rev-parse -q --verify HEAD >/dev/null || base="$(git hash-object -t tree /dev/null)"  # the empty tree
+    git diff-index --cached -r -z --no-renames "$base" > "$tmp.d" || { echo "private-names-check: can't read the index" >&2; exit 2; }
+    blobs staged < "$tmp.d"
+    ;;
+  --msg)
+    [ -r "${2:-}" ] || usage
+    # all of it, comment lines too (git commit -m keeps them); only the diff git commit -v puts
+    # below its scissors line (with git's own notice after it) is left out
+    match "commit message" < <(awk '/^# -{24} >8 -{24}$/ { getline n; if (n ~ /^# Do not modify or remove the line above\./) exit; print; print n; next } { print }' "$2")
+    ;;
+  --range)
+    [ -n "${2:-}" ] || usage
+    git rev-list --reverse "$2" -- > "$tmp.r" || { echo "private-names-check: bad range '$2'" >&2; exit 2; }
+    while read -r c; do
+      s=${c:0:12}
+      commitobj "$s commit" "$c"
+      git diff-tree -r -z --root -m --first-parent --no-renames --no-commit-id "$c" > "$tmp.d" \
+        || { echo "private-names-check: can't diff $c" >&2; exit 2; }
+      blobs "$s" < "$tmp.d"
+    done < "$tmp.r"
+    ;;
+  --tree)
+    rev="${2:-HEAD}"
+    git rev-parse -q --verify "$rev^{tree}" >/dev/null || { echo "private-names-check: no tree '$rev'" >&2; exit 2; }
+    git ls-tree -r -z --full-tree "$rev" > "$tmp.t" || { echo "private-names-check: can't list $rev" >&2; exit 2; }
+    treeblobs "$rev" "$tmp.t"
+    ;;
+esac
+[ "$hits" = 0 ] || { echo "private-names-check: site details found (above); this repo is public" >&2; exit 1; }

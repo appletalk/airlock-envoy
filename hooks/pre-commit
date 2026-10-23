@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# airlock-envoy pre-commit: this repo is public, so no site details in what is committed
+# (scripts/private-names-check). Install with: git config core.hooksPath hooks
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+rc=0; scripts/private-names-check --staged || rc=$?
+[ "$rc" = 2 ] && { echo "!! private-names-check could not run (above): nothing was checked" >&2; exit 0; }
+exit "$rc"

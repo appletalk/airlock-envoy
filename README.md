@@ -464,6 +464,14 @@ Field-by-field detail: [docs/audit-log.md](docs/audit-log.md).
 
 `test/run-all.sh` runs every suite. See [docs/testing.md](docs/testing.md).
 
+This repository is public. Keep site details out of it, commit messages included: names of
+people and hosts, domains, addresses, anything from one site's config; use stand-ins (`alice`,
+`example.org`, `10.0.0.10`). `scripts/private-names-check` checks against your own list of
+patterns, kept outside the repo (one regex per line in `~/.config/claude-airlock/private-names`,
+or the file `AIRLOCK_PRIVATE_NAMES` or `git config airlock.privateNames` names). The hooks in
+`hooks/` run it on each commit (`git config core.hooksPath hooks`); before publishing, run it
+over what you're about to push: `scripts/private-names-check --range origin/main..main`.
+
 ## Licence
 
 AGPL-3.0-or-later.

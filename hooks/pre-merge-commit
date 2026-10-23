@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# airlock-envoy pre-merge-commit: a merge commit gets the same site-details check as any commit (git runs
+# this, not pre-commit, for a clean merge).
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+rc=0; scripts/private-names-check --staged || rc=$?
+[ "$rc" = 2 ] && { echo "!! private-names-check could not run (above): nothing was checked" >&2; exit 0; }
+exit "$rc"
