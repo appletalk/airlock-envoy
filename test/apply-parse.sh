@@ -377,6 +377,17 @@ if grep -q 'tls_params: { tls_minimum_protocol_version: TLSv1_2, tls_maximum_pro
   echo "ok   upstream TLS offers 1.3 (Envoy's client default stops at 1.2; a 1.3-only host refused every handshake)"
 else echo "FAIL upstream TLS does not offer 1.3"; fails=$((fails+1)); fi
 
+# A host entry on another port: the CONNECT route matches host:port exactly, and the upstream
+# is dialled on that port (the site checks use a host that never resolves, so only this pins it).
+printf 'b port-test.invalid:8443\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+c="$(sed -n '/^  - name: "upstream-port-test.invalid/,/^  - name: /p' <<< "$r")"
+if grep -q 'string_match: { exact: "port-test.invalid:8443" }' <<< "$r" \
+   && grep -q 'address: "port-test.invalid", port_value: 8443' <<< "$c" && grep -q 'type: LOGICAL_DNS' <<< "$c" \
+   && ! grep -q 'port_value: 443 ' <<< "$c"; then
+  echo "ok   a host entry on port 8443: exact host:port route, upstream dialled on 8443"
+else echo "FAIL host entry on another port"; fails=$((fails+1)); fi
+
 # forgejo: git routes have no request timeout or stream cap (long), the API routes do.
 printf 'http g.example.com rules forgejo credential fj\nb http://g.example.com\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"

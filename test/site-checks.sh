@@ -92,12 +92,15 @@ settle() {
   cat "$res"/*; fails=$((fails + $(cat "$res"/* | grep -c "^FAIL"))); rm -f "$res"/*
 }
 OK="proxy=200 http=[1-5]* exit=0" NO="proxy=403 http=000 exit=56"
-note "== t-site: @anthropic, example.com, 1.1.1.1:443, tls-v1-2.badssl.com:1012, one.one.one.one"
+note "== t-site: @anthropic, example.com, 1.1.1.1:443, port-test.invalid:8443, one.one.one.one"
 check 3128 "included api.anthropic.com"          "$OK" https://api.anthropic.com/
 check 3128 "example.com"                         "$OK" https://example.com/
 check 3128 "address entry 1.1.1.1:443"           "$OK" https://1.1.1.1/
-check 3128 "host on port 1012"                   "$OK" https://tls-v1-2.badssl.com:1012/
-check 3128 "same host, port 443 not listed"      "$NO" https://tls-v1-2.badssl.com/
+# The port is part of an entry. The host is under .invalid (RFC 6761: never resolves), so the
+# allowed tunnel opens and then closes with no upstream, and no odd port leaves the machine;
+# the render test (apply-parse.sh) pins the port the upstream would be dialled on.
+check 3128 "host on port 8443: allowed, no upstream"  "proxy=200 http=000 exit=35" https://port-test.invalid:8443/
+check 3128 "same host, port 443 not listed"      "$NO" https://port-test.invalid/
 check 3128 "1.0.0.1, an address not listed"      "$NO" https://1.0.0.1/
 check 3128 "1.1.1.1 on port 80"                  "$NO" http://1.1.1.1/ -p
 check 3128 "example.org, the other profile'"'"'s" "$NO" https://example.org/
@@ -335,7 +338,8 @@ logchecks() {
     else echo "FAIL log: $1"; fi
   }
   lc "t-site allowed the address entry by its route" '.listener == "t-site" and .route == "allow-1.1.1.1" and .status == 200'
-  lc "t-site allowed the port-1012 host" '.listener == "t-site" and .route == "allow-tls-v1-2.badssl.com:1012" and .status == 200'
+  lc "t-site allowed the port-8443 host" '.listener == "t-site" and .route == "allow-port-test.invalid:8443" and .status == 200'
+  lc "t-site refused the same host on 443" '.listener == "t-site" and .authority == "port-test.invalid:443" and .route == "deny-connect"'
   lc "t-anthropic refused example.com" '.listener == "t-anthropic" and .authority == "example.com:443" and .route == "deny-connect"'
   lc "t-other refused api.anthropic.com" '.listener == "t-other" and .authority == "api.anthropic.com:443" and .route == "deny-connect"'
   lc "an SNI sent to the address entry: refused by RBAC, with the SNI" '.sni == "one.one.one.one" and .route == "tls-no-sni" and .details == "rbac_access_denied_matched_policy[server-name-sent]"'
