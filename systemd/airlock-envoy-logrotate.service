@@ -1,0 +1,38 @@
+[Unit]
+Description=Rotate the airlock Envoy logs when due (100 MiB, or a day)
+Documentation=https://github.com/appletalk/airlock-envoy
+# Run by airlock-envoy-logrotate.timer. Nothing to rotate before Envoy has ever run.
+ConditionPathIsDirectory=/var/log/airlock-envoy
+
+[Service]
+Type=oneshot
+# logrotate runs as root and, by the config's `su`, does the file work as airlock-envoy. Its
+# own state file, apart from the distribution's logrotate run.
+ExecStart=/usr/sbin/logrotate --state /var/lib/airlock-envoy/logrotate.status /etc/airlock-envoy/logrotate.conf
+StateDirectory=airlock-envoy
+StateDirectoryMode=0700
+UMask=0077
+
+NoNewPrivileges=yes
+# su, create (chown), and reaching the service account's 0750/0700 directories as root.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+ProtectSystem=strict
+ReadWritePaths=/var/log/airlock-envoy
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

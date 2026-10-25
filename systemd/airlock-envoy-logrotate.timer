@@ -1,0 +1,10 @@
+[Unit]
+Description=Rotate the airlock Envoy logs every 15 minutes when due (100 MiB, or a day)
+Documentation=https://github.com/appletalk/airlock-envoy
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

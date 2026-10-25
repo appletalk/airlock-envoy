@@ -30,9 +30,11 @@ if [ ${#ignored[@]} -gt 0 ]; then
   echo "    own in the site file: client <listener> <user> (airlock-envoy-apply --help)" >&2
 fi
 [ -x /usr/local/bin/envoy ] || { echo "install Envoy first: install/install-envoy.sh <version>" >&2; exit 1; }
-for t in setfacl getfacl systemd-sysusers setpriv; do
-  command -v "$t" >/dev/null || { echo "missing $t (Ubuntu/Debian: apt install acl)" >&2; exit 1; }
+for t in setfacl getfacl systemd-sysusers setpriv curl; do
+  command -v "$t" >/dev/null || { echo "missing $t (Ubuntu/Debian: apt install acl curl)" >&2; exit 1; }
 done
+# The timer runs /usr/sbin/logrotate (on Arch /usr/sbin is /usr/bin).
+[ -x /usr/sbin/logrotate ] || { echo "missing logrotate (Ubuntu/Debian: apt install logrotate; Arch: pacman -S logrotate)" >&2; exit 1; }
 [ -x /usr/lib/systemd/systemd-socket-proxyd ] || { echo "missing /usr/lib/systemd/systemd-socket-proxyd" >&2; exit 1; }
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -80,6 +82,10 @@ install -m 0755 -o root -g root "$repo/install/airlock-envoy-apply" /usr/local/s
 mv -f /usr/local/sbin/airlock-envoy-apply.new /usr/local/sbin/airlock-envoy-apply
 install -m 0755 -o root -g root "$repo/install/airlock-envoy-cred" /usr/local/sbin/airlock-envoy-cred.new
 mv -f /usr/local/sbin/airlock-envoy-cred.new /usr/local/sbin/airlock-envoy-cred
+# Log rotation (airlock-envoy-logrotate.timer runs logrotate with this, every 15 minutes).
+# Not in /etc/logrotate.d: its own timer and state, apart from the distribution's daily run.
+install -m 0644 -o root -g root "$repo/install/logrotate.conf" /etc/airlock-envoy/logrotate.conf.new
+mv -f /etc/airlock-envoy/logrotate.conf.new /etc/airlock-envoy/logrotate.conf
 # The GitHub GraphQL write check the github-api rules inline into the config.
 install -D -m 0644 -o root -g root "$repo/install/github-graphql.lua" /usr/local/share/airlock-envoy/github-graphql.lua
 # Credentials for plain-HTTP destinations (airlock-envoy-cred): root writes, Envoy reads.
@@ -88,7 +94,8 @@ install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/credentials
 install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/ca
 
 # airlock-envoy-web is enabled and started by airlock-envoy-apply, only while a listener lists web.
-for u in airlock-envoy.service airlock-envoy-web.service airlock-envoy-proxy@.socket airlock-envoy-proxy@.service; do
+for u in airlock-envoy.service airlock-envoy-web.service airlock-envoy-proxy@.socket airlock-envoy-proxy@.service \
+         airlock-envoy-logrotate.service airlock-envoy-logrotate.timer; do
   install -m 0644 "$repo/systemd/$u" "/etc/systemd/system/$u"
 done
 # Earlier versions' one global client: each listener's own drop-in (airlock-envoy-apply) has
@@ -98,6 +105,7 @@ rmdir /etc/systemd/system/airlock-envoy-proxy@.socket.d 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl enable airlock-envoy.service
+systemctl enable --now airlock-envoy-logrotate.timer
 # The --site file, as checked, goes in now: the units it needs are in place.
 if [ -n "$site" ]; then
   # The one it replaces is kept (site.conf.prev): an earlier version reads only that format.

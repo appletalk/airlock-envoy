@@ -408,8 +408,9 @@ How the two socket layers make this work: [docs/design.md](docs/design.md#two-la
 | `/var/log/airlock-envoy/access.jsonl` | The audit log: every allowed and refused request and tunnel, with the listener and user |
 | `/var/log/airlock-envoy/web.jsonl` | The web Envoy: profile, server name, chain, upstream address |
 
-Both are JSON lines, readable by root and the service account only. **Nothing rotates or ships them yet**, so a box that
-keeps getting refused can grow the audit log without bound (planned with the audit pipeline).
+Both are JSON lines, readable by root and the service account only. logrotate rotates each at
+100 MiB or once a day (checked every 15 minutes, so a flood can still outgrow that between
+checks) and removes rotated files by age only, after 30 days; nothing ships them anywhere yet.
 Field-by-field detail: [docs/audit-log.md](docs/audit-log.md).
 
 A refusal tells the box why: the 403's body names the listener and what would change it (a
@@ -455,10 +456,11 @@ path its rules don't allow), so boxed Claude can report the cause instead of gue
 | `/etc/airlock-envoy/envoy.yaml`, `allowed` | root:airlock-envoy, 0640 | Rendered config; what was last applied |
 | `/etc/airlock-envoy/stopped` | root, 0644 | The kill switch, while it exists |
 | `/run/airlock-envoy-internal/` | airlock-envoy, 0700 | Envoy's own sockets, including admin; never given to anyone |
-| `/var/log/airlock-envoy/access.jsonl` | airlock-envoy, 0600 (dir 0750) | The audit log |
+| `/var/log/airlock-envoy/access.jsonl` | airlock-envoy, 0600 (dir 0750) | The audit log (rotated: `access.jsonl-<time>`, then `.gz`) |
 | `/etc/airlock-envoy/credentials/<name>.yaml` | root:airlock-envoy, 0640 (dir 0750) | Credentials for plain-HTTP destinations, written by `airlock-envoy-cred` |
 | `/etc/airlock-envoy/ca/<name>.pem` | root, 0644 (dir root:airlock-envoy 0750) | CAs for plain-HTTP hosts with `ca <name>` |
 | `/usr/local/sbin/airlock-envoy-apply`, `/usr/local/sbin/airlock-envoy-cred` | root, 0755 | The apply tool and the credential helper |
+| `/etc/airlock-envoy/logrotate.conf` | root, 0644 | Log rotation, run by its own timer (not `/etc/logrotate.d`) |
 | `/usr/local/share/airlock-envoy/github-graphql.lua` | root, 0644 | The GitHub GraphQL write check |
 | `/etc/airlock-envoy/envoy-web.yaml` | root:airlock-envoy, 0640 | The web Envoy's config, while a listener lists `web` |
 | `/etc/systemd/system/airlock-envoy-web.service.d/site.conf` | root, 0644 | Web's kernel filter: the site's `internal-net`, the resolvers allowed |
@@ -473,6 +475,7 @@ path its rules don't allow), so boxed Claude can report the cause instead of gue
 | `airlock-envoy-proxy@<listener>.socket` | A box socket, in its user's directory |
 | `airlock-envoy-proxy@<listener>.service` | `systemd-socket-proxyd`, relaying box connections to Envoy |
 | `airlock-envoy-web.service` | The web Envoy, enabled only while a listener lists `web` |
+| `airlock-envoy-logrotate.timer`, `.service` | Every 15 minutes, logrotate with `/etc/airlock-envoy/logrotate.conf` and its own state (`/var/lib/airlock-envoy/`) |
 
 ### Limits at a glance
 

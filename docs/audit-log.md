@@ -3,8 +3,21 @@
 Envoy writes JSON lines to `/var/log/airlock-envoy/access.jsonl` (`run/access.jsonl` in the
 spike harness). Lines are flushed every second and kept when Envoy stops.
 
-**Nothing rotates or ships the log yet.** A box that keeps getting refused can grow it without
-bound (planned with the audit pipeline).
+**Rotation** is logrotate's (`/etc/airlock-envoy/logrotate.conf`), run every 15 minutes by
+`airlock-envoy-logrotate.timer` with its own state file, apart from the distribution's daily run.
+A log rotates once it passes 100 MiB or once a day (an empty one never) to
+`access.jsonl-<YYYYmmddTHHMMSS>`, and the Envoy that writes it is asked to reopen its files
+(admin `POST /reopen_logs`). The newest rotated file stays uncompressed until the next rotation
+(Envoy flushes once a second, so a few lines can still land in it); older ones are `.gz`.
+
+- **Retention is by age only:** rotated files go after 30 days, never to make room. A flood of
+  refused requests rotates more often but can't push earlier evidence out; it costs disk
+  instead (100 MiB is checked every 15 minutes, so a flood can outgrow it between checks).
+- **Force a rotation:** `sudo logrotate -f --state /var/lib/airlock-envoy/logrotate.status
+  /etc/airlock-envoy/logrotate.conf`.
+- A reinstall enables the timer again.
+
+Nothing ships the logs anywhere yet.
 
 The web Envoy logs to `/var/log/airlock-envoy/web.jsonl`: profile, server name, chain and
 upstream address.
