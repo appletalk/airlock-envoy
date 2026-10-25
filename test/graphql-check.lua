@@ -154,7 +154,7 @@ local pcases = {
   { false, '{"query":"mutation($input: X) { ' .. U .. '(input: $input) { clientMutationId } }","variables":{"input":{"projectId":"PVT_ok"}},"variables":{"input":{"projectId":"PVT_other"}}}' },
   { false, '{"query":"mutation($input: X) { ' .. U .. '(input: $input) { clientMutationId } }","variables":[1]}' },
   { false, j('mutation { a: ' .. U .. '(input: {projectId: "PVT_ok"}) { clientMutationId } b: ' .. U .. '(input: {projectId: "PVT_other"}) { clientMutationId } }') },
-  { true,  j('mutation { deleteProjectV2Item(input: {projectId: "PVT_ok", itemId: "i"}) { deletedItemId } }') },
+  { false, j('mutation { deleteProjectV2Item(input: {projectId: "PVT_ok", itemId: "i"}) { deletedItemId } }') },
   { false, j('mutation { deleteProjectV2Item(input: {projectId: "PVT_other", itemId: "i"}) { deletedItemId } }') },
   { false, j('mutation { updateProjectV2(input: {projectId: "PVT_ok", title: "t"}) { clientMutationId } }') },
 }

@@ -38,10 +38,11 @@ end
 local ALLOWLISTS = { ["github-issues"] = ISSUES, ["github-api"] = union(ISSUES, PULLS) }
 -- Projects (v2) item writes, under either preset, only when the route names projects and
 -- each such mutation's input.projectId is one of them (read from the query or its variables;
--- anything it can't resolve for certain is refused).
+-- anything it can't resolve for certain is refused). Not deleteProjectV2Item: removing an item
+-- can't be undone (an archived one can be restored), so it stays refused.
 local PROJECT_MUTATIONS = {
   updateProjectV2ItemFieldValue = true, clearProjectV2ItemFieldValue = true,
-  addProjectV2ItemById = true, archiveProjectV2Item = true, deleteProjectV2Item = true,
+  addProjectV2ItemById = true, archiveProjectV2Item = true,
 }
 
 -- Bounds on the work one request can cause (the check runs on Envoy's worker threads, which

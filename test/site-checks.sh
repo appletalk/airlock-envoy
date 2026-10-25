@@ -220,6 +220,7 @@ slot; { r="$(curl -s -x http://127.0.0.1:3132 -H "X-Request-Id: box-marker-id" h
 pids+=($!)
 check 3132 "issues: createIssue naming a project refused"  "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { createIssue(input: {title: \\\"t\\\", projectV2Ids: [\\\"PVT_x\\\"]}) { clientMutationId } }\"}" http://httpbingo.org/graphql
 check 3132 "issues: Projects item write on the pinned project passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { archiveProjectV2Item(input: {projectId: \\\"PVT_test1\\\", itemId: \\\"i\\\"}) { clientMutationId } }\"}" http://httpbingo.org/graphql
+check 3132 "issues: Projects item delete refused, on the pinned project too" "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { deleteProjectV2Item(input: {projectId: \\\"PVT_test1\\\", itemId: \\\"i\\\"}) { deletedItemId } }\"}" http://httpbingo.org/graphql
 check 3132 "issues: Projects item write on another project refused" "$P http=403 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { archiveProjectV2Item(input: {projectId: \\\"PVT_other\\\", itemId: \\\"i\\\"}) { clientMutationId } }\"}" http://httpbingo.org/graphql
 slot; { r="$(curl -s -x http://127.0.0.1:3132 http://httpbingo.org/anything/v | tr -d " \n" | grep -o "Authorization\":\[\"[^\"]*")
     $(curl -s -x http://127.0.0.1:3130 http://httpbingo.org/anything/v | tr -d " \n" | grep -o "Authorization\":\[\"[^\"]*")"

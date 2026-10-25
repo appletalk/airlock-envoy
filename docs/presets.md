@@ -114,7 +114,8 @@ writes through:
 Only when the mutation's `input.projectId` is one of the listed IDs: a plain string in the query,
 or a variable in the body's `variables` (an operation's default value is not read). Anything the
 check can't resolve for certain is refused. `deleteProjectV2Item` (removing an item) is refused
-too, and so are project, field and view settings. Without `projects`, all Projects writes are
+too, even on a listed project: it can't be undone, while an archived item can be restored. So
+are project, field and view settings. Without `projects`, all Projects writes are
 refused.
 
 Limits:
