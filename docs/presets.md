@@ -126,6 +126,52 @@ Limits:
 - GitHub adds items to boards by itself: org auto-add workflows, and an issue template with
   `projects:` (createIssue with an `issueTemplate`) can add items to boards the box never names.
 
+## Repo scoping (`repos`)
+
+On the `git`, `git-read`, `forgejo`, `github-api` and `github-issues` presets,
+`repos <owner>/<repo>[,...]` narrows every route that names a repo to those repos.
+`<owner>/*` stands for every repo of that owner. Names match in any case, and the site file
+may write them in any case (apply keeps them lowercase).
+
+| Preset | With `repos` |
+|---|---|
+| `git`, `git-read` | fetch (and, with `git`, push) only the listed repos; `.git` optional |
+| `forgejo` | git and the API routes only in the listed repos; API reads only under `/api/v1/repos/<listed>/`, plus `/api/v1/user` and `/api/v1/version`. Wiki git and token parameters stay refused |
+| `github-api`, `github-issues` | REST reads only under `/repos/<listed>/`, plus `/user` and `/rate_limit`; REST writes only in the listed repos; **GraphQL refused** |
+
+Refused outright, besides other repos: search, `/repositories/<id>`, users, orgs and gists
+(and on Forgejo, repo search and user or org repo lists). A path with an escaped dot (`%2e`)
+is refused too: after a listed repo, `%2e%2e/%2e%2e/` would be a dot segment the upstream could
+decode into another repo's path. The listener already rejects escaped slashes and resolves
+plain dot segments before matching.
+
+**Why GraphQL is refused.** One GraphQL query walks from a repo to any other (`parent`,
+`forks`, an owner's `repositories`, a node looked up by ID), and so do mutation results. A
+check on the path or the top-level field can't bound that. So with `repos`, a box uses the REST
+API: `gh api repos/<owner>/<repo>/pulls -f title=... -f head=... -f base=...` and the like.
+What that loses:
+
+- `gh pr list`, `gh pr view`, `gh pr checks`, `gh pr create` and the other porcelain that
+  speaks GraphQL. `gh api` works. For `gh pr checkout`, use
+  `git fetch origin pull/<n>/head`.
+- What only GraphQL can do: turning a PR from draft to ready (or back) after it is open,
+  resolving review threads (and reading whether they are), Discussions, and Projects (v2)
+  item writes. `repos` and `projects` can't be on one line.
+
+**Limits:**
+
+- **A public repo's fork network.** GitHub serves a fork's commits through the repo it was
+  forked from (a fetch by SHA, `compare` across forks). So a listed public repo also reads
+  what anyone pushed to a fork of it. Scoping bounds which repos a box names, not what text it
+  reads: issue bodies and timelines mention other repos too.
+- **Renamed repos.** GitHub redirects an old name to `/repositories/<id>`, which is refused.
+  List the new name.
+- **`<owner>/*` on GitHub includes the owner's wikis** (`<repo>.wiki.git`). On Forgejo the
+  wiki route stays refused.
+- **Writes are still bounded by the token.** `repos` narrows where a box may write, but what
+  the token or App installation may write is still the site's to set: keep it to the same
+  repos.
+
 ## Request handling (all presets)
 
 - **Paths are normalized** before the rules see them (dot segments, merged slashes). An escaped
@@ -177,9 +223,10 @@ sent.
 
 This is the site's job:
 
-- **No repo scoping.** A box can read any repo the token can, and write issues and comments in
-  any of them, e.g. copy a private repo into another repo's issue. Only the token's (or App
-  installation's) repo list bounds it.
+- **Repo scoping is opt-in.** Without `repos`, a box can read any repo the token can (a
+  GitHub token also reads every public repo), and write issues and comments in any it may
+  write, e.g. copy a private repo into another repo's issue. Only the token's (or App
+  installation's) repo list bounds it. With `repos`, see [Repo scoping](#repo-scoping-repos).
 - **Label and comment writes also land on PRs**, where org automation (an auto-merge label, a
   comment-triggered workflow) can turn them into merges or deploys.
 - **Assignment can start an agent.** Where an org has the Copilot coding agent on, assigning an

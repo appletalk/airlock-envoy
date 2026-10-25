@@ -113,7 +113,7 @@ fi
 # ---- parse ----------------------------------------------------------------------------------
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
-declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=()
+declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=()
 declare -A CLIENT=() CLIENT_AT=() CLIENT_UID=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
 SOCKETS=()   # the listeners with a client, in file order: each gets a box socket
@@ -178,10 +178,11 @@ parse() {  # parse <source label>, text on stdin
     n=$((n + 1))
     line=${line%%#*}
     charset_ok=1
-    # Project IDs (an http line's "projects" value) are mixed case; parse_http checks them.
+    # Project IDs and repo names (an http line's "projects" and "repos" values) may be mixed
+    # case and hold _, / and *; parse_http checks them.
     chk=$line
     if [[ "$line" =~ ^[[:blank:]]*http[[:blank:]] ]]; then
-      while [[ "$chk" =~ (^|[[:blank:]])projects[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
+      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
     fi
     # User names may have an underscore; the client line checks its words itself.
     [[ ! "$line" =~ ^[[:blank:]]*client[[:blank:]] ]] || chk=${chk//_/}
@@ -267,7 +268,8 @@ parse() {  # parse <source label>, text on stdin
   done
 }
 
-# http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]:
+# http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
+#   [repos <owner>/<repo>[,...]]:
 # how the box reaches a host by plain HTTP. Envoy answers the box, checks method and path
 # against the preset, adds the credential, and is the TLS client to the host (its certificate
 # checked, Host and SNI fixed). The host may be an IPv4 address (a Kubernetes API server, say):
@@ -276,10 +278,11 @@ parse() {  # parse <source label>, text on stdin
 # is another definition of the same host (its own rules and credential, e.g. a second
 # identity), listed as http://<host>@<variant>; a listener uses one definition per host.
 # projects (GitHub presets only) lets Projects v2 item writes through for those project node
-# IDs and no others.
+# IDs and no others. repos (the git, forgejo and GitHub presets) narrows every repo route to
+# those repos (<owner>/<repo>, or <owner>/* for all of an owner's), and refuses GraphQL.
 parse_http() {  # parse_http <where> <words...>
-  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" id; local -a ids; shift
-  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...]"
+  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" id r; local -a ids; shift
+  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...]"
   hp=$1; shift
   if [[ "$hp" == *@* ]]; then
     variant=${hp#*@} hp=${hp%%@*}
@@ -302,15 +305,38 @@ parse_http() {  # parse_http <where> <words...>
           case " $projects " in *" $id "*) ;; *) projects="${projects:+$projects }$id" ;; esac
         done
         shift 2 ;;
-      *) die "$where: unknown http option '$1' (rules, credential, ca, projects)" ;;
+      repos) [ $# -ge 2 ] || die "$where: repos needs <owner>/<repo> names"
+        [ -z "$repos" ] || die "$where: repos given twice"
+        [[ "$2" != *, ]] || die "$where: bad repo '' (a trailing comma)"
+        IFS=, read -ra ids <<< "$2"
+        for r in "${ids[@]}"; do
+          valid_repo "$r" || die "$where: bad repo '$r' (want <owner>/<repo> or <owner>/*)"
+          r=${r,,}
+          case " $repos " in *" $r "*) ;; *) repos="${repos:+$repos }$r" ;; esac
+        done
+        [ "${#ids[@]}" -le 64 ] || die "$where: over 64 repos"
+        shift 2 ;;
+      *) die "$where: unknown http option '$1' (rules, credential, ca, projects, repos)" ;;
     esac
   done
   case " $PRESETS " in *" $rules "*) ;; *) die "$where: unknown rules '$rules' (one of: $PRESETS)" ;; esac
   [ -z "$cred" ] || [[ "$cred" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad credential name '$cred'"
   [ -z "$ca" ] || [[ "$ca" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad ca name '$ca'"
   case "$rules" in github-api|github-issues) ;; *) [ -z "$projects" ] || die "$where: projects only with the github-api or github-issues rules" ;; esac
-  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca
+  case "$rules" in git|git-read|forgejo|github-api|github-issues) ;; *) [ -z "$repos" ] || die "$where: repos only with the git, git-read, forgejo, github-api or github-issues rules" ;; esac
+  # Projects writes go through GraphQL, which repos refuses: one line can't have both.
+  [ -z "$repos" ] || [ -z "$projects" ] || die "$where: repos and projects can't be on one line (repos refuses GraphQL, which Projects writes need)"
+  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos
   HTTP_HOSTS+=("$k")
+}
+# A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (matched in
+# any case). No . or .. repo, and no .git or .wiki ending (the .git is optional in git paths; a
+# wiki is another repo).
+valid_repo() {
+  local o=${1%%/*} n=${1#*/}
+  [[ "$1" == */* ]] && [[ "$o" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$ ]] || return 1
+  [ "$n" = "*" ] && return 0
+  [[ "$n" =~ ^[A-Za-z0-9._-]{1,100}$ ]] && [[ ! "$n" =~ ^\.\.?$ ]] && [[ ! "${n,,}" =~ \.(git|wiki)$ ]]
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
 
@@ -497,8 +523,9 @@ listing() {
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
     for d in ${HDESTS[$l]:-}; do
-      printf '%s http://%s:%s%s rules %s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
-        "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_CA[$d]:+ ca ${HTTP_CA[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}"
+      printf '%s http://%s:%s%s rules %s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
+        "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_CA[$d]:+ ca ${HTTP_CA[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}" \
+        "${HTTP_REPOS[$d]:+ repos ${HTTP_REPOS[$d]// /,}}"
     done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
     [ -z "${CLIENT[$l]:-}" ] || printf '%s client %s\n' "$l" "${CLIENT[$l]}"
@@ -647,6 +674,51 @@ EOR
     ;;
   esac
 }
+# An http line's repos as a regex for the <owner>/<repo> part of a path. Letters are written
+# [aA] (GitHub and Forgejo match names in any case; RE2 and bash read that alike, so the tests
+# check what Envoy runs), dots escaped, a named repo with an optional .git, <owner>/* as any
+# repo name of that owner. No % fits: an escaped name is refused, not decoded.
+ci_lit() {
+  local s=$1 i c out=""
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    case "$c" in [a-z]) out+="[$c${c^^}]" ;; .) out+='\\.' ;; *) out+=$c ;; esac
+  done
+  printf '%s' "$out"
+}
+repo_regex() {  # repo_regex <repos, space separated>
+  local r n alts="" ; local -a list
+  read -ra list <<< "$1"   # read, not a bare $1: <owner>/* must not glob
+  for r in "${list[@]}"; do
+    n=${r#*/}
+    if [ "$n" = "*" ]; then n='[A-Za-z0-9._-]+'; else n="$(ci_lit "$n")(\\\\.git)?"; fi
+    alts="${alts:+$alts|}$(ci_lit "${r%%/*}")/$n"
+  done
+  printf '(%s)' "$alts"
+}
+# A preset's routes under repos: each allowing route's <owner>/<repo> part matches only those
+# repos (deny routes stay as they are, and keep their place); reads outside a repo are refused
+# but for who the token is (and, on GitHub, its rate limit). GraphQL is refused: one query
+# walks from a repo to any other (parent, forks, an owner's repositories), so a path can't
+# scope it; the presets' catch-all GraphQL deny then takes POST /graphql too. An escaped dot
+# is refused first: after a listed repo, %2e%2e is a dot segment the upstream could decode
+# into another repo's path (the listener already rejects escaped slashes).
+preset_rules_scoped() {  # preset_rules_scoped <rules> <repos>
+  local rx name methods kind pat flag any='[^/]+/[^/]+'
+  rx=$(repo_regex "$2")
+  echo 'escaped-dot * regex .*%2[eE].* deny'
+  while read -r name methods kind pat flag; do
+    [ -n "$name" ] || continue
+    if [ "${flag:-}" = deny ]; then echo "$name $methods $kind $pat $flag"; continue; fi
+    case "$1:$name" in
+      github-*:graphql) continue ;;
+      github-*:read) printf '%s\n' "read GET|HEAD regex /repos/$rx(/.*)?" "user GET|HEAD exact /user" "rate-limit GET|HEAD exact /rate_limit"; continue ;;
+      forgejo:read) printf '%s\n' "read GET|HEAD regex /api/v1/repos/$rx(/.*)?" "user GET|HEAD exact /api/v1/user" "version GET|HEAD exact /api/v1/version"; continue ;;
+    esac
+    [[ "$pat" == *"$any"* ]] || die "internal: the $1 route $name has no repo part to scope"
+    echo "$name $methods $kind ${pat//"$any"/"$rx"} ${flag:-}"
+  done < <(preset_rules "$1")
+}
 CRED_DIR=/etc/airlock-envoy/credentials
 CA_DIR=/etc/airlock-envoy/ca
 lua_file() {  # the GraphQL check: next to this script in a checkout, else where install put it
@@ -681,7 +753,7 @@ creds_used() {  # every credential some listener's http destinations use, once e
 # allowed one goes to the host with Host fixed (so another site on the same edge is out of
 # reach) and, if the host has one, its credential added (replacing anything the box sent).
 http_vhost() {
-  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} cred=${HTTP_CRED[$1]} projects=${HTTP_PROJECTS[$1]} name methods kind pat flag timeout maxdur
+  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} cred=${HTTP_CRED[$1]} projects=${HTTP_PROJECTS[$1]} repos=${HTTP_REPOS[$1]} name methods kind pat flag timeout maxdur
   id=$(hid "$1")
   # A clone or push can take long (the idle timeout still applies); anything else gets a cap
   # on the whole stream, so a slowly sent body can't hold a connection for good.
@@ -743,7 +815,7 @@ EOF
       if [ "${flag:-}" = lua ]; then graphql_route_filters; fi
       [ -z "$cred" ] || echo "                  \"inject-$cred\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
     fi
-  done < <(preset_rules "$rules")
+  done < <(if [ -n "$repos" ]; then preset_rules_scoped "$rules" "$repos"; else preset_rules "$rules"; fi)
   cat <<EOF
               - name: "$id-refused"
                 match: { prefix: "/" }

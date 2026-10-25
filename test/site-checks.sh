@@ -246,6 +246,40 @@ for c in "git info/refs:GET:/o/r.git/info/refs:404" "git receive-pack:POST:/o/r.
 done
 check 3130 "forgejo: a form body (token= could ride in it) refused" "$P http=403 exit=0" --data "token=x&body=hi" http://httpbin.org/api/v1/repos/o/r/issues/1/comments
 check 3130 "forgejo: a JSON comment passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{}" http://httpbin.org/api/v1/repos/o/r/issues/1/comments
+# repos (t-other: GitHub scoped to octocat/hello-world and octo-org/*; a 401 is GitHub
+# refusing the dummy credential, so the request got there; a 403 is Envoy).
+for c in "listed repo:GET:/repos/octocat/hello-world:401" "listed repo, other case:GET:/repos/OctoCat/Hello-World/pulls:401" \
+         "an owner/* repo:GET:/repos/octo-org/anything:401" "who the token is:GET:/user:401" "rate limit:GET:/rate_limit:401" \
+         "issue create, listed repo:POST:/repos/octocat/hello-world/issues:401" \
+         "unlisted repo:GET:/repos/octocat/spoon-knife:403" "issue create, unlisted repo:POST:/repos/octocat/spoon-knife/issues:403" \
+         "a name extending a listed one:GET:/repos/octocat/hello-worlds:403" "repo by id:GET:/repositories/1296269:403" \
+         "search:GET:/search/repositories?q=x:403" "repos of a user:GET:/users/octocat/repos:403" "repos of an org:GET:/orgs/octo-org/repos:403" \
+         "gists:GET:/gists/public:403" "GraphQL query:POST:/graphql:403" \
+         "dot segments out of a listed repo:GET:/repos/octocat/hello-world/../../octocat/spoon-knife:403" \
+         "escaped dots out of a listed repo:GET:/repos/octocat/hello-world/%2e%2e/%2e%2e/octocat/spoon-knife:403" \
+         "escaped dots, upper case:GET:/repos/octocat/hello-world/%2E%2E/%2E%2E/octocat/spoon-knife:403"; do
+  IFS=: read -r cn cm cp cw <<< "$c"
+  check 3130 "repos, GitHub API: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" -H "Content-Type: application/json" "http://api.github.com$cp"
+done
+slot; { r="$(cd /tmp && rm -rf hwr && http_proxy=http://127.0.0.1:3130 git clone -q --depth 1 http://github.com/octocat/Hello-World.git hwr 2>&1 && git -C hwr rev-parse --short HEAD)"
+  verdict "repos, git: a listed repo clones" "7fd1a60" "$r" > "$f"; } &
+pids+=($!)
+slot; { r="$(cd /tmp && rm -rf skr && http_proxy=http://127.0.0.1:3130 git clone -q --depth 1 http://github.com/octocat/Spoon-Knife.git skr 2>&1 | tr "\n" " ")"
+  verdict "repos, git: an unlisted repo is refused" "*403*" "$r" > "$f"; } &
+pids+=($!)
+# repos on the forgejo rules (t-site: httpbin.org@fjrepo, o/r): allowed requests reach the
+# host (its 404), the rest 403 here.
+for c in "listed repo:GET:/api/v1/repos/o/r:404" "listed repo, other case:GET:/api/v1/repos/O/R/pulls/1:404" \
+         "who the token is:GET:/api/v1/user:404" "version:GET:/api/v1/version:404" \
+         "git fetch, listed repo:GET:/o/r.git/info/refs:404" "git push, listed repo:POST:/o/r.git/git-receive-pack:404" \
+         "unlisted repo:GET:/api/v1/repos/o/other:403" "repo search:GET:/api/v1/repos/search:403" \
+         "repos of a user:GET:/api/v1/users/o/repos:403" "comment, unlisted repo:POST:/api/v1/repos/o/other/issues/1/comments:403" \
+         "git fetch, unlisted repo:GET:/o/other.git/info/refs:403" "wiki of a listed repo:GET:/o/r.wiki.git/info/refs:403" \
+         "token in the query, listed repo:GET:/api/v1/repos/o/r?token=x:403" \
+         "escaped dots out of a listed repo:GET:/api/v1/repos/o/r/%2e%2e/%2e%2e/o/other:403"; do
+  IFS=: read -r cn cm cp cw <<< "$c"
+  check 3128 "repos, forgejo: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" -H "Content-Type: application/json" "http://httpbin.org$cp"
+done
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle
 # Alone: 40 GraphQL requests at once on one listener, 20 to each of two GitHub-rule hosts; one

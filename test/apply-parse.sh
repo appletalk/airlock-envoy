@@ -147,6 +147,79 @@ refuses "projects: a trailing comma"   "bad project ID ''"     'http x.example r
 refuses "projects: a double comma"     "bad project ID ''"     'http x.example rules github-api projects PVT_a,,PVT_b\n'
 refuses "mixed case elsewhere on an http line" "only lowercase" 'http X.example rules github-api projects PVT_abc\n'
 refuses "mixed case on a listener line" "only lowercase"       'a PVT_abc.example:443\n'
+# repos: <owner>/<repo> or <owner>/*, on the git, forgejo and GitHub presets; kept lowercase.
+refuses "repos: with other rules"      "repos only with"       'http x.example rules any repos a/b\n'
+refuses "repos: with kubernetes-read"  "repos only with"       'http x.example rules kubernetes-read repos a/b\n'
+refuses "repos: and projects on one line" "can't be on one line" 'http x.example rules github-api projects PVT_a repos a/b\n'
+refuses "repos: none given"            "repos needs"           'http x.example rules git repos\n'
+refuses "repos: given twice"           "repos given twice"     'http x.example rules git repos a/b repos a/c\n'
+refuses "repos: no slash"              "bad repo 'acme'"       'http x.example rules git repos acme\n'
+refuses "repos: a wildcard owner"      "bad repo '*/r'"        'http x.example rules git repos */r\n'
+refuses "repos: just a wildcard"       "bad repo '*'"          'http x.example rules git repos *\n'
+refuses "repos: an empty repo"         "bad repo 'acme/'"      'http x.example rules git repos acme/\n'
+refuses "repos: a deeper path"         "bad repo 'acme/r/x'"   'http x.example rules git repos acme/r/x\n'
+refuses "repos: a partial glob"        "bad repo 'acme/r*'"    'http x.example rules git repos acme/r*\n'
+refuses "repos: a dot segment"         "bad repo 'acme/..'"    'http x.example rules git repos acme/..\n'
+refuses "repos: a single dot"          "bad repo 'acme/.'"     'http x.example rules git repos acme/.\n'
+refuses "repos: a .git name"           "bad repo 'acme/r.GIT'" 'http x.example rules git repos acme/r.GIT\n'
+refuses "repos: a wiki"                "bad repo 'acme/r.wiki'" 'http x.example rules git repos acme/r.wiki\n'
+refuses "repos: an owner starting with -" "bad repo '-acme/r'" 'http x.example rules git repos -acme/r\n'
+refuses "repos: an escape"             "bad repo 'acme/r%2e'"  'http x.example rules git repos acme/r%2e\n'
+refuses "repos: a quote"               "bad repo 'acme/r\"'"   'http x.example rules git repos acme/r"\n'
+refuses "repos: a trailing comma"      "bad repo ''"           'http x.example rules git repos a/b,\n'
+refuses "repos: a double comma"        "bad repo ''"           'http x.example rules git repos a/b,,a/c\n'
+refuses "repos: mixed case elsewhere on the line" "only lowercase" 'http X.example rules git repos a/b\n'
+lists "repos: lowercased, deduplicated, <owner>/* kept" \
+  'b http://x.example:443 rules git-read repos acme/*,octo-cat/hello.world\nb client t' \
+  'http x.example rules git-read repos ACME/*,Octo-Cat/Hello.World,octo-cat/hello.world\nb http://x.example\nclient b t\n'
+# What repos lets through, against the rendered regexes (letters as [aA]: RE2 and bash agree).
+printf 'http api.example.com rules github-api credential c1 repos Octo-Cat/Hello.World,acme/*\nhttp git.example.com rules git credential c2 repos octo-cat/hello.world\nhttp fj.example.com rules forgejo credential c3 repos me/r\nb http://api.example.com http://git.example.com http://fj.example.com\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+rrx() { grep -A3 "name: \"$1\"" <<< "$r" | sed -n 's/.*regex: "\(.*\)" }$/\1/p' | head -1 | sed 's/\\\\/\\/g'; }
+order="$(grep -o 'name: "api.example.com-[a-z-]*"' <<< "$r" | sed 's/^name: "api.example.com-//; s/"$//' | tr '\n' ' ')"
+rfail=""
+for p in /repos/octo-cat/hello.world /repos/Octo-Cat/HELLO.World/pulls/1 /repos/octo-cat/hello.world/issues/2/comments \
+         /repos/acme/anything /repos/ACME/x.y-z_1/actions/runs; do
+  [[ "$p" =~ ^($(rrx api.example.com-read))$ ]] || rfail+=" not-read:$p"
+done
+for p in /repos/octo-cat/hello.worlds /repos/octo-cat/helloXworld /repos/octo-cat/hello.world-x/pulls /repos/other/hello.world \
+         /repos/acme /repos/acmex/r /repos/acme/r%2fx /repos/acme/r%2e%2e /repositories/1 /search/issues /users/x/repos /orgs/acme/repos \
+         /user/repos /gists /graphql; do
+  [[ "$p" =~ ^($(rrx api.example.com-read))$ ]] && rfail+=" read:$p"
+done
+for p in /repos/acme/r/%2e%2e/%2e%2e/other/x /repos/acme/r/%2E%2E /repos/acme/r/contents/a%2ex; do
+  [[ "$p" =~ ^($(rrx api.example.com-escaped-dot))$ ]] || rfail+=" escaped-dot-through:$p"
+done
+[[ /repos/acme/r/contents/a%20b =~ ^($(rrx api.example.com-escaped-dot))$ ]] && rfail+=" escaped-space-refused"
+[[ /repos/acme/r/pulls =~ ^($(rrx api.example.com-create))$ ]] || rfail+=" create"
+[[ /repos/other/r/pulls =~ ^($(rrx api.example.com-create))$ ]] && rfail+=" create-other"
+[[ /repos/other/r/issues/1/comments =~ ^($(rrx api.example.com-issue-sub))$ ]] && rfail+=" comment-other"
+[[ /repos/other/r/issues/comments/1 =~ ^($(rrx api.example.com-edit-comment))$ ]] && rfail+=" edit-comment-other"
+for p in /octo-cat/hello.world/info/refs /Octo-Cat/Hello.World.git/info/refs; do
+  [[ "$p" =~ ^($(rrx git.example.com-info-refs))$ ]] || rfail+=" not-git:$p"
+done
+for p in /octo-cat/hello.world.wiki.git/info/refs /octo-cat/other/info/refs /octo-cat/hello.world.git.git/info/refs /x/octo-cat/hello.world/info/refs; do
+  [[ "$p" =~ ^($(rrx git.example.com-info-refs))$ ]] && rfail+=" git:$p"
+done
+[[ /octo-cat/other/git-receive-pack =~ ^($(rrx git.example.com-pack))$ ]] && rfail+=" push-other"
+[[ /api/v1/repos/me/r/pulls/1 =~ ^($(rrx fj.example.com-read))$ ]] || rfail+=" fj-read"
+for p in /api/v1/repos/search /api/v1/repos/me/rr /api/v1/users/me/repos /api/v1/orgs/me/repos /api/v1/repos/issues/search /api/v1/admin/users; do
+  [[ "$p" =~ ^($(rrx fj.example.com-read))$ ]] && rfail+=" fj-read:$p"
+done
+if [ -z "$rfail" ] && [ "$order" = "escaped-dot graphql-other read user rate-limit create issue-sub edit edit-comment reviewers refused " ] \
+   && ! grep -q 'github-graphql: { rules' <<< "$r" \
+   && grep -A2 'name: "api.example.com-graphql-other"' <<< "$r" | grep -qF 'regex: "(?i)/graphql.*"' \
+   && grep -A2 'name: "fj.example.com-wiki"' <<< "$r" | grep -qF 'regex: "/[^/]+/[^/]+\\.wiki(\\.git)?/.*"' \
+   && [ "$(grep -o 'name: "fj.example.com-[a-z-]*"' <<< "$r" | head -5 | tr '\n' ' ')" = 'name: "fj.example.com-query-token" name: "fj.example.com-query-access-token" name: "fj.example.com-query-sudo" name: "fj.example.com-form-body" name: "fj.example.com-escaped-dot" ' ]; then
+  echo "ok   repos: reads and writes only in the listed repos (any case, dots literal, .git optional for git, no escapes), only /user and /rate_limit outside them, GraphQL refused, deny routes kept first"
+else echo "FAIL repos rendering (route order: $order):$rfail"; fails=$((fails+1)); fi
+# Without repos, nothing changes: the presets' own routes.
+printf 'http api.example.com rules github-api credential c1\nb http://api.example.com\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+if grep -q 'name: "api.example.com-graphql"' <<< "$r" && grep -A2 'name: "api.example.com-read"' <<< "$r" | grep -q 'prefix: "/"'; then
+  echo "ok   no repos: GraphQL checked, reads anywhere (as before)"
+else echo "FAIL no repos: the preset changed"; fails=$((fails+1)); fi
+
 printf 'http x.example@board rules github-issues credential c2 projects PVT_aB,PVT_cD\nb http://x.example@board\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"
 if grep -q 'name: "http-x.example_board"' <<< "$r" && grep -q 'host_rewrite_literal: "x.example"' <<< "$r" && grep -q 'domains: \["x.example", "x.example:80"\]' <<< "$r" \

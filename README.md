@@ -14,8 +14,8 @@ two modes:
 | **CONNECT tunnel** | Clients that need TLS end to end, such as Claude Code (`HTTPS_PROXY`), whose login and Remote Control need the real Anthropic API | Allows exact hosts only, checks the TLS server name, sees host, bytes and timing but never content, holds no secret |
 | **Plain HTTP with an injected credential** | Clients you can point at a plain-HTTP URL (`gh`, `git`, `curl`, `kubectl`) | Checks method and path against a preset, adds the credential, opens TLS upstream itself. The box never holds the token |
 
-Not yet built: per-repo scoping, branch-only pushes and minted per-repo tokens (an `ext_authz`
-decision service).
+Not yet built: branch-only pushes and minted per-repo tokens (an `ext_authz` decision
+service). Per-repo scoping is the `repos` option of the `http` line.
 
 Status: **spike**. The install path is tested on Ubuntu 22.04, 24.04 and 26.04, Debian 13 and
 Arch (in systemd-booted containers), and runs as a service on an Arch workstation.
@@ -224,6 +224,7 @@ client dev alice
 
 ```
 http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
+     [repos <owner>/<repo>[,<owner>/<repo>...]]
 ```
 
 It is site-wide and must come above any listener that uses it. A listener lists it as
@@ -248,6 +249,13 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   ```
 - **`projects`** (GitHub presets only): lets Projects v2 item writes through for those project
   IDs. See [docs/presets.md](docs/presets.md#projects-v2).
+- **`repos`** (the git, forgejo and GitHub presets): only those repos (`<owner>/*` for all of
+  an owner's) can be read, cloned or written; on GitHub, GraphQL is refused, so `gh` works
+  through `gh api` (REST). See [docs/presets.md](docs/presets.md#repo-scoping-repos).
+  ```
+  http github.com      rules git        credential github-git repos example-org/*,alice/tools
+  http api.github.com  rules github-api credential github-api repos example-org/*,alice/tools
+  ```
 - **No tunnelling around it.** A host defined by an `http` line gets no CONNECT route in the
   listener, `web` included. Other names on the same front end (`www.`, aliases) are still
   ordinary `web` hosts; without the credential, that matters only for a preset without one on
@@ -326,9 +334,11 @@ GitHub presets check every `POST /graphql` write against an allowlist.
 
 **What the presets don't bound** (the site's job):
 
-- **No repo scoping.** A box can read any repo the token can, and write issues and comments in
-  any of them: it could copy a private repo into another repo's issue. Only the token's (or App
-  installation's) repo list bounds this.
+- **Repo scoping is opt-in.** Without `repos`, a box can read any repo the token can (a GitHub
+  token also reads every public repo), and write issues and comments in any it may write: it
+  could copy a private repo into another repo's issue. Only the token's (or App installation's)
+  repo list bounds this. With `repos`, GraphQL is refused and a listed public repo still serves
+  its forks' commits ([docs/presets.md](docs/presets.md#repo-scoping-repos)).
 - **Label and comment writes also land on PRs**, where org automation (an auto-merge label, a
   comment-triggered workflow) can turn them into merges or deploys.
 - **Assignment can start an agent.** Where an org has the Copilot coding agent on, assigning an
