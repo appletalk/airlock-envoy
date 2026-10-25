@@ -329,9 +329,9 @@ parse_http() {  # parse_http <where> <words...>
   HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos
   HTTP_HOSTS+=("$k")
 }
-# A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (owners up
-# to 40 characters, repos up to 100; matched in any case). No . or .. repo, and no .git or .wiki ending (the .git is optional in git paths; a
-# wiki is another repo).
+# A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (owners
+# up to 40 characters, repos up to 100; matched in any case). No . or .. repo, and no .git or
+# .wiki ending (the .git is optional in git paths; a wiki is another repo).
 valid_repo() {
   local o=${1%%/*} n=${1#*/}
   [[ "$1" == */* ]] && [[ "$o" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,38}[A-Za-z0-9])?$ ]] || return 1

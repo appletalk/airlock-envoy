@@ -230,6 +230,18 @@ if [ -z "$rfail" ] && [ "$order" = "escaped-unreserved compare-across graphql-ot
    && [ "$(grep -o 'name: "fj.example.com-[a-z-]*"' <<< "$r" | head -5 | tr '\n' ' ')" = 'name: "fj.example.com-query-token" name: "fj.example.com-query-access-token" name: "fj.example.com-query-sudo" name: "fj.example.com-form-body" name: "fj.example.com-escaped-unreserved" ' ]; then
   echo "ok   repos: reads and writes only in the listed repos (any case, dots literal, .git optional for git, no escapes), only /user and /rate_limit outside them, GraphQL refused, deny routes kept first"
 else echo "FAIL repos rendering (route order: $order):$rfail"; fails=$((fails+1)); fi
+# Outside a repo only exact paths (a prefix /user would take /user/repos), and the two refusals
+# first take every method.
+xfail=""
+for rt in api.example.com-user:/user api.example.com-rate-limit:/rate_limit fj.example.com-user:/api/v1/user fj.example.com-version:/api/v1/version; do
+  grep -A2 "name: \"${rt%%:*}\"" <<< "$r" | grep -qx "                  path: \"${rt#*:}\"" || xfail+=" ${rt%%:*}"
+done
+for rt in api.example.com-escaped-unreserved api.example.com-compare-across fj.example.com-escaped-unreserved fj.example.com-compare-across; do
+  grep -A3 "name: \"$rt\"" <<< "$r" | grep -q ':method' && xfail+=" $rt-method"
+  grep -A3 "name: \"$rt\"" <<< "$r" | grep -q 'direct_response: { status: 403' || xfail+=" $rt-not-403"
+done
+if [ -z "$xfail" ]; then echo "ok   repos: /user, /rate_limit, /api/v1/user, /api/v1/version exact; the escape and compare refusals take every method"
+else echo "FAIL repos: outside-repo routes or refusals:$xfail"; fails=$((fails+1)); fi
 # Scoped forgejo git routes keep the preset's long flag (no request timeout or stream cap: a
 # large clone or push), the rendered config is valid YAML, and every letter folds (z too).
 if grep -A4 'name: "fj.example.com-info-refs-1"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' \
@@ -245,6 +257,21 @@ r="$("$apply" --render "$work/site")"
 if [[ /ZETA/FUZZ.git/info/refs =~ ^($(rrx z.example.com-info-refs))$ ]] && [[ /zeta/fuzz/info/refs =~ ^($(rrx z.example.com-info-refs))$ ]] \
    && ! [[ /zeta/fuzy/info/refs =~ ^($(rrx z.example.com-info-refs))$ ]]; then echo "ok   repos: every letter matches in either case"
 else echo "FAIL repos: letter case folding"; fails=$((fails+1)); fi
+
+# A preset route with no repo part stops the render and --check (the guard in
+# preset_rules_scoped), instead of rendering on without it. A stub Envoy for --check, and a
+# control copy without the broken route that passes it.
+mkdir -p "$work/guard" "$work/control"; cp install/github-graphql.lua "$work/guard/"; cp install/github-graphql.lua "$work/control/"
+printf '#!/bin/sh\nexit 0\n' > "$work/envoy-stub"; chmod +x "$work/envoy-stub"
+sed "s|^ENVOY=/usr/local/bin/envoy\$|ENVOY=$work/envoy-stub|" "$apply" > "$work/control/apply"
+sed 's|^reviewers POST regex /repos/\[^/\]+/\[^/\]+/pulls/\[0-9\]+/requested_reviewers$|reviewers POST exact /no-repo-part|' "$work/control/apply" > "$work/guard/apply"
+chmod +x "$work/control/apply" "$work/guard/apply"
+printf 'http api.example.com rules github-api repos a/b\nb http://api.example.com\nclient b %s\n' "$(id -un)" > "$work/site"
+if grep -q '^reviewers POST exact /no-repo-part$' "$work/guard/apply" && "$work/control/apply" --check "$work/site" >/dev/null 2>&1 \
+   && ! out="$("$work/guard/apply" --render "$work/site" 2>&1 >/dev/null)" && [[ "$out" == *"no repo part"* ]] \
+   && ! out="$("$work/guard/apply" --check "$work/site" 2>&1 >/dev/null)" && [[ "$out" == *"no repo part"* ]]; then
+  echo "ok   repos: a route with no repo part to scope stops the render and the check (a control copy passes)"
+else echo "FAIL repos: the no-repo-part guard did not stop the render or the check"; fails=$((fails+1)); fi
 
 # Without repos, nothing changes: the presets' own routes.
 printf 'http api.example.com rules github-api credential c1\nb http://api.example.com\nclient b t\n' > "$work/site"

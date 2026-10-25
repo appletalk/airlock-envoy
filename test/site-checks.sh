@@ -250,6 +250,7 @@ check 3130 "forgejo: a JSON comment passes" "$P http=404 exit=0" -H "Content-Typ
 # refusing the dummy credential, so the request got there; a 403 is Envoy).
 for c in "listed repo:GET:/repos/octocat/hello-world:401" "listed repo, other case:GET:/repos/OctoCat/Hello-World/pulls:401" \
          "an owner/* repo:GET:/repos/octo-org/anything:401" "who the token is:GET:/user:401" "rate limit:GET:/rate_limit:401" \
+         "repos of the token:GET:/user/repos:403" "orgs of the token:GET:/user/orgs:403" \
          "issue create, listed repo:POST:/repos/octocat/hello-world/issues:401" \
          "unlisted repo:GET:/repos/octocat/spoon-knife:403" "issue create, unlisted repo:POST:/repos/octocat/spoon-knife/issues:403" \
          "a name extending a listed one:GET:/repos/octocat/hello-worlds:403" "repo by id:GET:/repositories/1296269:403" \
@@ -276,6 +277,7 @@ pids+=($!)
 # host (its 404), the rest 403 here.
 for c in "listed repo:GET:/api/v1/repos/o/r:404" "listed repo, other case:GET:/api/v1/repos/O/R/pulls/1:404" \
          "who the token is:GET:/api/v1/user:404" "version:GET:/api/v1/version:404" \
+         "repos of the token user:GET:/api/v1/user/repos:403" "under version:GET:/api/v1/version/x:403" \
          "git fetch, listed repo:GET:/o/r.git/info/refs:404" "git push, listed repo:POST:/o/r.git/git-receive-pack:404" \
          "unlisted repo:GET:/api/v1/repos/o/other:403" "repo search:GET:/api/v1/repos/search:403" \
          "repos of a user:GET:/api/v1/users/o/repos:403" "comment, unlisted repo:POST:/api/v1/repos/o/other/issues/1/comments:403" \
