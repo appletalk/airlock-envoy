@@ -195,7 +195,7 @@ for p in /repos/acme/r/%2e%2e/%2e%2e/other/x /repos/acme/r/%2E%2E /repos/acme/r/
   [[ "$p" =~ ^($(rrx api.example.com-escaped-unreserved))$ ]] || rfail+=" escaped-unreserved-through:$p"
 done
 [[ /repos/acme/r/contents/a%20b =~ ^($(rrx api.example.com-escaped-unreserved))$ ]] && rfail+=" escaped-space-refused"
-for p in /repos/acme/r/c%6fmpare/a...b:c /repos/acme/r/%41 /repos/acme/r/x%5Fy /repos/acme/r/x%7e /repos/acme/r/x%2D /repos/acme/r/x%39 /repos/acme/r/x%7A; do
+for p in /repos/acme/r/c%6fmpare/a...b:c /repos/acme/r/c%6Fmpare /repos/acme/r/%4A /repos/acme/r/%41 /repos/acme/r/x%5Fy /repos/acme/r/x%7e /repos/acme/r/x%2D /repos/acme/r/x%39 /repos/acme/r/x%7A; do
   [[ "$p" =~ ^($(rrx api.example.com-escaped-unreserved))$ ]] || rfail+=" escaped-unreserved-through:$p"
 done
 for p in /repos/acme/r/contents/a%2Bb /repos/acme/r/contents/%C3%A9 /repos/acme/r/contents/a%40b /repos/acme/r/contents/a%3Fb; do
@@ -230,6 +230,22 @@ if [ -z "$rfail" ] && [ "$order" = "escaped-unreserved compare-across graphql-ot
    && [ "$(grep -o 'name: "fj.example.com-[a-z-]*"' <<< "$r" | head -5 | tr '\n' ' ')" = 'name: "fj.example.com-query-token" name: "fj.example.com-query-access-token" name: "fj.example.com-query-sudo" name: "fj.example.com-form-body" name: "fj.example.com-escaped-unreserved" ' ]; then
   echo "ok   repos: reads and writes only in the listed repos (any case, dots literal, .git optional for git, no escapes), only /user and /rate_limit outside them, GraphQL refused, deny routes kept first"
 else echo "FAIL repos rendering (route order: $order):$rfail"; fails=$((fails+1)); fi
+# Scoped forgejo git routes keep the preset's long flag (no request timeout or stream cap: a
+# large clone or push), the rendered config is valid YAML, and every letter folds (z too).
+if grep -A4 'name: "fj.example.com-info-refs-1"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' \
+   && grep -A4 'name: "fj.example.com-pack-1"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' \
+   && grep -A4 'name: "fj.example.com-read-1"' <<< "$r" | grep -q 'timeout: 120s'; then
+  echo "ok   repos: scoped git routes stay long, API routes capped"
+else echo "FAIL repos: scoped git routes lost the long flag"; fails=$((fails+1)); fi
+if ! python3 -c 'import yaml' 2>/dev/null; then echo "skip repos: rendered YAML parse (no PyYAML)"
+elif python3 -I -c 'import sys, yaml; yaml.safe_load(sys.stdin)' <<< "$r" 2>/dev/null; then echo "ok   repos: the rendered config parses as YAML"
+else echo "FAIL repos: the rendered config is not valid YAML"; fails=$((fails+1)); fi
+printf 'http z.example.com rules git repos Zeta/Fuzz\nb http://z.example.com\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+if [[ /ZETA/FUZZ.git/info/refs =~ ^($(rrx z.example.com-info-refs))$ ]] && [[ /zeta/fuzz/info/refs =~ ^($(rrx z.example.com-info-refs))$ ]] \
+   && ! [[ /zeta/fuzy/info/refs =~ ^($(rrx z.example.com-info-refs))$ ]]; then echo "ok   repos: every letter matches in either case"
+else echo "FAIL repos: letter case folding"; fails=$((fails+1)); fi
+
 # Without repos, nothing changes: the presets' own routes.
 printf 'http api.example.com rules github-api credential c1\nb http://api.example.com\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"

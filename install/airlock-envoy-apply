@@ -800,6 +800,10 @@ EOF
                 match: { prefix: "/", headers: [{ name: "upgrade", present_match: true }] }
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: no protocol upgrades here\\n" } }
 EOF
+  # Built first, not read from a process substitution: a die in there would end only the
+  # subshell, and the render would go on with routes missing.
+  local routes
+  routes=$(if [ -n "$repos" ]; then preset_rules_scoped "$rules" "$repos"; else preset_rules "$rules"; fi) || exit 1
   while read -r name methods kind pat flag; do
     [ -n "$name" ] || continue
     echo "              - name: \"$id-$name\""
@@ -826,7 +830,7 @@ EOF
       if [ "${flag:-}" = lua ]; then graphql_route_filters; fi
       [ -z "$cred" ] || echo "                  \"inject-$cred\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
     fi
-  done < <(if [ -n "$repos" ]; then preset_rules_scoped "$rules" "$repos"; else preset_rules "$rules"; fi)
+  done <<< "$routes"
   cat <<EOF
               - name: "$id-refused"
                 match: { prefix: "/" }

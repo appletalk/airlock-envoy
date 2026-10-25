@@ -258,7 +258,7 @@ for c in "listed repo:GET:/repos/octocat/hello-world:401" "listed repo, other ca
          "dot segments out of a listed repo:GET:/repos/octocat/hello-world/../../octocat/spoon-knife:403" \
          "escaped dots out of a listed repo:GET:/repos/octocat/hello-world/%2e%2e/%2e%2e/octocat/spoon-knife:403" \
          "escaped dots, upper case:GET:/repos/octocat/hello-world/%2E%2E/%2E%2E/octocat/spoon-knife:403" \
-         "an escaped dot in a file name (Envoy did not decode it):GET:/repos/octocat/hello-world/contents/a%2eb:403" \
+         "an escaped dot in a file name (403 refused, 401 decoded by Envoy to a.b; either is safe):GET:/repos/octocat/hello-world/contents/a%2eb:40[13]" \
          "compare in the repo:GET:/repos/octocat/hello-world/compare/master...master:401" \
          "compare across the fork network:GET:/repos/octocat/hello-world/compare/master...octocat:spoon-knife:master:403" \
          "compare across, upper case:GET:/repos/octocat/hello-world/COMPARE/master...octocat:spoon-knife:master:403" \
