@@ -878,7 +878,7 @@ EOF
     esac
     [ "$methods" = "*" ] || echo "                  headers: [{ name: \":method\", string_match: { safe_regex: { regex: \"$methods\" } } }]"
     if [ "${flag:-}" = deny ]; then
-      printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules\\n" } }\n' "$rules"
+      printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules (listener %s): this path is refused on %s\\n" } }\n' "$rules" "$l" "$h"
       continue
     fi
     if [ "${flag:-}" = long ]; then
@@ -899,7 +899,7 @@ EOF
   cat <<EOF
               - name: "$id-refused"
                 match: { prefix: "/" }
-                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the $rules rules\\n" } }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the $rules rules (listener $l): this method and path are not allowed on $h (what each preset allows: airlock-envoy docs/presets.md)\\n" } }
 EOF
 }
 # The GraphQL route's filters: a rate limit per listener (10 a second, bursts of 20, one bucket
@@ -1153,13 +1153,15 @@ EOF
 EOF
     done
     [ -z "${WEB[$l]:-}" ] || web_routes "$l"
-    cat <<'EOF'
+    # The refusals say whose list it is and what would change it, so a box can report the cause
+    # (the host and port are the box's own request; the listener is its own socket's).
+    cat <<EOF
               - name: deny-connect
                 match: { connect_matcher: {} }
-                direct_response: { status: 403, body: { inline_string: "airlock-envoy: host not in allowlist\n" } }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: host not in allowlist of listener $l (the host's admin adds host:port to that listener in /etc/airlock-envoy/site.conf)\\n" } }
               - name: deny-http
                 match: { prefix: "/" }
-                direct_response: { status: 403, body: { inline_string: "airlock-envoy: not a plain-HTTP host of this profile\n" } }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: not a plain-HTTP host of this profile (listener $l: an http line in /etc/airlock-envoy/site.conf, and http://<host> on the listener)\\n" } }
           http_filters:
           # The tunnel's connection ID travels to the SNI listener, so its log lines join this one.
           # hashable_string makes it part of the upstream pool key, so each tunnel gets its own

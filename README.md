@@ -412,6 +412,10 @@ Both are JSON lines, readable by root and the service account only. **Nothing ro
 keeps getting refused can grow the audit log without bound (planned with the audit pipeline).
 Field-by-field detail: [docs/audit-log.md](docs/audit-log.md).
 
+A refusal tells the box why: the 403's body names the listener and what would change it (a
+host not in its list, a host that isn't one of its plain-HTTP destinations, or a method and
+path its rules don't allow), so boxed Claude can report the cause instead of guessing.
+
 ## What this does not stop
 
 - **Data sent to Anthropic itself.** The box holds a Claude login and can talk to

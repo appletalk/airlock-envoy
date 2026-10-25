@@ -348,6 +348,16 @@ if grep -q '^  return 0$' "$work/guard/apply-family" && ! out="$("$work/guard/ap
   echo "ok   several definitions: one whose refusals differ from the first's stops the render"
 else echo "FAIL several definitions: differing refusals rendered: $out"; fails=$((fails+1)); fi
 
+# Refusals name the listener and what would change them, so a box can report the cause.
+printf 'http api.example.com rules github-api credential c\nmine example.com:443 http://api.example.com\nclient mine t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+if grep -q 'airlock-envoy: host not in allowlist of listener mine (the host.s admin adds host:port to that listener in /etc/airlock-envoy/site.conf)' <<< "$r" \
+   && grep -q 'airlock-envoy: not a plain-HTTP host of this profile (listener mine: ' <<< "$r" \
+   && grep -q 'airlock-envoy: refused by the github-api rules (listener mine): this method and path are not allowed on api.example.com' <<< "$r" \
+   && grep -q 'airlock-envoy: refused by the github-api rules (listener mine): this path is refused on api.example.com' <<< "$r"; then
+  echo "ok   refusals name the listener and what to change (CONNECT, plain HTTP, a preset's deny and catch-all)"
+else echo "FAIL refusal messages"; fails=$((fails+1)); fi
+
 # Without repos, nothing changes: the presets' own routes.
 printf 'http api.example.com rules github-api credential c1\nb http://api.example.com\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"
