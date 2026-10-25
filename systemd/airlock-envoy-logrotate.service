@@ -8,7 +8,13 @@ ConditionPathIsDirectory=/var/log/airlock-envoy
 Type=oneshot
 # logrotate runs as root and, by the config's `su`, does the file work as airlock-envoy. Its
 # own state file, apart from the distribution's logrotate run.
+# Both Envoys reopen their logs first: if a postrotate reopen failed before, Envoy would still
+# be writing the rotated file, its new log would stay empty, and notifempty would stop every
+# later rotation. Asking each run heals that; a reopen with nothing rotated is harmless.
+ExecStartPre=-/bin/sh -c 'for s in /run/airlock-envoy-internal/admin.sock /run/airlock-envoy-web/admin.sock; do [ ! -S "$$s" ] || curl -q -fsS --max-time 10 --unix-socket "$$s" -X POST http://localhost/reopen_logs >/dev/null; done'
 ExecStart=/usr/sbin/logrotate --state /var/lib/airlock-envoy/logrotate.status /etc/airlock-envoy/logrotate.conf
+# Rotated names in UTC: no repeated hour at the daylight-saving change, and easier to line up.
+Environment=TZ=UTC
 StateDirectory=airlock-envoy
 StateDirectoryMode=0700
 UMask=0077
@@ -17,7 +23,7 @@ NoNewPrivileges=yes
 # su, create (chown), and reaching the service account's 0750/0700 directories as root.
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
 ProtectSystem=strict
-ReadWritePaths=/var/log/airlock-envoy
+ReadWritePaths=-/var/log/airlock-envoy
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

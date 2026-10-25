@@ -410,7 +410,8 @@ How the two socket layers make this work: [docs/design.md](docs/design.md#two-la
 
 Both are JSON lines, readable by root and the service account only. logrotate rotates each at
 100 MiB or once a day (checked every 15 minutes, so a flood can still outgrow that between
-checks) and removes rotated files by age only, after 30 days; nothing ships them anywhere yet.
+checks) and removes rotated files by age only, at a rotation once they are older than 30 days;
+nothing ships them anywhere yet.
 Field-by-field detail: [docs/audit-log.md](docs/audit-log.md).
 
 A refusal tells the box why: the 403's body names the listener and what would change it (a

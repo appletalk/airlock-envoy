@@ -47,7 +47,7 @@ podman run -d --name "$name" --systemd=always -v ./:/repo:ro "${airlock_mount[@]
 # shellcheck disable=SC2329  # run by the trap
 cleanup() {
   local rc=$?
-  [ "$rc" = 0 ] || podman exec "$name" journalctl -u airlock-envoy --no-pager -n 25 2>/dev/null || true
+  [ "$rc" = 0 ] || podman exec "$name" journalctl -u airlock-envoy -u airlock-envoy-logrotate --no-pager -n 40 2>/dev/null || true
   podman rm -f "$name" >/dev/null 2>&1 || true
   exit "$rc"
 }
@@ -171,10 +171,11 @@ ck "envoy restart keeps the box socket (same inode) and it works at once: got '$
 # 0600, postrotate has Envoy reopen, and the next decisions land in a new access.jsonl; a second
 # forced rotation compresses the first (delaycompress).
 ck "logrotate timer enabled and active" '[ "$(x systemctl is-enabled airlock-envoy-logrotate.timer) $(x systemctl is-active airlock-envoy-logrotate.timer)" = "enabled active" ]'
+x systemctl stop airlock-envoy-logrotate.timer   # no timer run during the forced ones below
 x mkdir -p /etc/systemd/system/airlock-envoy-logrotate.service.d
 x sh -c 'printf "[Service]\nExecStart=\nExecStart=/usr/sbin/logrotate -f --state /var/lib/airlock-envoy/logrotate.status /etc/airlock-envoy/logrotate.conf\n" > /etc/systemd/system/airlock-envoy-logrotate.service.d/test.conf'
 x systemctl daemon-reload; x systemctl start airlock-envoy-logrotate.service
-rot1="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -E "^access\.jsonl-[0-9]{8}T[0-9]{6}$" | head -1')"
+rot1="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -E "^access\.jsonl-[0-9]{8}T[0-9]{6}Z$" | head -1')"
 ck "logrotate rotated the audit log to access.jsonl-<time>, as airlock-envoy 0600: '$rot1'" \
    '[ -n "$rot1" ] && [ "$(x stat -c %U:%a "/var/log/airlock-envoy/$rot1")" = airlock-envoy:600 ] && [ "$(x systemctl show -p Result --value airlock-envoy-logrotate.service)" = success ]'
 r="$(tunnel)"
@@ -183,14 +184,21 @@ ck "Envoy reopened its log: new decisions land in a new access.jsonl, 0600: got 
    '[ "$r" = "200 403" ] && [ "$(x grep -c deny-connect /var/log/airlock-envoy/access.jsonl)" -ge 1 ] && [ "$(x stat -c %U:%a /var/log/airlock-envoy/access.jsonl)" = airlock-envoy:600 ]'
 sleep 1   # the next rotation's name must differ by a second
 x systemctl start airlock-envoy-logrotate.service
-plain="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}$"')"
+plain="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}Z$"')"
 ck "a second rotation compresses the first (delaycompress), the newest stays plain: $plain plain" \
    'x gzip -t "/var/log/airlock-envoy/$rot1.gz" && [ "$plain" = 1 ]'
 # Retention is by age only: more forced rotations (each with a line to rotate) remove nothing.
 for _ in 1 2 3 4 5; do tunnel >/dev/null; sleep 1.2; x systemctl start airlock-envoy-logrotate.service; done
-nrot="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}(\.gz)?$"')"
+nrot="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}Z(\.gz)?$"')"
 ck "seven rotations, seven rotated files kept (no count limit): $nrot" '[ "$nrot" = 7 ]'
+# ...and by age: a rotated file made 31 days old goes at the next rotation, the others stay.
+x touch -d '31 days ago' "/var/log/airlock-envoy/$rot1.gz"
+tunnel >/dev/null; sleep 1.2; x systemctl start airlock-envoy-logrotate.service
+nrot2="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}Z(\.gz)?$"')"
+ck "maxage 30: the 31-day-old rotated file is gone, the other seven stay (and the new one): $nrot2" \
+   '! x test -e "/var/log/airlock-envoy/$rot1.gz" && [ "$nrot2" = 7 ]'
 x rm -rf /etc/systemd/system/airlock-envoy-logrotate.service.d; x systemctl daemon-reload
+x systemctl start airlock-envoy-logrotate.timer
 # The relay restarts with Envoy; a burst of restarts must not fail it, or the box socket.
 x runuser -u client -- sh -c "printf 'CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n' | timeout 2 socat - UNIX-CONNECT:$S >/dev/null" || true
 for _ in 1 2 3 4 5 6 7 8; do x systemctl reset-failed airlock-envoy; x systemctl restart airlock-envoy; done
