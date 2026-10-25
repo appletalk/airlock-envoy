@@ -292,7 +292,7 @@ done
 # with t-gh): each repo carries the credential of its own definition; another repo is refused.
 slot; { r="$(curl -s -x http://127.0.0.1:3128 http://httpbingo.org/anything/a/info/refs | grep -o "SITE-TEST-TOKEN-1\|dummy-not-a-github-token" | sort -u | tr "\n" " ")
     $(curl -s -x http://127.0.0.1:3128 http://httpbingo.org/anything/B.git/info/refs | grep -o "SITE-TEST-TOKEN-1\|dummy-not-a-github-token" | sort -u | tr "\n" " ")"
-  verdict "several definitions: each repo its own credential (a: t-cred, b: t-gh)" "SITE-TEST-TOKEN-1 *dummy-not-a-github-token " "$(echo $r) " > "$f"; } &
+  verdict "several definitions: each repo its own credential (a: t-cred, b: t-gh)" "SITE-TEST-TOKEN-1 dummy-not-a-github-token " "$(echo $r) " > "$f"; } &
 pids+=($!)
 check 3128 "several definitions: a repo in neither refused" "$P http=403 exit=0" http://httpbingo.org/anything/c/info/refs
 check 3128 "several definitions: push to a listed repo passes the rules" "$P http=200 exit=0" -X POST http://httpbingo.org/anything/a/git-receive-pack

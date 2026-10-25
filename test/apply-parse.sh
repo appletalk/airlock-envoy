@@ -277,6 +277,7 @@ else echo "FAIL repos: the no-repo-part guard did not stop the render or the che
 # (the two GitHub presets may mix). One virtual host; each repo's routes carry their own
 # definition's credential and upstream; the first one's refusals and /user stand for all.
 refuses "two definitions, one without repos" "give both repos" 'http x.example@a rules git repos o/a\nhttp x.example@b rules git\nl http://x.example@a http://x.example@b\n'
+refuses "...the first without repos"   "give both repos"       'http x.example@a rules git\nhttp x.example@b rules git repos o/a\nl http://x.example@a http://x.example@b\n'
 refuses "two definitions, the same repo" "also in http://x.example@a" 'http x.example@a rules git repos o/a\nhttp x.example@b rules git repos O/A\nl http://x.example@a http://x.example@b\n'
 refuses "two definitions, a repo under the other's owner/*" "also in" 'http x.example@a rules git repos o/*\nhttp x.example@b rules git repos p/b,o/b\nl http://x.example@a http://x.example@b\n'
 refuses "...and owner/* after a repo of that owner" "also in" 'http x.example@a rules git repos o/b\nhttp x.example@b rules git repos o/*\nl http://x.example@a http://x.example@b\n'
@@ -310,7 +311,7 @@ takes() {  # takes <method> <path>: route name and credential, or "refused"
       prefix) [[ "$2" == "${rx#* }"* ]] || continue ;;
       *) continue ;;
     esac
-    if grep -A3 "name: \"$name\"" <<< "$r" | grep -q direct_response; then echo refused; return; fi
+    if sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -q direct_response; then echo refused; return; fi
     cred="$(sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -o '"inject-[a-z-]*"' | head -1)"
     cl="$(sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -o 'cluster: "[^"]*"' | head -1)"
     echo "$name $cl $cred"; return
