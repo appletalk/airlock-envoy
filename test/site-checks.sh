@@ -97,7 +97,8 @@ check 3128 "included api.anthropic.com"          "$OK" https://api.anthropic.com
 check 3128 "example.com"                         "$OK" https://example.com/
 check 3128 "address entry 1.1.1.1:443"           "$OK" https://1.1.1.1/
 # The port is part of an entry. The host is under .invalid (RFC 6761: never resolves), so the
-# allowed tunnel opens and then closes with no upstream, and no odd port leaves the machine;
+# allowed tunnel opens and then closes with no upstream: Envoy only sends DNS queries for the
+# name, never a connection on 8443;
 # the render test (apply-parse.sh) pins the port the upstream would be dialled on.
 check 3128 "host on port 8443: allowed, no upstream"  "proxy=200 http=000 exit=35" https://port-test.invalid:8443/
 check 3128 "same host, port 443 not listed"      "$NO" https://port-test.invalid/
@@ -340,6 +341,9 @@ logchecks() {
   lc "t-site allowed the address entry by its route" '.listener == "t-site" and .route == "allow-1.1.1.1" and .status == 200'
   lc "t-site allowed the port-8443 host" '.listener == "t-site" and .route == "allow-port-test.invalid:8443" and .status == 200'
   lc "t-site refused the same host on 443" '.listener == "t-site" and .authority == "port-test.invalid:443" and .route == "deny-connect"'
+  # The port-8443 tunnel passed the SNI check and then had no upstream (curl exit 35 alone
+  # can't tell this from a refused SNI, which logs NR).
+  lc "port-8443 tunnel: SNI accepted, no upstream (UH/UF), not NR" '.sni == "port-test.invalid" and .flags != "NR" and ((.flags // "") | test("U[HF]"))'
   lc "t-anthropic refused example.com" '.listener == "t-anthropic" and .authority == "example.com:443" and .route == "deny-connect"'
   lc "t-other refused api.anthropic.com" '.listener == "t-other" and .authority == "api.anthropic.com:443" and .route == "deny-connect"'
   lc "an SNI sent to the address entry: refused by RBAC, with the SNI" '.sni == "one.one.one.one" and .route == "tls-no-sni" and .details == "rbac_access_denied_matched_policy[server-name-sent]"'
