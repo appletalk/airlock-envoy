@@ -288,6 +288,14 @@ for c in "listed repo:GET:/api/v1/repos/o/r:404" "listed repo, other case:GET:/a
   cw=${c##*:} c=${c%:*}; cn=${c%%:*} c=${c#*:}; cm=${c%%:*} cp=${c#*:}   # the path may hold a colon
   check 3128 "repos, forgejo: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" -H "Content-Type: application/json" "http://httpbin.org$cp"
 done
+# Several definitions of one host (t-site: httpbingo git, anything/a with t-cred, anything/b
+# with t-gh): each repo carries the credential of its own definition; another repo is refused.
+slot; { r="$(curl -s -x http://127.0.0.1:3128 http://httpbingo.org/anything/a/info/refs | grep -o "SITE-TEST-TOKEN-1\|dummy-not-a-github-token" | sort -u | tr "\n" " ")
+    $(curl -s -x http://127.0.0.1:3128 http://httpbingo.org/anything/B.git/info/refs | grep -o "SITE-TEST-TOKEN-1\|dummy-not-a-github-token" | sort -u | tr "\n" " ")"
+  verdict "several definitions: each repo its own credential (a: t-cred, b: t-gh)" "SITE-TEST-TOKEN-1 *dummy-not-a-github-token " "$(echo $r) " > "$f"; } &
+pids+=($!)
+check 3128 "several definitions: a repo in neither refused" "$P http=403 exit=0" http://httpbingo.org/anything/c/info/refs
+check 3128 "several definitions: push to a listed repo passes the rules" "$P http=200 exit=0" -X POST http://httpbingo.org/anything/a/git-receive-pack
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle
 # Alone: 40 GraphQL requests at once on one listener, 20 to each of two GitHub-rule hosts; one

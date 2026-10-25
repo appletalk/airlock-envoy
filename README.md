@@ -240,7 +240,7 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   that, being pinned to the API port.)
 - **Variants**: `http <host>@<variant> ...` is a second definition of the same host, with its
   own rules, credential and projects (a second identity, or narrower rules for one profile). A
-  listener uses one definition per host.
+  listener uses one definition per host, or several with `repos` (below).
   ```
   http api.github.com        rules github-api    credential gh-dev
   http api.github.com@agent  rules github-issues credential agent-app projects PVT_kwDOAB12cd
@@ -256,6 +256,15 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   ```
   http github.com      rules git        credential github-git repos example-org/*,alice/tools
   http api.github.com  rules github-api credential github-api repos example-org/*,alice/tools
+  ```
+- **A credential per repo**: a listener may list several definitions of one host if each has
+  `repos` and no repo is in two of them. Each repo's requests carry its own definition's
+  credential (say an organisation's App for its repos and a personal token for your own).
+  See [docs/presets.md](docs/presets.md#several-credentials-on-one-host).
+  ```
+  http api.github.com@org  rules github-api    credential org-app  repos example-org/*
+  http api.github.com@me   rules github-issues credential alice-pat repos alice/tools
+  agent  @anthropic http://api.github.com@org http://api.github.com@me
   ```
 - **No tunnelling around it.** A host defined by an `http` line gets no CONNECT route in the
   listener, `web` included. Other names on the same front end (`www.`, aliases) are still

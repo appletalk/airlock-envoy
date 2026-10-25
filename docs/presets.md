@@ -194,6 +194,23 @@ What that loses:
   the token or App installation may write is still the site's to set: keep it to the same
   repos.
 
+### Several credentials on one host
+
+A listener may list several definitions of one host (variants, `http <host>@<variant>`) when
+each has `repos`, no repo is in two of them (`<owner>/*` takes every repo of that owner), and
+they share their rules (`github-api` and `github-issues` may mix). Apply refuses anything else.
+
+- They make one virtual host. Each listed repo's routes carry the credential of the definition
+  that lists it, and go to that definition's upstream.
+- The first definition the listener lists (in the order of its lines, an include's where the
+  include stands) stands for all
+  in what no repo decides: its refusals, and its routes outside a repo (`/user`,
+  `/rate_limit`, `/api/v1/user`, `/api/v1/version`), so `gh api user` names that identity.
+- The client manifest has one line for the host: the first definition's rules.
+- Use it where one box works for two owners with different credentials: an organisation's
+  GitHub App for its repos and a personal fine-grained token for your own, on `api.github.com`
+  and on `github.com` for git.
+
 ## Request handling (all presets)
 
 - **Paths are normalized** before the rules see them (dot segments, merged slashes). An escaped

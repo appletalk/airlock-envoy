@@ -273,6 +273,70 @@ if grep -q '^reviewers POST exact /no-repo-part$' "$work/guard/apply" && "$work/
   echo "ok   repos: a route with no repo part to scope stops the render and the check (a control copy passes)"
 else echo "FAIL repos: the no-repo-part guard did not stop the render or the check"; fails=$((fails+1)); fi
 
+# Several definitions of one host on a listener: each with repos, no repo in two, rules shared
+# (the two GitHub presets may mix). One virtual host; each repo's routes carry their own
+# definition's credential and upstream; the first one's refusals and /user stand for all.
+refuses "two definitions, one without repos" "give both repos" 'http x.example@a rules git repos o/a\nhttp x.example@b rules git\nl http://x.example@a http://x.example@b\n'
+refuses "two definitions, the same repo" "also in http://x.example@a" 'http x.example@a rules git repos o/a\nhttp x.example@b rules git repos O/A\nl http://x.example@a http://x.example@b\n'
+refuses "two definitions, a repo under the other's owner/*" "also in" 'http x.example@a rules git repos o/*\nhttp x.example@b rules git repos p/b,o/b\nl http://x.example@a http://x.example@b\n'
+refuses "...and owner/* after a repo of that owner" "also in" 'http x.example@a rules git repos o/b\nhttp x.example@b rules git repos o/*\nl http://x.example@a http://x.example@b\n'
+refuses "two definitions, other rules" "share their rules" 'http x.example@a rules git repos o/a\nhttp x.example@b rules github-api repos o/b\nl http://x.example@a http://x.example@b\n'
+refuses "...git and git-read"           "share their rules"     'http x.example@a rules git repos o/a\nhttp x.example@b rules git-read repos o/b\nl http://x.example@a http://x.example@b\n'
+refuses "...through an include"         "also in"               'http x.example@a rules git repos o/a\nhttp x.example@b rules git repos o/a\nl http://x.example@a\nm @l http://x.example@b\n'
+lists "two definitions of a host, disjoint repos (the GitHub presets mix)" \
+  'l http://x.example:443 variant a rules github-api credential c1 repos o/*\nm http://x.example:443 variant a rules github-api credential c1 repos o/*\nm http://x.example:443 variant b rules github-issues credential c2 repos p/a,o2/b\nm client t' \
+  'http x.example@a rules github-api credential c1 repos o/*\nhttp x.example@b rules github-issues credential c2 repos p/a,o2/b\nl http://x.example@a\nm @l http://x.example@b\nclient m t\n'
+printf 'http api.example.com@org rules github-api credential c-org repos example-org/*\nhttp api.example.com@me rules github-issues credential c-me repos alice/tools\nhttp git.example.com@org rules git credential g-org repos example-org/*\nhttp git.example.com@me rules git credential g-me repos alice/tools\nb http://api.example.com@org http://api.example.com@me http://git.example.com@org http://git.example.com@me\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+mfail=""
+# The route that takes a path (the first match, as Envoy does), and its injected credential.
+takes() {  # takes <method> <path>: route name and credential, or "refused"
+  local name="" rx m cred
+  while IFS= read -r name; do
+    rx="$(grep -A3 "name: \"$name\"" <<< "$r" | sed -n 's/.*\(regex\|path\|prefix\): "\(.*\)"\( }\)\{0,1\}$/\1 \2/p' | head -1)"
+    m="$(grep -A4 "name: \"$name\"" <<< "$r" | sed -n 's/.*":method", string_match: { safe_regex: { regex: "\([^"]*\)".*/\1/p' | head -1)"
+    [ -z "$m" ] || [[ "$1" =~ ^($m)$ ]] || continue
+    case "${rx%% *}" in
+      regex) rx=${rx#* }; [[ "$2" =~ ^(${rx//\\\\/\\})$ ]] || continue ;;
+      path) [ "$2" = "${rx#* }" ] || continue ;;
+      prefix) [[ "$2" == "${rx#* }"* ]] || continue ;;
+      *) continue ;;
+    esac
+    if grep -A3 "name: \"$name\"" <<< "$r" | grep -q direct_response; then echo refused; return; fi
+    cred="$(sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -o '"inject-[a-z-]*"' | head -1)"
+    echo "$name $cred"; return
+  done < <(sed -n "/- name: \"http-$3\"/,/- name: \"http-\|- name: \"b\"/p" <<< "$r" | grep -o '^              - name: "[^"]*"' | sed 's/.*name: "//; s/"$//')
+  echo none
+}
+[[ "$(takes GET /repos/example-org/x api.example.com_org)" == *'"inject-c-org"' ]] || mfail+=" org-read"
+[[ "$(takes GET /repos/Alice/Tools/issues api.example.com_org)" == *'"inject-c-me"' ]] || mfail+=" me-read"
+[[ "$(takes POST /repos/alice/tools/issues api.example.com_org)" == *'"inject-c-me"' ]] || mfail+=" me-issue"
+[ "$(takes POST /repos/alice/tools/pulls api.example.com_org)" = refused ] || mfail+=" me-pull-not-refused"
+[[ "$(takes POST /repos/example-org/x/pulls api.example.com_org)" == *'"inject-c-org"' ]] || mfail+=" org-pull"
+[[ "$(takes GET /user api.example.com_org)" == "api.example.com_org-user "*'"inject-c-org"' ]] || mfail+=" user"
+[ "$(takes GET /repos/alice/other api.example.com_org)" = refused ] || mfail+=" unlisted"
+[ "$(takes POST /graphql api.example.com_org)" = refused ] || mfail+=" graphql"
+[ "$(takes GET /repos/alice/tools/c%6fmpare api.example.com_org)" = refused ] || mfail+=" escape"
+[[ "$(takes GET /alice/tools.git/info/refs git.example.com_org)" == *'"inject-g-me"' ]] || mfail+=" me-git"
+[[ "$(takes POST /example-org/x/git-receive-pack git.example.com_org)" == *'"inject-g-org"' ]] || mfail+=" org-push"
+[ "$(grep -c 'domains: \["api.example.com", "api.example.com:80"\]' <<< "$r")" = 1 ] || mfail+=" one-vhost"
+[ "$(grep -c 'escaped-unreserved"' <<< "$r")" = 2 ] || mfail+=" refusals-once"
+[ "$(grep -c 'name: "[^"]*-user"' <<< "$r")" = 1 ] || mfail+=" user-once"
+[ "$(grep -c 'name: "deny-connect-http-api.example.com"' <<< "$r")" = 1 ] || mfail+=" deny-connect-once"
+grep -q 'name: "http-api.example.com_me"' <<< "$r" && grep -q 'cluster_name: "http-api.example.com_me"' <<< "$r" || mfail+=" me-cluster"
+[ "$("$apply" --clients b "$work/site" | grep -v '^#')" = "$(printf 'api.example.com 443 github-api yes\ngit.example.com 443 git yes')" ] || mfail+=" manifest"
+if [ -z "$mfail" ]; then echo "ok   several definitions of a host: one virtual host, each repo its own credential, refusals and /user once (the first's), one manifest line"
+else echo "FAIL several definitions of a host:$mfail"; fails=$((fails+1)); fi
+
+# The render stops if a further definition would refuse other paths than the first (it couldn't
+# stand for it): a copy whose parser lets git and github-api share a host.
+# shellcheck disable=SC2016  # $1 and $2 are the script's text, not this shell's
+sed 's|^  \[ "\$1" = "\$2" \] && return 0$|  return 0|' "$apply" > "$work/guard/apply-family"; chmod +x "$work/guard/apply-family"
+printf 'http x.example@a rules github-api repos o/a\nhttp x.example@b rules git repos o/b\nl http://x.example@a http://x.example@b\nclient l t\n' > "$work/site"
+if grep -q '^  return 0$' "$work/guard/apply-family" && ! out="$("$work/guard/apply-family" --render "$work/site" 2>&1 >/dev/null)" && [[ "$out" == *"refuses other paths"* ]]; then
+  echo "ok   several definitions: one whose refusals differ from the first's stops the render"
+else echo "FAIL several definitions: differing refusals rendered: $out"; fails=$((fails+1)); fi
+
 # Without repos, nothing changes: the presets' own routes.
 printf 'http api.example.com rules github-api credential c1\nb http://api.example.com\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"

@@ -253,13 +253,23 @@ parse() {  # parse <source label>, text on stdin
   done
   # One mode per host and listener: a host reached by plain HTTP (rules, credential) must not
   # also be a CONNECT entry, or a box could tunnel around the rules. And one definition of a
-  # host per listener: its requests can only go one way.
-  local l h k seen
+  # host per listener, so its requests can only go one way; or several, each with repos and no
+  # repo in two of them, so each request still goes one way: by its repo.
+  local l h k seen first
+  local -A first_of=()
   for l in "${LISTENERS[@]}"; do
-    seen=" "
+    seen=" " first_of=()
     for k in ${HDESTS[$l]:-}; do
       h=${HTTP_HOST[$k]}
-      case "$seen" in *" $h "*) die "$src: listener $l lists $h twice (as http://$k and another); use one" ;; esac
+      case "$seen" in
+        *" $h "*) first=${first_of[$h]}
+          [ -n "${HTTP_REPOS[$first]}" ] && [ -n "${HTTP_REPOS[$k]}" ] \
+            || die "$src: listener $l lists $h twice (as http://$first and http://$k): use one, or give both repos (each repo in one of them)"
+          same_family "${HTTP_RULES[$first]}" "${HTTP_RULES[$k]}" \
+            || die "$src: listener $l lists $h with rules ${HTTP_RULES[$first]} (http://$first) and ${HTTP_RULES[$k]} (http://$k): definitions of one host share their rules (github-api and github-issues may mix)"
+          repos_overlap "$l" "$h" "$k" ;;
+        *) first_of[$h]=$k ;;
+      esac
       seen="$seen$h "
       for d in ${DESTS[$l]}; do
         [ "${d%:*}" != "$h" ] || die "$src: listener $l lists $h both as http://$k and as $d; use one"
@@ -339,6 +349,44 @@ valid_repo() {
   [[ "$n" =~ ^[A-Za-z0-9._-]{1,100}$ ]] && [[ ! "$n" =~ ^\.\.?$ ]] && [[ ! "${n,,}" =~ \.(git|wiki)$ ]]
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
+# Two definitions of one host on one listener: the same rules, or the two GitHub presets
+# (their refusals are the same, so one virtual host can hold both).
+same_family() {
+  [ "$1" = "$2" ] && return 0
+  case "$1 $2" in "github-api github-issues"|"github-issues github-api") return 0 ;; esac
+  return 1
+}
+# Listener $1's definition $3 of host $2 against the ones listed before it: no repo in two
+# (<owner>/* takes every repo of that owner).
+repos_overlap() {
+  local l=$1 h=$2 k=$3 o a b; local -a mine theirs
+  read -ra mine <<< "${HTTP_REPOS[$k]}"
+  for o in ${HDESTS[$l]}; do
+    [ "$o" != "$k" ] || break
+    [ "${HTTP_HOST[$o]}" = "$h" ] || continue
+    read -ra theirs <<< "${HTTP_REPOS[$o]}"
+    for a in "${mine[@]}"; do
+      for b in "${theirs[@]}"; do
+        [ "${a%%/*}" = "${b%%/*}" ] || continue
+        if [ "${a#*/}" = "${b#*/}" ] || [ "${a#*/}" = "*" ] || [ "${b#*/}" = "*" ]; then
+          die "$src: listener $l has $h's repo $a (http://$k) also in http://$o ($b): each repo in one definition"
+        fi
+      done
+    done
+  done
+}
+http_hosts_of() {  # listener $1's plain-HTTP hosts, once each, in the order listed
+  local d seen=" "
+  for d in ${HDESTS[$1]:-}; do
+    case "$seen" in *" ${HTTP_HOST[$d]} "*) continue ;; esac
+    seen="$seen${HTTP_HOST[$d]} "; echo "${HTTP_HOST[$d]}"
+  done
+}
+defs_of() {  # listener $1's definitions of host $2, in the order listed (the first stands for all)
+  local d out=""
+  for d in ${HDESTS[$1]:-}; do [ "${HTTP_HOST[$d]}" != "$2" ] || out="${out:+$out }$d"; done
+  printf '%s' "$out"
+}
 any_repos() {  # some http line has repos
   local k
   for k in "${HTTP_HOSTS[@]}"; do [ -z "${HTTP_REPOS[$k]}" ] || return 0; done
@@ -549,7 +597,9 @@ render_clients() {
   local d
   echo "# airlock-envoy: the plain-HTTP hosts of listener $1, for the box's clients: http://<host>/"
   echo "# through the proxy. No credentials here. Fields: host upstream-port rules credential"
-  for d in ${HDESTS[$1]:-}; do
+  # One line a host: its first definition's (further ones differ only in repos and credential).
+  for d in $(http_hosts_of "$1"); do
+    d=$(defs_of "$1" "$d"); d=${d%% *}
     printf '%s %s %s %s\n' "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "${HTTP_RULES[$d]}" "$([ -n "${HTTP_CRED[$d]}" ] && echo yes || echo no)"
   done
 }
@@ -720,9 +770,9 @@ preset_rules_scoped() {  # preset_rules_scoped <rules> <repos>
     case "$1:$name" in
       github-*:graphql) continue ;;
       github-*:read) pat="/repos/$any(/.*)?" kind=regex
-        printf '%s\n' "user GET|HEAD exact /user" "rate-limit GET|HEAD exact /rate_limit" ;;
+        printf '%s\n' "user GET|HEAD exact /user outside" "rate-limit GET|HEAD exact /rate_limit outside" ;;
       forgejo:read) pat="/api/v1/repos/$any(/.*)?" kind=regex
-        printf '%s\n' "user GET|HEAD exact /api/v1/user" "version GET|HEAD exact /api/v1/version" ;;
+        printf '%s\n' "user GET|HEAD exact /api/v1/user outside" "version GET|HEAD exact /api/v1/version outside" ;;
     esac
     [[ "$pat" == *"$any"* ]] || die "internal: the $1 route $name has no repo part to scope"
     for i in "${!rxs[@]}"; do
@@ -763,13 +813,12 @@ creds_used() {  # every credential some listener's http destinations use, once e
 # A virtual host for plain-HTTP host $1: the box's request is matched against the preset; an
 # allowed one goes to the host with Host fixed (so another site on the same edge is out of
 # reach) and, if the host has one, its credential added (replacing anything the box sent).
+# Further definitions of the same host ($2...; each with repos, no repo in two, the parser
+# checked) add only their repos' routes, each with its own credential and upstream: the
+# first one's refusals and its routes outside a repo (/user) stand for all.
 http_vhost() {
-  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} cred=${HTTP_CRED[$1]} projects=${HTTP_PROJECTS[$1]} repos=${HTTP_REPOS[$1]} name methods kind pat flag timeout maxdur
+  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} first=$1 k cred projects repos name methods kind pat flag timeout maxdur routes denies="" d1=""
   id=$(hid "$1")
-  # A clone or push can take long (the idle timeout still applies); anything else gets a cap
-  # on the whole stream, so a slowly sent body can't hold a connection for good.
-  timeout=120s maxdur=", max_stream_duration: { max_stream_duration: 300s }"
-  case "$rules" in git|git-read) timeout=0s maxdur= ;; esac
   cat <<EOF
             - name: "http-$id"
               domains: ["$h", "$h:80"]
@@ -800,12 +849,22 @@ EOF
                 match: { prefix: "/", headers: [{ name: "upgrade", present_match: true }] }
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: no protocol upgrades here\\n" } }
 EOF
+  for k in "$@"; do
+  id=$(hid "$k") rules=${HTTP_RULES[$k]} cred=${HTTP_CRED[$k]} projects=${HTTP_PROJECTS[$k]} repos=${HTTP_REPOS[$k]}
+  # A clone or push can take long (the idle timeout still applies); anything else gets a cap
+  # on the whole stream, so a slowly sent body can't hold a connection for good.
+  timeout=120s maxdur=", max_stream_duration: { max_stream_duration: 300s }"
+  case "$rules" in git|git-read) timeout=0s maxdur= ;; esac
   # Built first, not read from a process substitution: a die in there would end only the
   # subshell, and the render would go on with routes missing.
-  local routes
   routes=$(if [ -n "$repos" ]; then preset_rules_scoped "$rules" "$repos"; else preset_rules "$rules"; fi) || exit 1
+  # A further definition's refusals must be the first one's, which stand for it.
+  d1=$(while read -r name methods kind pat flag; do [ "${flag:-}" != deny ] || echo "$methods $kind $pat"; done <<< "$routes")
+  if [ "$k" = "$first" ]; then denies=$d1
+  elif [ "$d1" != "$denies" ]; then die "internal: http://$k refuses other paths than http://$first"; fi
   while read -r name methods kind pat flag; do
     [ -n "$name" ] || continue
+    if [ "$k" != "$first" ]; then case "${flag:-}" in deny|outside) continue ;; esac; fi
     echo "              - name: \"$id-$name\""
     echo "                match:"
     case "$kind" in
@@ -831,6 +890,8 @@ EOF
       [ -z "$cred" ] || echo "                  \"inject-$cred\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
     fi
   done <<< "$routes"
+  done
+  id=$(hid "$first") rules=${HTTP_RULES[$first]}
   cat <<EOF
               - name: "$id-refused"
                 match: { prefix: "/" }
@@ -1058,7 +1119,10 @@ EOF
             name: "$l"
             virtual_hosts:
 EOF
-    for d in ${HDESTS[$l]:-}; do http_vhost "$d"; done
+    for d in $(http_hosts_of "$l"); do
+      # shellcheck disable=SC2046  # definition keys: no spaces or globs
+      http_vhost $(defs_of "$l" "$d")
+    done
     cat <<EOF
             - name: "$l"
               domains: ["*"]
@@ -1074,8 +1138,7 @@ EOF
                 route: { cluster: "sni-$k", upgrade_configs: [{ upgrade_type: CONNECT, connect_config: {} }] }
 EOF
     done
-    for d in ${HDESTS[$l]:-}; do
-      d=${HTTP_HOST[$d]}
+    for d in $(http_hosts_of "$l"); do
       de="$(printf '%s' "$d" | sed 's/[.]/\\\\./g')"   # dots escaped for the regex, as YAML wants them
       cat <<EOF
               - name: "deny-connect-http-$d"
