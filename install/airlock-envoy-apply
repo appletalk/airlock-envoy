@@ -339,6 +339,11 @@ valid_repo() {
   [[ "$n" =~ ^[A-Za-z0-9._-]{1,100}$ ]] && [[ ! "$n" =~ ^\.\.?$ ]] && [[ ! "${n,,}" =~ \.(git|wiki)$ ]]
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
+any_repos() {  # some http line has repos
+  local k
+  for k in "${HTTP_HOSTS[@]}"; do [ -z "${HTTP_REPOS[$k]}" ] || return 0; done
+  return 1
+}
 
 add_hdest() {
   case " ${HDESTS[$1]:-} " in *" $2 "*) return ;; esac
@@ -674,8 +679,8 @@ EOR
     ;;
   esac
 }
-# An http line's repos as a regex for the <owner>/<repo> part of a path. Letters are written
-# [aA] (GitHub and Forgejo match names in any case; RE2 and bash read that alike, so the tests
+# One repos entry as a regex for the <owner>/<repo> part of a path. Letters are written [aA]
+# (GitHub and Forgejo match names in any case; RE2 and bash read that alike, so the tests
 # check what Envoy runs), dots escaped, a named repo with an optional .git, <owner>/* as any
 # repo name of that owner. No % fits: an escaped name is refused, not decoded.
 ci_lit() {
@@ -686,37 +691,42 @@ ci_lit() {
   done
   printf '%s' "$out"
 }
-repo_regex() {  # repo_regex <repos, space separated>
-  local r n alts="" ; local -a list
-  read -ra list <<< "$1"   # read, not a bare $1: <owner>/* must not glob
-  for r in "${list[@]}"; do
-    n=${r#*/}
-    if [ "$n" = "*" ]; then n='[A-Za-z0-9._-]+'; else n="$(ci_lit "$n")(\\\\.git)?"; fi
-    alts="${alts:+$alts|}$(ci_lit "${r%%/*}")/$n"
-  done
-  printf '(%s)' "$alts"
+repo_regex() {  # repo_regex <owner>/<repo or *>
+  local n=${1#*/}
+  if [ "$n" = "*" ]; then n='[A-Za-z0-9._-]+'; else n="$(ci_lit "$n")(\\\\.git)?"; fi
+  printf '(%s/%s)' "$(ci_lit "${1%%/*}")" "$n"
 }
-# A preset's routes under repos: each allowing route's <owner>/<repo> part matches only those
-# repos (deny routes stay as they are, and keep their place); reads outside a repo are refused
-# but for who the token is (and, on GitHub, its rate limit). GraphQL is refused: one query
-# walks from a repo to any other (parent, forks, an owner's repositories), so a path can't
-# scope it; the presets' catch-all GraphQL deny then takes POST /graphql too. An escaped dot
-# is refused first: after a listed repo, %2e%2e is a dot segment the upstream could decode
-# into another repo's path (the listener already rejects escaped slashes).
+# A preset's routes under repos: each allowing route that names a repo becomes one route per
+# listed repo (<name>-1, -2, ...: a regex per repo stays small, and Envoy refuses a regex
+# over its RE2 program size); deny routes stay as they are, and keep their place. Reads
+# outside a repo are refused but for who the token is (and, on GitHub, its rate limit).
+# GraphQL is refused: one query walks from a repo to any other (parent, forks, an owner's
+# repositories), so a path can't scope it; the presets' catch-all GraphQL deny then takes
+# POST /graphql too. Refused first: an escaped dot (after a listed repo, %2e%2e is a dot
+# segment the upstream could decode into another repo's path; the listener already rejects
+# escaped slashes), and a compare across repos (base...owner:branch reads another repo of
+# the fork network by branch name).
 preset_rules_scoped() {  # preset_rules_scoped <rules> <repos>
-  local rx name methods kind pat flag any='[^/]+/[^/]+'
-  rx=$(repo_regex "$2")
+  local name methods kind pat flag any='[^/]+/[^/]+' i r api="" ; local -a list rxs
+  read -ra list <<< "$2"   # read, not a bare $2: <owner>/* must not glob
+  for r in "${list[@]}"; do rxs+=("$(repo_regex "$r")"); done
   echo 'escaped-dot * regex .*%2[eE].* deny'
+  case "$1" in github-*) api=/repos ;; forgejo) api=/api/v1/repos ;; esac
+  [ -z "$api" ] || echo "compare-across * regex $api/[^/]+/[^/]+/compare/.*(:|%3[aA]).* deny"
   while read -r name methods kind pat flag; do
     [ -n "$name" ] || continue
     if [ "${flag:-}" = deny ]; then echo "$name $methods $kind $pat $flag"; continue; fi
     case "$1:$name" in
       github-*:graphql) continue ;;
-      github-*:read) printf '%s\n' "read GET|HEAD regex /repos/$rx(/.*)?" "user GET|HEAD exact /user" "rate-limit GET|HEAD exact /rate_limit"; continue ;;
-      forgejo:read) printf '%s\n' "read GET|HEAD regex /api/v1/repos/$rx(/.*)?" "user GET|HEAD exact /api/v1/user" "version GET|HEAD exact /api/v1/version"; continue ;;
+      github-*:read) pat="/repos/$any(/.*)?" kind=regex
+        printf '%s\n' "user GET|HEAD exact /user" "rate-limit GET|HEAD exact /rate_limit" ;;
+      forgejo:read) pat="/api/v1/repos/$any(/.*)?" kind=regex
+        printf '%s\n' "user GET|HEAD exact /api/v1/user" "version GET|HEAD exact /api/v1/version" ;;
     esac
     [[ "$pat" == *"$any"* ]] || die "internal: the $1 route $name has no repo part to scope"
-    echo "$name $methods $kind ${pat//"$any"/"$rx"} ${flag:-}"
+    for i in "${!rxs[@]}"; do
+      echo "$name-$((i + 1)) $methods $kind ${pat//"$any"/"${rxs[$i]}"} ${flag:-}"
+    done
   done < <(preset_rules "$1")
 }
 CRED_DIR=/etc/airlock-envoy/credentials
@@ -932,7 +942,16 @@ EOF
 }
 
 render() {  # render <access log path>
-  local log=$1 l d k de first=1
+  local log=$1 l d k de first=1 rt=""
+  # Scoped routes (an http line's repos) carry a regex per repo, and a long <owner>/<repo>
+  # (every letter a class) is over RE2's default program size, which Envoy refuses.
+  any_repos && rt='layered_runtime:
+  layers:
+  - name: static
+    static_layer:
+      re2: { max_program_size: { error_level: 1000, warn_level: 1000 } }
+
+'
   cat <<EOF
 # Rendered by airlock-envoy-apply from the site file. Edit the site file, not this.
 #
@@ -957,7 +976,7 @@ overload_manager:
       # another; this total is just their sum.
       max_active_downstream_connections: $(( PER_LISTENER * (${#SOCKETS[@]} > 0 ? ${#SOCKETS[@]} : 1) ))
 
-admin:
+${rt}admin:
   address:
     pipe:
       path: /run/airlock-envoy-internal/admin.sock

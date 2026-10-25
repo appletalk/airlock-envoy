@@ -257,8 +257,11 @@ for c in "listed repo:GET:/repos/octocat/hello-world:401" "listed repo, other ca
          "gists:GET:/gists/public:403" "GraphQL query:POST:/graphql:403" \
          "dot segments out of a listed repo:GET:/repos/octocat/hello-world/../../octocat/spoon-knife:403" \
          "escaped dots out of a listed repo:GET:/repos/octocat/hello-world/%2e%2e/%2e%2e/octocat/spoon-knife:403" \
-         "escaped dots, upper case:GET:/repos/octocat/hello-world/%2E%2E/%2E%2E/octocat/spoon-knife:403"; do
-  IFS=: read -r cn cm cp cw <<< "$c"
+         "escaped dots, upper case:GET:/repos/octocat/hello-world/%2E%2E/%2E%2E/octocat/spoon-knife:403" \
+         "an escaped dot in a file name (Envoy did not decode it):GET:/repos/octocat/hello-world/contents/a%2eb:403" \
+         "compare in the repo:GET:/repos/octocat/hello-world/compare/master...master:401" \
+         "compare across the fork network:GET:/repos/octocat/hello-world/compare/master...octocat:spoon-knife:master:403"; do
+  cw=${c##*:} c=${c%:*}; cn=${c%%:*} c=${c#*:}; cm=${c%%:*} cp=${c#*:}   # the path may hold a colon
   check 3130 "repos, GitHub API: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" -H "Content-Type: application/json" "http://api.github.com$cp"
 done
 slot; { r="$(cd /tmp && rm -rf hwr && http_proxy=http://127.0.0.1:3130 git clone -q --depth 1 http://github.com/octocat/Hello-World.git hwr 2>&1 && git -C hwr rev-parse --short HEAD)"
@@ -276,8 +279,9 @@ for c in "listed repo:GET:/api/v1/repos/o/r:404" "listed repo, other case:GET:/a
          "repos of a user:GET:/api/v1/users/o/repos:403" "comment, unlisted repo:POST:/api/v1/repos/o/other/issues/1/comments:403" \
          "git fetch, unlisted repo:GET:/o/other.git/info/refs:403" "wiki of a listed repo:GET:/o/r.wiki.git/info/refs:403" \
          "token in the query, listed repo:GET:/api/v1/repos/o/r?token=x:403" \
-         "escaped dots out of a listed repo:GET:/api/v1/repos/o/r/%2e%2e/%2e%2e/o/other:403"; do
-  IFS=: read -r cn cm cp cw <<< "$c"
+         "escaped dots out of a listed repo:GET:/api/v1/repos/o/r/%2e%2e/%2e%2e/o/other:403" \
+         "compare across repos:GET:/api/v1/repos/o/r/compare/main...other:main:403"; do
+  cw=${c##*:} c=${c%:*}; cn=${c%%:*} c=${c#*:}; cm=${c%%:*} cp=${c#*:}   # the path may hold a colon
   check 3128 "repos, forgejo: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" -H "Content-Type: application/json" "http://httpbin.org$cp"
 done
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql

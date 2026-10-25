@@ -175,14 +175,15 @@ lists "repos: lowercased, deduplicated, <owner>/* kept" \
 # What repos lets through, against the rendered regexes (letters as [aA]: RE2 and bash agree).
 printf 'http api.example.com rules github-api credential c1 repos Octo-Cat/Hello.World,acme/*\nhttp git.example.com rules git credential c2 repos octo-cat/hello.world\nhttp fj.example.com rules forgejo credential c3 repos me/r\nb http://api.example.com http://git.example.com http://fj.example.com\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"
-rrx() { grep -A3 "name: \"$1\"" <<< "$r" | sed -n 's/.*regex: "\(.*\)" }$/\1/p' | head -1 | sed 's/\\\\/\\/g'; }
-order="$(grep -o 'name: "api.example.com-[a-z-]*"' <<< "$r" | sed 's/^name: "api.example.com-//; s/"$//' | tr '\n' ' ')"
+# A route's regex; for a scoped route (one per repo: <name>-1, -2, ...), all of them joined.
+rrx() { grep -A3 -E "name: \"$1(-[0-9]+)?\"" <<< "$r" | sed -n 's/.*regex: "\(.*\)" }$/\1/p' | sed 's/\\\\/\\/g' | paste -sd '|'; }
+order="$(grep -o 'name: "api.example.com-[a-z0-9-]*"' <<< "$r" | sed 's/^name: "api.example.com-//; s/"$//' | tr '\n' ' ')"
 rfail=""
 for p in /repos/octo-cat/hello.world /repos/Octo-Cat/HELLO.World/pulls/1 /repos/octo-cat/hello.world/issues/2/comments \
          /repos/acme/anything /repos/ACME/x.y-z_1/actions/runs; do
   [[ "$p" =~ ^($(rrx api.example.com-read))$ ]] || rfail+=" not-read:$p"
 done
-for p in /repos/octo-cat/hello.worlds /repos/octo-cat/helloXworld /repos/octo-cat/hello.world-x/pulls /repos/other/hello.world \
+for p in /repos/octo-cat/hello.worlds /repos/octo-cat/helloXworld /repos/octo-cat/hello.worldXgit /repos/octo-cat/hello.world-x/pulls /repos/other/hello.world \
          /repos/acme /repos/acmex/r /repos/acme/r%2fx /repos/acme/r%2e%2e /repositories/1 /search/issues /users/x/repos /orgs/acme/repos \
          /user/repos /gists /graphql; do
   [[ "$p" =~ ^($(rrx api.example.com-read))$ ]] && rfail+=" read:$p"
@@ -191,6 +192,11 @@ for p in /repos/acme/r/%2e%2e/%2e%2e/other/x /repos/acme/r/%2E%2E /repos/acme/r/
   [[ "$p" =~ ^($(rrx api.example.com-escaped-dot))$ ]] || rfail+=" escaped-dot-through:$p"
 done
 [[ /repos/acme/r/contents/a%20b =~ ^($(rrx api.example.com-escaped-dot))$ ]] && rfail+=" escaped-space-refused"
+for p in /repos/acme/r/compare/main...other:main /repos/acme/r/compare/main...other:r:main /repos/acme/r/compare/main...other%3Amain; do
+  [[ "$p" =~ ^($(rrx api.example.com-compare-across))$ ]] || rfail+=" compare-across-through:$p"
+done
+[[ /repos/acme/r/compare/main...dev =~ ^($(rrx api.example.com-compare-across))$ ]] && rfail+=" compare-same-repo-refused"
+[[ /api/v1/repos/me/r/compare/main...other:main =~ ^($(rrx fj.example.com-compare-across))$ ]] || rfail+=" fj-compare-across-through"
 [[ /repos/acme/r/pulls =~ ^($(rrx api.example.com-create))$ ]] || rfail+=" create"
 [[ /repos/other/r/pulls =~ ^($(rrx api.example.com-create))$ ]] && rfail+=" create-other"
 [[ /repos/other/r/issues/1/comments =~ ^($(rrx api.example.com-issue-sub))$ ]] && rfail+=" comment-other"
@@ -198,7 +204,7 @@ done
 for p in /octo-cat/hello.world/info/refs /Octo-Cat/Hello.World.git/info/refs; do
   [[ "$p" =~ ^($(rrx git.example.com-info-refs))$ ]] || rfail+=" not-git:$p"
 done
-for p in /octo-cat/hello.world.wiki.git/info/refs /octo-cat/other/info/refs /octo-cat/hello.world.git.git/info/refs /x/octo-cat/hello.world/info/refs; do
+for p in /octo-cat/hello.world.wiki.git/info/refs /octo-cat/hello.worldXgit/info/refs /octo-cat/other/info/refs /octo-cat/hello.world.git.git/info/refs /x/octo-cat/hello.world/info/refs; do
   [[ "$p" =~ ^($(rrx git.example.com-info-refs))$ ]] && rfail+=" git:$p"
 done
 [[ /octo-cat/other/git-receive-pack =~ ^($(rrx git.example.com-pack))$ ]] && rfail+=" push-other"
@@ -206,8 +212,8 @@ done
 for p in /api/v1/repos/search /api/v1/repos/me/rr /api/v1/users/me/repos /api/v1/orgs/me/repos /api/v1/repos/issues/search /api/v1/admin/users; do
   [[ "$p" =~ ^($(rrx fj.example.com-read))$ ]] && rfail+=" fj-read:$p"
 done
-if [ -z "$rfail" ] && [ "$order" = "escaped-dot graphql-other read user rate-limit create issue-sub edit edit-comment reviewers refused " ] \
-   && ! grep -q 'github-graphql: { rules' <<< "$r" \
+if [ -z "$rfail" ] && [ "$order" = "escaped-dot compare-across graphql-other user rate-limit read-1 read-2 create-1 create-2 issue-sub-1 issue-sub-2 edit-1 edit-2 edit-comment-1 edit-comment-2 reviewers-1 reviewers-2 refused " ] \
+   && ! grep -q 'github-graphql: { rules' <<< "$r" && grep -q '^layered_runtime:' <<< "$r" \
    && grep -A2 'name: "api.example.com-graphql-other"' <<< "$r" | grep -qF 'regex: "(?i)/graphql.*"' \
    && grep -A2 'name: "fj.example.com-wiki"' <<< "$r" | grep -qF 'regex: "/[^/]+/[^/]+\\.wiki(\\.git)?/.*"' \
    && [ "$(grep -o 'name: "fj.example.com-[a-z-]*"' <<< "$r" | head -5 | tr '\n' ' ')" = 'name: "fj.example.com-query-token" name: "fj.example.com-query-access-token" name: "fj.example.com-query-sudo" name: "fj.example.com-form-body" name: "fj.example.com-escaped-dot" ' ]; then
@@ -216,8 +222,9 @@ else echo "FAIL repos rendering (route order: $order):$rfail"; fails=$((fails+1)
 # Without repos, nothing changes: the presets' own routes.
 printf 'http api.example.com rules github-api credential c1\nb http://api.example.com\nclient b t\n' > "$work/site"
 r="$("$apply" --render "$work/site")"
-if grep -q 'name: "api.example.com-graphql"' <<< "$r" && grep -A2 'name: "api.example.com-read"' <<< "$r" | grep -q 'prefix: "/"'; then
-  echo "ok   no repos: GraphQL checked, reads anywhere (as before)"
+if grep -q 'name: "api.example.com-graphql"' <<< "$r" && grep -A2 'name: "api.example.com-read"' <<< "$r" | grep -q 'prefix: "/"' \
+   && ! grep -q 'layered_runtime' <<< "$r"; then
+  echo "ok   no repos: GraphQL checked, reads anywhere, no runtime layer (as before)"
 else echo "FAIL no repos: the preset changed"; fails=$((fails+1)); fi
 
 printf 'http x.example@board rules github-issues credential c2 projects PVT_aB,PVT_cD\nb http://x.example@board\nclient b t\n' > "$work/site"
@@ -426,8 +433,10 @@ ExecStopPost=/usr/bin/rm -f /run/airlock-envoy/$me/a.clients"
   else echo "FAIL socket drop-in for the built-in"; fails=$((fails+1)); fi
 else echo "skip socket drop-in: run as a login account (uid 1000 and up)"; fi
 
-# A file shaped like a real site renders to a config Envoy accepts.
-printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues\nhttp g.example.com rules git\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\nclient x t\nclient y u\n' > "$work/site"
+# A file shaped like a real site renders to a config Envoy accepts, scoped routes at their
+# largest included: 64 repos with the longest names (39 + 100 characters).
+long="$(for i in $(seq 10 73); do printf '%s,' "o$i$(printf 'x%.0s' $(seq 36))/r$i$(printf 'y%.0s' $(seq 97))"; done)"
+printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues repos %s\nhttp g.example.com rules git\nhttp fj.example.com rules forgejo repos a/*\nx http://fj.example.com\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\nclient x t\nclient y u\n' "${long%,}" > "$work/site"
 "$apply" --render "$work/site" > "$work/envoy.yaml"
 if envoy="$(command -v envoy)"; then
   # Envoy picks the format by extension, and validate mode opens the access log.

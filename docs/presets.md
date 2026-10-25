@@ -140,10 +140,17 @@ may write them in any case (apply keeps them lowercase).
 | `github-api`, `github-issues` | REST reads only under `/repos/<listed>/`, plus `/user` and `/rate_limit`; REST writes only in the listed repos; **GraphQL refused** |
 
 Refused outright, besides other repos: search, `/repositories/<id>`, users, orgs and gists
-(and on Forgejo, repo search and user or org repo lists). A path with an escaped dot (`%2e`)
-is refused too: after a listed repo, `%2e%2e/%2e%2e/` would be a dot segment the upstream could
-decode into another repo's path. The listener already rejects escaped slashes and resolves
-plain dot segments before matching.
+(and on Forgejo, repo search and user or org repo lists). Also refused:
+
+- A path with an escaped dot (`%2e`): after a listed repo, `%2e%2e/%2e%2e/` would be a dot
+  segment the upstream could decode into another repo's path. The listener already rejects
+  escaped slashes and resolves plain dot segments before matching.
+- A compare across repos (`compare/main...owner:branch`, a `:` after `compare/`), which reads
+  another repo of the fork network by branch name. A compare within the repo
+  (`main...feature`) passes.
+
+Each scoped route becomes one route per listed repo, and the rendered config raises RE2's
+program size limit (Envoy refuses a regex over it, and a long name is over the default).
 
 **Why GraphQL is refused.** One GraphQL query walks from a repo to any other (`parent`,
 `forks`, an owner's `repositories`, a node looked up by ID), and so do mutation results. A
@@ -160,10 +167,17 @@ What that loses:
 
 **Limits:**
 
-- **A public repo's fork network.** GitHub serves a fork's commits through the repo it was
-  forked from (a fetch by SHA, `compare` across forks). So a listed public repo also reads
-  what anyone pushed to a fork of it. Scoping bounds which repos a box names, not what text it
-  reads: issue bodies and timelines mention other repos too.
+- **A listed repo's fork network.** GitHub shares objects across a whole fork network (the
+  parent, its forks and theirs, public or private): a fetch by SHA through a listed repo, a
+  commit by SHA, or a PR whose head is another fork's branch (`head: owner:branch` in a
+  JSON body, which a path can't see) all read the rest of the network that the token can.
+  Cross-repo compare is refused, these are not. So list a fork only if its network may be
+  read. Scoping also bounds which repos a box names, not what text it reads: issue bodies and
+  timelines mention other repos too.
+- **Writes in a listed repo can reach other repos by reference.** A comment or issue body
+  naming `other/repo#1` adds a cross-reference (with the box's title) to that issue, and a
+  commit pushed to a listed repo's default branch with `closes other/repo#1` closes it if the
+  token may write there.
 - **Renamed repos.** GitHub redirects an old name to `/repositories/<id>`, which is refused.
   List the new name.
 - **`<owner>/*` on GitHub includes the owner's wikis** (`<repo>.wiki.git`). On Forgejo the

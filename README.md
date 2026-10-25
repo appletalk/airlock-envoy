@@ -249,9 +249,10 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   ```
 - **`projects`** (GitHub presets only): lets Projects v2 item writes through for those project
   IDs. See [docs/presets.md](docs/presets.md#projects-v2).
-- **`repos`** (the git, forgejo and GitHub presets): only those repos (`<owner>/*` for all of
-  an owner's) can be read, cloned or written; on GitHub, GraphQL is refused, so `gh` works
-  through `gh api` (REST). See [docs/presets.md](docs/presets.md#repo-scoping-repos).
+- **`repos`** (the git, forgejo and GitHub presets): the box's requests may name only those
+  repos (`<owner>/*` for all of an owner's) to read, clone or write; on GitHub, GraphQL is
+  refused, so `gh` works through `gh api` (REST). A listed repo's fork network stays readable
+  through it. See [docs/presets.md](docs/presets.md#repo-scoping-repos).
   ```
   http github.com      rules git        credential github-git repos example-org/*,alice/tools
   http api.github.com  rules github-api credential github-api repos example-org/*,alice/tools
@@ -337,8 +338,9 @@ GitHub presets check every `POST /graphql` write against an allowlist.
 - **Repo scoping is opt-in.** Without `repos`, a box can read any repo the token can (a GitHub
   token also reads every public repo), and write issues and comments in any it may write: it
   could copy a private repo into another repo's issue. Only the token's (or App installation's)
-  repo list bounds this. With `repos`, GraphQL is refused and a listed public repo still serves
-  its forks' commits ([docs/presets.md](docs/presets.md#repo-scoping-repos)).
+  repo list bounds this. With `repos`, GraphQL is refused, and a listed repo still reads its
+  fork network (parent and forks) and can reach other repos by reference
+  ([docs/presets.md](docs/presets.md#repo-scoping-repos)).
 - **Label and comment writes also land on PRs**, where org automation (an auto-merge label, a
   comment-triggered workflow) can turn them into merges or deploys.
 - **Assignment can start an agent.** Where an org has the Copilot coding agent on, assigning an
