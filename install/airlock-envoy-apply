@@ -329,12 +329,12 @@ parse_http() {  # parse_http <where> <words...>
   HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos
   HTTP_HOSTS+=("$k")
 }
-# A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (matched in
-# any case). No . or .. repo, and no .git or .wiki ending (the .git is optional in git paths; a
+# A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (owners up
+# to 40 characters, repos up to 100; matched in any case). No . or .. repo, and no .git or .wiki ending (the .git is optional in git paths; a
 # wiki is another repo).
 valid_repo() {
   local o=${1%%/*} n=${1#*/}
-  [[ "$1" == */* ]] && [[ "$o" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$ ]] || return 1
+  [[ "$1" == */* ]] && [[ "$o" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,38}[A-Za-z0-9])?$ ]] || return 1
   [ "$n" = "*" ] && return 0
   [[ "$n" =~ ^[A-Za-z0-9._-]{1,100}$ ]] && [[ ! "$n" =~ ^\.\.?$ ]] && [[ ! "${n,,}" =~ \.(git|wiki)$ ]]
 }
@@ -702,17 +702,18 @@ repo_regex() {  # repo_regex <owner>/<repo or *>
 # outside a repo are refused but for who the token is (and, on GitHub, its rate limit).
 # GraphQL is refused: one query walks from a repo to any other (parent, forks, an owner's
 # repositories), so a path can't scope it; the presets' catch-all GraphQL deny then takes
-# POST /graphql too. Refused first: an escaped dot (after a listed repo, %2e%2e is a dot
-# segment the upstream could decode into another repo's path; the listener already rejects
-# escaped slashes), and a compare across repos (base...owner:branch reads another repo of
-# the fork network by branch name).
+# POST /graphql too. Refused first: an escaped unreserved character (letters, digits, -._~,
+# which no client needs to escape: after a listed repo, %2e%2e is a dot segment the upstream
+# could decode into another repo's path, and c%6fmpare would slip past the next rule; the
+# listener already rejects escaped slashes), and a compare across repos (base...owner:branch
+# reads another repo of the fork network by branch name), compare in any case.
 preset_rules_scoped() {  # preset_rules_scoped <rules> <repos>
   local name methods kind pat flag any='[^/]+/[^/]+' i r api="" ; local -a list rxs
   read -ra list <<< "$2"   # read, not a bare $2: <owner>/* must not glob
   for r in "${list[@]}"; do rxs+=("$(repo_regex "$r")"); done
-  echo 'escaped-dot * regex .*%2[eE].* deny'
+  echo 'escaped-unreserved * regex .*%(3[0-9]|[46][1-9a-fA-F]|[57][0-9aA]|2[dDeE]|5[fF]|7[eE]).* deny'
   case "$1" in github-*) api=/repos ;; forgejo) api=/api/v1/repos ;; esac
-  [ -z "$api" ] || echo "compare-across * regex $api/[^/]+/[^/]+/compare/.*(:|%3[aA]).* deny"
+  [ -z "$api" ] || echo "compare-across * regex $api/[^/]+/[^/]+/$(ci_lit compare)/.*(:|%3[aA]).* deny"
   while read -r name methods kind pat flag; do
     [ -n "$name" ] || continue
     if [ "${flag:-}" = deny ]; then echo "$name $methods $kind $pat $flag"; continue; fi

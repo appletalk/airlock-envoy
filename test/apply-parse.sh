@@ -164,6 +164,9 @@ refuses "repos: a single dot"          "bad repo 'acme/.'"     'http x.example r
 refuses "repos: a .git name"           "bad repo 'acme/r.GIT'" 'http x.example rules git repos acme/r.GIT\n'
 refuses "repos: a wiki"                "bad repo 'acme/r.wiki'" 'http x.example rules git repos acme/r.wiki\n'
 refuses "repos: an owner starting with -" "bad repo '-acme/r'" 'http x.example rules git repos -acme/r\n'
+refuses "repos: an owner over 40"      "bad repo"              "http x.example rules git repos $(printf 'o%.0s' $(seq 41))/r\\n"
+refuses "repos: a repo over 100"       "bad repo"              "http x.example rules git repos o/$(printf 'r%.0s' $(seq 101))\\n"
+refuses "repos: over 64"               "over 64 repos"         "http x.example rules git repos $(for i in $(seq 65); do printf 'o/r%s,' "$i"; done | sed 's/,$//')\\n"
 refuses "repos: an escape"             "bad repo 'acme/r%2e'"  'http x.example rules git repos acme/r%2e\n'
 refuses "repos: a quote"               "bad repo 'acme/r\"'"   'http x.example rules git repos acme/r"\n'
 refuses "repos: a trailing comma"      "bad repo ''"           'http x.example rules git repos a/b,\n'
@@ -189,9 +192,16 @@ for p in /repos/octo-cat/hello.worlds /repos/octo-cat/helloXworld /repos/octo-ca
   [[ "$p" =~ ^($(rrx api.example.com-read))$ ]] && rfail+=" read:$p"
 done
 for p in /repos/acme/r/%2e%2e/%2e%2e/other/x /repos/acme/r/%2E%2E /repos/acme/r/contents/a%2ex; do
-  [[ "$p" =~ ^($(rrx api.example.com-escaped-dot))$ ]] || rfail+=" escaped-dot-through:$p"
+  [[ "$p" =~ ^($(rrx api.example.com-escaped-unreserved))$ ]] || rfail+=" escaped-unreserved-through:$p"
 done
-[[ /repos/acme/r/contents/a%20b =~ ^($(rrx api.example.com-escaped-dot))$ ]] && rfail+=" escaped-space-refused"
+[[ /repos/acme/r/contents/a%20b =~ ^($(rrx api.example.com-escaped-unreserved))$ ]] && rfail+=" escaped-space-refused"
+for p in /repos/acme/r/c%6fmpare/a...b:c /repos/acme/r/%41 /repos/acme/r/x%5Fy /repos/acme/r/x%7e /repos/acme/r/x%2D /repos/acme/r/x%39 /repos/acme/r/x%7A; do
+  [[ "$p" =~ ^($(rrx api.example.com-escaped-unreserved))$ ]] || rfail+=" escaped-unreserved-through:$p"
+done
+for p in /repos/acme/r/contents/a%2Bb /repos/acme/r/contents/%C3%A9 /repos/acme/r/contents/a%40b /repos/acme/r/contents/a%3Fb; do
+  [[ "$p" =~ ^($(rrx api.example.com-escaped-unreserved))$ ]] && rfail+=" escaped-reserved-refused:$p"
+done
+[[ /repos/acme/r/COMPARE/main...other:main =~ ^($(rrx api.example.com-compare-across))$ ]] || rfail+=" compare-upper-through"
 for p in /repos/acme/r/compare/main...other:main /repos/acme/r/compare/main...other:r:main /repos/acme/r/compare/main...other%3Amain; do
   [[ "$p" =~ ^($(rrx api.example.com-compare-across))$ ]] || rfail+=" compare-across-through:$p"
 done
@@ -212,11 +222,12 @@ done
 for p in /api/v1/repos/search /api/v1/repos/me/rr /api/v1/users/me/repos /api/v1/orgs/me/repos /api/v1/repos/issues/search /api/v1/admin/users; do
   [[ "$p" =~ ^($(rrx fj.example.com-read))$ ]] && rfail+=" fj-read:$p"
 done
-if [ -z "$rfail" ] && [ "$order" = "escaped-dot compare-across graphql-other user rate-limit read-1 read-2 create-1 create-2 issue-sub-1 issue-sub-2 edit-1 edit-2 edit-comment-1 edit-comment-2 reviewers-1 reviewers-2 refused " ] \
+if [ -z "$rfail" ] && [ "$order" = "escaped-unreserved compare-across graphql-other user rate-limit read-1 read-2 create-1 create-2 issue-sub-1 issue-sub-2 edit-1 edit-2 edit-comment-1 edit-comment-2 reviewers-1 reviewers-2 refused " ] \
    && ! grep -q 'github-graphql: { rules' <<< "$r" && grep -q '^layered_runtime:' <<< "$r" \
+   && grep -q 're2: { max_program_size: { error_level: 1000, warn_level: 1000 } }' <<< "$r" \
    && grep -A2 'name: "api.example.com-graphql-other"' <<< "$r" | grep -qF 'regex: "(?i)/graphql.*"' \
    && grep -A2 'name: "fj.example.com-wiki"' <<< "$r" | grep -qF 'regex: "/[^/]+/[^/]+\\.wiki(\\.git)?/.*"' \
-   && [ "$(grep -o 'name: "fj.example.com-[a-z-]*"' <<< "$r" | head -5 | tr '\n' ' ')" = 'name: "fj.example.com-query-token" name: "fj.example.com-query-access-token" name: "fj.example.com-query-sudo" name: "fj.example.com-form-body" name: "fj.example.com-escaped-dot" ' ]; then
+   && [ "$(grep -o 'name: "fj.example.com-[a-z-]*"' <<< "$r" | head -5 | tr '\n' ' ')" = 'name: "fj.example.com-query-token" name: "fj.example.com-query-access-token" name: "fj.example.com-query-sudo" name: "fj.example.com-form-body" name: "fj.example.com-escaped-unreserved" ' ]; then
   echo "ok   repos: reads and writes only in the listed repos (any case, dots literal, .git optional for git, no escapes), only /user and /rate_limit outside them, GraphQL refused, deny routes kept first"
 else echo "FAIL repos rendering (route order: $order):$rfail"; fails=$((fails+1)); fi
 # Without repos, nothing changes: the presets' own routes.
@@ -434,8 +445,8 @@ ExecStopPost=/usr/bin/rm -f /run/airlock-envoy/$me/a.clients"
 else echo "skip socket drop-in: run as a login account (uid 1000 and up)"; fi
 
 # A file shaped like a real site renders to a config Envoy accepts, scoped routes at their
-# largest included: 64 repos with the longest names (39 + 100 characters).
-long="$(for i in $(seq 10 73); do printf '%s,' "o$i$(printf 'x%.0s' $(seq 36))/r$i$(printf 'y%.0s' $(seq 97))"; done)"
+# largest included: 64 repos with the longest names (40 + 100 characters).
+long="$(for i in $(seq 10 73); do printf '%s,' "o$i$(printf 'x%.0s' $(seq 37))/r$i$(printf 'y%.0s' $(seq 97))"; done)"
 printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues repos %s\nhttp g.example.com rules git\nhttp fj.example.com rules forgejo repos a/*\nx http://fj.example.com\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\nclient x t\nclient y u\n' "${long%,}" > "$work/site"
 "$apply" --render "$work/site" > "$work/envoy.yaml"
 if envoy="$(command -v envoy)"; then

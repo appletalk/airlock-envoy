@@ -260,7 +260,9 @@ for c in "listed repo:GET:/repos/octocat/hello-world:401" "listed repo, other ca
          "escaped dots, upper case:GET:/repos/octocat/hello-world/%2E%2E/%2E%2E/octocat/spoon-knife:403" \
          "an escaped dot in a file name (Envoy did not decode it):GET:/repos/octocat/hello-world/contents/a%2eb:403" \
          "compare in the repo:GET:/repos/octocat/hello-world/compare/master...master:401" \
-         "compare across the fork network:GET:/repos/octocat/hello-world/compare/master...octocat:spoon-knife:master:403"; do
+         "compare across the fork network:GET:/repos/octocat/hello-world/compare/master...octocat:spoon-knife:master:403" \
+         "compare across, upper case:GET:/repos/octocat/hello-world/COMPARE/master...octocat:spoon-knife:master:403" \
+         "compare across, an escaped letter:GET:/repos/octocat/hello-world/c%6fmpare/master...octocat:spoon-knife:master:403"; do
   cw=${c##*:} c=${c%:*}; cn=${c%%:*} c=${c#*:}; cm=${c%%:*} cp=${c#*:}   # the path may hold a colon
   check 3130 "repos, GitHub API: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" -H "Content-Type: application/json" "http://api.github.com$cp"
 done
