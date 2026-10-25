@@ -283,6 +283,9 @@ refuses "...and owner/* after a repo of that owner" "also in" 'http x.example@a 
 refuses "two definitions, other rules" "share their rules" 'http x.example@a rules git repos o/a\nhttp x.example@b rules github-api repos o/b\nl http://x.example@a http://x.example@b\n'
 refuses "...git and git-read"           "share their rules"     'http x.example@a rules git repos o/a\nhttp x.example@b rules git-read repos o/b\nl http://x.example@a http://x.example@b\n'
 refuses "...through an include"         "also in"               'http x.example@a rules git repos o/a\nhttp x.example@b rules git repos o/a\nl http://x.example@a\nm @l http://x.example@b\n'
+refuses "two definitions, other ports"  "another port, ca"      'http x.example:8443@a rules git repos o/a\nhttp x.example@b rules git repos o/b\nl http://x.example@a http://x.example@b\n'
+refuses "two definitions, other cas"    "another port, ca"      'http x.example@a rules git ca c1 repos o/a\nhttp x.example@b rules git ca c2 repos o/b\nl http://x.example@a http://x.example@b\n'
+refuses "two definitions, a credential and none" "another port, ca" 'http x.example@a rules git repos o/a\nhttp x.example@b rules git credential c repos o/b\nl http://x.example@a http://x.example@b\n'
 lists "two definitions of a host, disjoint repos (the GitHub presets mix)" \
   'l http://x.example:443 variant a rules github-api credential c1 repos o/*\nm http://x.example:443 variant a rules github-api credential c1 repos o/*\nm http://x.example:443 variant b rules github-issues credential c2 repos p/a,o2/b\nm client t' \
   'http x.example@a rules github-api credential c1 repos o/*\nhttp x.example@b rules github-issues credential c2 repos p/a,o2/b\nl http://x.example@a\nm @l http://x.example@b\nclient m t\n'
@@ -291,39 +294,46 @@ r="$("$apply" --render "$work/site")"
 mfail=""
 # The route that takes a path (the first match, as Envoy does), and its injected credential.
 takes() {  # takes <method> <path>: route name and credential, or "refused"
-  local name="" rx m cred
+  local name="" rx m cred cl ci
   while IFS= read -r name; do
     rx="$(grep -A3 "name: \"$name\"" <<< "$r" | sed -n 's/.*\(regex\|path\|prefix\): "\(.*\)"\( }\)\{0,1\}$/\1 \2/p' | head -1)"
     m="$(grep -A4 "name: \"$name\"" <<< "$r" | sed -n 's/.*":method", string_match: { safe_regex: { regex: "\([^"]*\)".*/\1/p' | head -1)"
     [ -z "$m" ] || [[ "$1" =~ ^($m)$ ]] || continue
+    # Query or other header matchers aren't modelled: such a route never takes the path here.
+    grep -A4 "name: \"$name\"" <<< "$r" | sed -n '2,4p' | grep -q 'query_parameters\|name: "[a-z-]*", string_match\|present_match' && continue
     case "${rx%% *}" in
-      regex) rx=${rx#* }; [[ "$2" =~ ^(${rx//\\\\/\\})$ ]] || continue ;;
+      regex) rx=${rx#* }; rx=${rx//\\\\/\\}
+        if [[ "$rx" == "(?i)"* ]]; then
+          shopt -s nocasematch; [[ "$2" =~ ^(${rx#"(?i)"})$ ]]; ci=$?; shopt -u nocasematch; [ "$ci" = 0 ] || continue
+        else [[ "$2" =~ ^($rx)$ ]] || continue; fi ;;
       path) [ "$2" = "${rx#* }" ] || continue ;;
       prefix) [[ "$2" == "${rx#* }"* ]] || continue ;;
       *) continue ;;
     esac
     if grep -A3 "name: \"$name\"" <<< "$r" | grep -q direct_response; then echo refused; return; fi
     cred="$(sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -o '"inject-[a-z-]*"' | head -1)"
-    echo "$name $cred"; return
+    cl="$(sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -o 'cluster: "[^"]*"' | head -1)"
+    echo "$name $cl $cred"; return
   done < <(sed -n "/- name: \"http-$3\"/,/- name: \"http-\|- name: \"b\"/p" <<< "$r" | grep -o '^              - name: "[^"]*"' | sed 's/.*name: "//; s/"$//')
   echo none
 }
-[[ "$(takes GET /repos/example-org/x api.example.com_org)" == *'"inject-c-org"' ]] || mfail+=" org-read"
-[[ "$(takes GET /repos/Alice/Tools/issues api.example.com_org)" == *'"inject-c-me"' ]] || mfail+=" me-read"
-[[ "$(takes POST /repos/alice/tools/issues api.example.com_org)" == *'"inject-c-me"' ]] || mfail+=" me-issue"
+[[ "$(takes GET /repos/example-org/x api.example.com_org)" == *'cluster: "http-api.example.com_org" "inject-c-org"' ]] || mfail+=" org-read"
+[[ "$(takes GET /repos/Alice/Tools/issues api.example.com_org)" == *'cluster: "http-api.example.com_me" "inject-c-me"' ]] || mfail+=" me-read"
+[[ "$(takes POST /repos/alice/tools/issues api.example.com_org)" == *'cluster: "http-api.example.com_me" "inject-c-me"' ]] || mfail+=" me-issue"
 [ "$(takes POST /repos/alice/tools/pulls api.example.com_org)" = refused ] || mfail+=" me-pull-not-refused"
 [[ "$(takes POST /repos/example-org/x/pulls api.example.com_org)" == *'"inject-c-org"' ]] || mfail+=" org-pull"
-[[ "$(takes GET /user api.example.com_org)" == "api.example.com_org-user "*'"inject-c-org"' ]] || mfail+=" user"
+[[ "$(takes GET /user api.example.com_org)" == 'api.example.com_org-user cluster: "http-api.example.com_org" "inject-c-org"' ]] || mfail+=" user"
 [ "$(takes GET /repos/alice/other api.example.com_org)" = refused ] || mfail+=" unlisted"
 [ "$(takes POST /graphql api.example.com_org)" = refused ] || mfail+=" graphql"
+[ "$(takes POST /GraphQL api.example.com_org)" = refused ] || mfail+=" graphql-case"
 [ "$(takes GET /repos/alice/tools/c%6fmpare api.example.com_org)" = refused ] || mfail+=" escape"
-[[ "$(takes GET /alice/tools.git/info/refs git.example.com_org)" == *'"inject-g-me"' ]] || mfail+=" me-git"
-[[ "$(takes POST /example-org/x/git-receive-pack git.example.com_org)" == *'"inject-g-org"' ]] || mfail+=" org-push"
+[[ "$(takes GET /alice/tools.git/info/refs git.example.com_org)" == *'cluster: "http-git.example.com_me" "inject-g-me"' ]] || mfail+=" me-git"
+[[ "$(takes POST /example-org/x/git-receive-pack git.example.com_org)" == *'cluster: "http-git.example.com_org" "inject-g-org"' ]] || mfail+=" org-push"
 [ "$(grep -c 'domains: \["api.example.com", "api.example.com:80"\]' <<< "$r")" = 1 ] || mfail+=" one-vhost"
 [ "$(grep -c 'escaped-unreserved"' <<< "$r")" = 2 ] || mfail+=" refusals-once"
 [ "$(grep -c 'name: "[^"]*-user"' <<< "$r")" = 1 ] || mfail+=" user-once"
 [ "$(grep -c 'name: "deny-connect-http-api.example.com"' <<< "$r")" = 1 ] || mfail+=" deny-connect-once"
-grep -q 'name: "http-api.example.com_me"' <<< "$r" && grep -q 'cluster_name: "http-api.example.com_me"' <<< "$r" || mfail+=" me-cluster"
+grep -q 'cluster_name: "http-api.example.com_me"' <<< "$r" || mfail+=" me-cluster"
 [ "$("$apply" --clients b "$work/site" | grep -v '^#')" = "$(printf 'api.example.com 443 github-api yes\ngit.example.com 443 git yes')" ] || mfail+=" manifest"
 if [ -z "$mfail" ]; then echo "ok   several definitions of a host: one virtual host, each repo its own credential, refusals and /user once (the first's), one manifest line"
 else echo "FAIL several definitions of a host:$mfail"; fails=$((fails+1)); fi

@@ -198,7 +198,8 @@ What that loses:
 
 A listener may list several definitions of one host (variants, `http <host>@<variant>`) when
 each has `repos`, no repo is in two of them (`<owner>/*` takes every repo of that owner), and
-they share their rules (`github-api` and `github-issues` may mix). Apply refuses anything else.
+they share their rules (`github-api` and `github-issues` may mix), port, `ca`, and having a
+credential or none (the credential itself may differ). Apply refuses anything else.
 
 - They make one virtual host. Each listed repo's routes carry the credential of the definition
   that lists it, and go to that definition's upstream.

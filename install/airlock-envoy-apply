@@ -267,6 +267,8 @@ parse() {  # parse <source label>, text on stdin
             || die "$src: listener $l lists $h twice (as http://$first and http://$k): use one, or give both repos (each repo in one of them)"
           same_family "${HTTP_RULES[$first]}" "${HTTP_RULES[$k]}" \
             || die "$src: listener $l lists $h with rules ${HTTP_RULES[$first]} (http://$first) and ${HTTP_RULES[$k]} (http://$k): definitions of one host share their rules (github-api and github-issues may mix)"
+          [ "${HTTP_PORT[$first]} ${HTTP_CA[$first]} ${HTTP_CRED[$first]:+cred}" = "${HTTP_PORT[$k]} ${HTTP_CA[$k]} ${HTTP_CRED[$k]:+cred}" ] \
+            || die "$src: listener $l lists $h as http://$first and http://$k with another port, ca, or credential or none: definitions of one host share those (the credential may differ)"
           repos_overlap "$l" "$h" "$k" ;;
         *) first_of[$h]=$k ;;
       esac
@@ -286,7 +288,8 @@ parse() {  # parse <source label>, text on stdin
 # then no SNI, and the certificate must name that address. ca: the host's certificate is
 # checked against $CA_DIR/<name>.pem alone, not the system CAs (a cluster's own CA). A variant
 # is another definition of the same host (its own rules and credential, e.g. a second
-# identity), listed as http://<host>@<variant>; a listener uses one definition per host.
+# identity), listed as http://<host>@<variant>; a listener uses one definition per host, or
+# several with repos (each repo in one of them).
 # projects (GitHub presets only) lets Projects v2 item writes through for those project node
 # IDs and no others. repos (the git, forgejo and GitHub presets) narrows every repo route to
 # those repos (<owner>/<repo>, or <owner>/* for all of an owner's), and refuses GraphQL.
@@ -597,7 +600,8 @@ render_clients() {
   local d
   echo "# airlock-envoy: the plain-HTTP hosts of listener $1, for the box's clients: http://<host>/"
   echo "# through the proxy. No credentials here. Fields: host upstream-port rules credential"
-  # One line a host: its first definition's (further ones differ only in repos and credential).
+  # One line a host: its first definition's (further ones differ only in repos, credential and
+  # rules between the two GitHub presets; port, ca and having a credential they share).
   for d in $(http_hosts_of "$1"); do
     d=$(defs_of "$1" "$d"); d=${d%% *}
     printf '%s %s %s %s\n' "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "${HTTP_RULES[$d]}" "$([ -n "${HTTP_CRED[$d]}" ] && echo yes || echo no)"
