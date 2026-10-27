@@ -392,7 +392,7 @@ done
 [ "$(takes POST /api/v1/repos/me/r/issues/1/comments fj.example.com)" = refused-ro ] || ofail+=" fj-comment"
 [ "$(takes GET /me/r.wiki.git/info/refs fj.example.com)" = refused ] || ofail+=" fj-wiki"
 [ "$(takes GET /me/r/issues fj.example.com)" = refused ] || ofail+=" fj-web-ui"
-[ "$(takes GET '/api/v1/repos/me/r?token=x' fj.example.com)" != none ] || ofail+=" fj-token"
+grep -q 'name: "fj.example.com-query-token"' <<< "$r" || ofail+=" fj-token"
 # The read-only routes keep the git timeouts (fetch streams long) and the API's caps.
 grep -A4 'name: "git.example.com_r-pack-ro-1"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' || ofail+=" git-timeout"
 grep -A4 'name: "fj.example.com-pack-ro-1"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' || ofail+=" fj-long"
@@ -401,6 +401,9 @@ grep -q 'this repo is read only on api.example.com (repos-read): reads and git f
 [ "$("$apply" --clients b "$work/site" | grep -v '^#')" = "$(printf 'api.example.com 443 github-api yes\ngit.example.com 443 git yes\nfj.example.com 443 forgejo yes')" ] || ofail+=" manifest"
 if ! python3 -c 'import yaml' 2>/dev/null; then :
 elif ! python3 -I -c 'import sys, yaml; yaml.safe_load(sys.stdin)' <<< "$r" 2>/dev/null; then ofail+=" yaml"; fi
+# repos-read alone still raises RE2's program size limit for the long per-repo regexes.
+printf 'http x.example rules git repos-read o/r\nb http://x.example\nclient b t\n' > "$work/site"
+"$apply" --render "$work/site" | grep -q max_program_size || ofail+=" runtime-layer"
 if [ -z "$ofail" ]; then echo "ok   repos-read: reads and fetch with the line's credential, writes and push refused as read only (GitHub, git, Forgejo, a further definition), the rest as before"
 else echo "FAIL repos-read rendering:$ofail"; fails=$((fails+1)); fi
 

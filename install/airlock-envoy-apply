@@ -294,7 +294,7 @@ parse() {  # parse <source label>, text on stdin
 # IDs and no others. repos (the git, forgejo and GitHub presets) narrows every repo route to
 # those repos (<owner>/<repo>, or <owner>/* for all of an owner's), and refuses GraphQL.
 # repos-read (the same presets but git-read, which is read only already) adds repos the box
-# may only read: their read routes (GET and HEAD, git fetch), nothing that writes.
+# may only read: their read routes (GET and HEAD, git fetch), no write route.
 parse_http() {  # parse_http <where> <words...>
   local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" rrepos="" id r a b list; local -a ids; shift
   [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...] [repos-read <owner>/<repo>,...]"
@@ -808,6 +808,7 @@ preset_rules_scoped() {  # preset_rules_scoped <rules> <repos> <read-only repos>
     ro=""
     case "$methods" in GET|HEAD|'GET|HEAD') ro=$pat ;; esac
     [ "$name" != pack ] || ro=${pat//"git-(upload|receive)-pack"/git-upload-pack}
+    [[ "$ro" != *receive* ]] || die "internal: the $1 route $name would let a push through to a read-only repo"
     [ -n "$ro" ] || continue
     for i in "${!rorxs[@]}"; do
       echo "$name-ro-$((i + 1)) $methods $kind ${ro//"$any"/"${rorxs[$i]}"} ${flag:-}"

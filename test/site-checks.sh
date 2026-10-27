@@ -307,12 +307,12 @@ pids+=($!)
 check 3128 "several definitions: a repo in neither refused" "$P http=403 exit=0" http://httpbingo.org/anything/c/info/refs
 check 3128 "several definitions: push to a listed repo passes the rules" "$P http=200 exit=0" -X POST http://httpbingo.org/anything/a/git-receive-pack
 # repos-read (t-site: anything/ro on httpbingo@ra): fetch passes with the credential of its
-# credential, push is refused here and says why.
+# line, push is refused here and says why.
 check 3128 "repos-read: git fetch passes the rules" "$P http=200 exit=0" -X POST http://httpbingo.org/anything/ro/git-upload-pack
 check 3128 "repos-read: git push refused" "$P http=403 exit=0" -X POST http://httpbingo.org/anything/ro/git-receive-pack
 slot; { r="$(curl -s -x http://127.0.0.1:3128 http://httpbingo.org/anything/RO.git/info/refs | grep -o "SITE-TEST-TOKEN-1\|dummy-not-a-github-token" | sort -u | tr "\n" " ")
     $(curl -s -x http://127.0.0.1:3128 -X POST http://httpbingo.org/anything/ro/git-receive-pack)"
-  verdict "repos-read: fetch carries the credential of its line, push says read only" "SITE-TEST-TOKEN-1 *this repo is read only on httpbingo.org (repos-read)*" "$(echo $r)" > "$f"; } &
+  verdict "repos-read: fetch carries the credential of its line, push says read only" "SITE-TEST-TOKEN-1 airlock-envoy: refused by the git rules (listener t-site): this repo is read only on httpbingo.org (repos-read)*" "$(echo $r)" > "$f"; } &
 pids+=($!)
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle

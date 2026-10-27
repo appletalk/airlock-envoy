@@ -208,8 +208,9 @@ same, but for these repos only the preset's read routes pass:
 | `forgejo` | fetch, and API reads under `/api/v1/repos/<repo>/` |
 | `github-api`, `github-issues` | REST reads (GET, HEAD) under `/repos/<repo>/` |
 
-A push or an API write to one gets 403 "this repo is read only on <host> (repos-read)", so a
-box can tell the cause from a repo not listed at all.
+A push (`git-receive-pack`), or any other method on its API path, gets 403 "this repo is read
+only on <host> (repos-read)", so a box can tell the cause from a repo not listed at all. Other
+writes (LFS, `/repositories/<id>`) are refused too, with the generic message.
 
 - A repo is in `repos` or `repos-read`, not both; `<owner>/*` in one list takes every repo of
   that owner, so a named repo of it in the other list is refused. Together, at most 64.
@@ -219,6 +220,11 @@ box can tell the cause from a repo not listed at all.
   the token is later widened to write it.
 - The limits of `repos` hold here too, the fork network above all: a fetch by SHA through a
   read-only repo reads the rest of its network that the token can.
+- **References from a writable repo still act on it.** If the token can write the read-only
+  repo, a commit pushed to a writable repo's default branch (or a PR merged there) with
+  `closes owner/ro#1` closes that issue, and a mention adds a cross-reference to its timeline.
+  Envoy sees only the writable repo's request. Keep the token from writing it where that
+  matters.
 
 ### Several credentials on one host
 

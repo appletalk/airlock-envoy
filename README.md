@@ -260,11 +260,14 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   ```
 - **`repos-read`** (the same presets but `git-read`, which is read only already): repos the box
   may only read, on the same line as `repos` or alone. Their reads (GET and HEAD) and git fetch
-  pass with the line's credential; a write or push to one gets 403 "this repo is read only". So one token that may write some repos serves a box that should only read others.
-  A repo is in one of the two lists (`<owner>/*` takes every repo of that owner). See
+  pass with the line's credential; a push, or an API write under the repo's path, gets 403
+  "this repo is read only" (other writes, the generic refusal). So one token that may write some
+  repos serves a box that should only read others. A repo is in one of the two lists
+  (`<owner>/*` takes every repo of that owner). A writable repo can still act on a read-only
+  one by reference (closing keywords, mentions). See
   [docs/presets.md](docs/presets.md#read-only-repos-repos-read).
   ```
-  http api.github.com  rules github-api credential github-api repos example-org/app repos-read alice/tools,example-org/docs
+  http api.github.com  rules github-api credential gh-api repos example-org/app repos-read alice/tools
   ```
 - **A credential per repo**: a listener may list several definitions of one host if each has
   `repos` (or `repos-read`) and no repo is in two of them. Each repo's requests carry its own definition's
