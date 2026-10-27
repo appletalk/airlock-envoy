@@ -14,9 +14,9 @@ two modes:
 | **CONNECT tunnel** | Clients that need TLS end to end, such as Claude Code (`HTTPS_PROXY`), whose login and Remote Control need the real Anthropic API | Allows exact hosts only, checks the TLS server name, sees host, bytes and timing but never content, holds no secret |
 | **Plain HTTP with an injected credential** | Clients you can point at a plain-HTTP URL (`gh`, `git`, `curl`, `kubectl`) | Checks method and path against a preset, adds the credential, opens TLS upstream itself. The box never holds the token |
 
-Not yet built: branch-only pushes and minted per-repo tokens (an `ext_authz` decision
-service). Per-repo scoping is the `repos` option of the `http` line, and read-only repos its
-`repos-read`.
+Not yet built: minted per-repo tokens (an `ext_authz` decision service). Per-repo scoping is
+the `repos` option of the `http` line, read-only repos its `repos-read`, and protected branches
+its `protect`.
 
 Status: **spike**. The install path is tested on Ubuntu 22.04, 24.04 and 26.04, Debian 13 and
 Arch (in systemd-booted containers), and runs as a service on an Arch workstation.
@@ -226,6 +226,7 @@ client dev alice
 ```
 http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
      [repos <owner>/<repo>[,<owner>/<repo>...]] [repos-read <owner>/<repo>[,<owner>/<repo>...]]
+     [protect <branch>[,<branch>...]]
 ```
 
 It is site-wide and must come above any listener that uses it. A listener lists it as
@@ -268,6 +269,17 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   [docs/presets.md](docs/presets.md#read-only-repos-repos-read).
   ```
   http api.github.com  rules github-api credential gh-api repos example-org/app repos-read alice/tools
+  ```
+- **`protect`** (the `git` and `forgejo` presets): branches a push may not create, update,
+  force or delete (`<name>`, or `<prefix>/*` for every branch under it; any case). Envoy reads
+  the push's ref updates before anything goes upstream and refuses the whole push if one names a
+  protected branch; git shows the reason and `! [remote rejected]`. Opt-in per line, and per
+  repo through two definitions of the host (one with `protect`, one without). Defense in depth:
+  the server's own branch protection stays the main guard where it has one. See
+  [docs/presets.md](docs/presets.md#protected-branches-protect).
+  ```
+  http github.com@deploy rules git credential gh-git repos example-org/config protect main,release/*
+  http github.com@work   rules git credential gh-git repos example-org/app
   ```
 - **A credential per repo**: a listener may list several definitions of one host if each has
   `repos` (or `repos-read`) and no repo is in two of them. Each repo's requests carry its own definition's
@@ -343,14 +355,15 @@ headers Envoy strips from box requests, and the limits are in [docs/presets.md](
 | `victoria-metrics` | The query paths | Everything else |
 | `victoria-logs` | The LogsQL query paths | Everything else |
 | `git-read` | git fetch | Push |
-| `git` | git fetch **and push to any branch the token can write**, including force-push, branch deletion and a push to `main` (so a merge, with no GraphQL check) | Everything but smart HTTP |
+| `git` | git fetch **and push to any branch the token can write**, including force-push, branch deletion and a push to `main` (so a merge, with no GraphQL check), but the branches of `protect` | Everything but smart HTTP |
 | `forgejo` | Forgejo or Gitea for a bot account: git fetch and push, API reads, PR create and edit (including base and state), comments, labels, reviewers | Merge, reviews and approval, files written through the API, branch and tag API, releases, settings, hooks, keys, tokens, deletes, admin, the web UI, wiki git, token query parameters and form bodies |
 | `kubernetes-read` | A Kubernetes API server, read only, plus `kubectl auth can-i` and `whoami` | Every write, protocol upgrades, escaped paths, exec, attach, port-forward, `proxy` subresources |
 | `github-issues` | Reads; issue create, edit, close, reopen; comments, labels, assignees, reactions. GitHub numbers PRs as issues, so these also reach a PR's title, body, state, comments, labels and assignees | PR create, base, reviewers and code; merge, approve, auto-merge, settings, hooks, keys, deletes, Projects (unless `projects`) |
 | `github-api` | The same, plus PR create, edit (including base branch), close, reopen, draft state, reviewers | Merge, approve, auto-merge, settings, hooks, keys, deletes, Projects (unless `projects`) |
 | `any` | Every method but TRACE | TRACE |
 
-With `git`, protect branches on the server (rulesets or branch protection), or use `git-read`.
+With `git`, protect branches on the server (rulesets or branch protection), add `protect`, or
+use `git-read`.
 With `forgejo`, which branches and tags a push may touch is the server's protection. Both
 GitHub presets check every `POST /graphql` write against an allowlist.
 

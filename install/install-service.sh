@@ -88,6 +88,8 @@ install -m 0644 -o root -g root "$repo/install/logrotate.conf" /etc/airlock-envo
 mv -f /etc/airlock-envoy/logrotate.conf.new /etc/airlock-envoy/logrotate.conf
 # The GitHub GraphQL write check the github-api rules inline into the config.
 install -D -m 0644 -o root -g root "$repo/install/github-graphql.lua" /usr/local/share/airlock-envoy/github-graphql.lua
+# The push check of protected branches (protect), inlined likewise.
+install -D -m 0644 -o root -g root "$repo/install/git-protect.lua" /usr/local/share/airlock-envoy/git-protect.lua
 # Credentials for plain-HTTP destinations (airlock-envoy-cred): root writes, Envoy reads.
 install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/credentials
 # CAs for plain-HTTP hosts with their own (airlock-envoy-cred ca): not secret, root writes.

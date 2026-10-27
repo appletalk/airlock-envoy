@@ -407,6 +407,62 @@ printf 'http x.example rules git repos-read o/r\nb http://x.example\nclient b t\
 if [ -z "$ofail" ]; then echo "ok   repos-read: reads and fetch with the line's credential, writes and push refused as read only (GitHub, git, Forgejo, a further definition), the rest as before"
 else echo "FAIL repos-read rendering:$ofail"; fails=$((fails+1)); fi
 
+# protect: branches a push may not touch, on the git and forgejo rules; kept lowercase.
+refuses "protect: with git-read"        "refuse every push already" 'http x.example rules git-read protect main\n'
+refuses "protect: with github-api"      "protect only with"      'http x.example rules github-api protect main\n'
+refuses "protect: with any"             "protect only with"      'http x.example rules any protect main\n'
+refuses "protect: none given"           "protect needs"          'http x.example rules git protect\n'
+refuses "protect: given twice"          "protect given twice"    'http x.example rules git protect main protect dev\n'
+refuses "protect: a trailing comma"     "bad branch ''"          'http x.example rules git protect main,\n'
+refuses "protect: a bare *"             "bad branch '*'"         'http x.example rules git protect *\n'
+refuses "protect: * inside"             "bad branch 'a*'"        'http x.example rules git protect a*\n'
+refuses "protect: * not last"           "bad branch 'a/*/b'"     'http x.example rules git protect a/*/b\n'
+refuses "protect: .."                   "bad branch 'a..b'"      'http x.example rules git protect a..b\n'
+refuses "protect: a part starting with ." "bad branch 'a/.b'"    'http x.example rules git protect a/.b\n'
+refuses "protect: .lock"                "bad branch 'a.LOCK'"    'http x.example rules git protect a.LOCK\n'
+refuses "protect: starting with -"      "bad branch '-a'"        'http x.example rules git protect -a\n'
+refuses "protect: a refs/heads/ path"   "bad branch"             'http x.example rules git protect refs/heads/ma:n\n'
+refuses "protect: an empty part"        "bad branch 'a//b'"      'http x.example rules git protect a//b\n'
+refuses "protect: over 32"              "over 32 protected"      "http x.example rules git protect $(for i in $(seq 33); do printf 'b%s,' "$i"; done | sed 's/,$//')\\n"
+lists "protect: lowercased, deduplicated, prefix/* kept, with repos and per variant" \
+  'b http://x.example:443 variant a rules git repos o/a protect main,release/*\nb http://x.example:443 variant b rules git repos o/b\nb http://f.example:443 rules forgejo protect staging\nb client t' \
+  'http x.example@a rules git repos o/a protect Main,release/*,MAIN\nhttp x.example@b rules git repos o/b\nhttp f.example rules forgejo protect Staging\nb http://x.example@a http://x.example@b http://f.example\nclient b t\n'
+# What protect renders: per pack route, a push-guard route first (receive-pack, the check on)
+# and the pack route narrowed to fetch; one check filter per definition, before the
+# credential; the check listener, its cluster and the reply mapping only where used.
+printf 'http x.example@a rules git credential c-a repos o/a,o/b repos-read o/ro protect main\nhttp x.example@b rules git credential c-b repos o/c\nhttp f.example rules forgejo credential c-f protect main,dev\nhttp g.example rules git credential c-g\nb http://x.example@a http://x.example@b http://f.example\nc http://g.example\nclient b t\nclient c u\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+pfail=""
+order="$(grep -o 'name: "x.example_[ab]-[a-z0-9-]*"' <<< "$r" | sed 's/^name: "//; s/"$//' | tr '\n' ' ')"
+[[ "$order" == *"x.example_a-push-guard-1 x.example_a-pack-1 x.example_a-push-guard-2 x.example_a-pack-2 x.example_a-pack-ro-1"* ]] || pfail+=" order"
+[[ "$order" != *"x.example_b-push-guard"* ]] || pfail+=" guard-on-unprotected-definition"
+[[ "$order" != *"push-guard-ro"* ]] || pfail+=" guard-on-read-only"
+[[ "$(takes POST /o/a/git-receive-pack x.example_a)" == 'x.example_a-push-guard-1 '*'"inject-c-a"' ]] || pfail+=" guard-takes-push"
+[[ "$(takes POST /o/A.git/git-upload-pack x.example_a)" == 'x.example_a-pack-1 '* ]] || pfail+=" pack-takes-fetch"
+[[ "$(takes POST /o/c/git-receive-pack x.example_a)" == 'x.example_b-pack-1 '*'"inject-c-b"' ]] || pfail+=" unprotected-push"
+[ "$(takes POST /o/ro/git-receive-pack x.example_a)" = refused-ro ] || pfail+=" read-only-push"
+[[ "$(takes POST /f/r/git-receive-pack f.example)" == 'f.example-push-guard '* ]] || pfail+=" forgejo-guard"
+f_a="$(grep -A6 'name: "x.example_a-push-guard-1"' <<< "$r" | grep -o '"protect-[0-9a-f]*"' | tr -d '"')"
+f_f="$(grep -A6 'name: "f.example-push-guard"' <<< "$r" | grep -o '"protect-[0-9a-f]*"' | tr -d '"')"
+[ -n "$f_a" ] && [ -n "$f_f" ] && [ "$f_a" != "$f_f" ] || pfail+=" filter-per-definition"
+grep -A2 'name: "x.example_a-pack-1"' <<< "$r" | grep -q protect- && pfail+=" filter-on-fetch"
+grep -A18 "name: \"$f_a\"" <<< "$r" | grep -q 'key: x-airlock-protect, value: "main"' || pfail+=" header-protect"
+grep -A18 "name: \"$f_f\"" <<< "$r" | grep -q 'key: x-airlock-protect, value: "main dev"' || pfail+=" header-protect-f"
+grep -A18 "name: \"$f_a\"" <<< "$r" | grep -q 'key: x-airlock-listener, value: "b"' || pfail+=" header-listener"
+grep -A18 "name: \"$f_a\"" <<< "$r" | grep -q 'failure_mode_allow: false' || pfail+=" fail-closed"
+grep -A18 "name: \"$f_a\"" <<< "$r" | grep -q 'max_request_bytes: 65536, allow_partial_message: true' || pfail+=" body-prefix"
+# Before the injectors (the check never sees the credential) and the GraphQL check.
+fl="$(sed -n '/^  - name: "b"$/,/^  - name: "c"$/p' <<< "$r" | grep -o '^          - name: "*[a-z0-9.-]*' | sed 's/.*name: "*//' | tr '\n' ' ')"
+[[ "$fl" == *"protect-"*"inject-c-a"* ]] || pfail+=" filter-order($fl)"
+[ "$(grep -c '^  - name: protect-check$' <<< "$r")" = 2 ] || pfail+=" check-listener-and-cluster"
+[ "$(grep -c 'local_reply_config:' <<< "$r")" = 1 ] || pfail+=" mapping-only-on-b"
+sed -n '/^  - name: "c"$/,/^  - name: /p' <<< "$r" | sed '$d' | grep -q 'protect-\|local_reply_config' && pfail+=" listener-c-touched"
+grep -q 'status_on_error: { code: ServiceUnavailable }' <<< "$r" || pfail+=" error-not-503"
+printf 'http g.example rules git credential c-g\nc http://g.example\nclient c u\n' > "$work/site"
+"$apply" --render "$work/site" | grep -q 'protect\|local_reply_config\|ext_authz' && pfail+=" unused-rendered"
+if [ -z "$pfail" ]; then echo "ok   protect: a push-guard per pack route, fetch apart, a check filter per definition before the credential, the check listener and reply mapping only where used"
+else echo "FAIL protect rendering:$pfail"; fails=$((fails+1)); fi
+
 # The render stops if a further definition would refuse other paths than the first (it couldn't
 # stand for it): a copy whose parser lets git and github-api share a host.
 # shellcheck disable=SC2016  # $1 and $2 are the script's text, not this shell's
@@ -654,7 +710,7 @@ else echo "skip socket drop-in: run as a login account (uid 1000 and up)"; fi
 # A file shaped like a real site renders to a config Envoy accepts, scoped routes at their
 # largest included: 64 repos with the longest names (40 + 100 characters).
 long="$(for i in $(seq 10 73); do printf '%s,' "o$i$(printf 'x%.0s' $(seq 37))/r$i$(printf 'y%.0s' $(seq 97))"; done)"
-printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues repos %s\nhttp g.example.com rules git\nhttp fj.example.com rules forgejo repos a/*\nx http://fj.example.com\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\nclient x t\nclient y u\n' "${long%,}" > "$work/site"
+printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues repos %s\nhttp g.example.com rules git protect main,release/*\nhttp fj.example.com rules forgejo repos a/* protect main\nx http://fj.example.com\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\nclient x t\nclient y u\n' "${long%,}" > "$work/site"
 "$apply" --render "$work/site" > "$work/envoy.yaml"
 if envoy="$(command -v envoy)"; then
   # Envoy picks the format by extension, and validate mode opens the access log.

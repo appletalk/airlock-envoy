@@ -1,7 +1,7 @@
 # Testing
 
-Every suite runs as your own user with rootless podman, except `apply-parse.sh`, shellcheck
-and the GraphQL check, which need no podman.
+Every suite runs as your own user with rootless podman, except `apply-parse.sh`, shellcheck,
+the GraphQL check and the two `protect` suites, which need no podman.
 
 | Command | What |
 |---|---|
@@ -10,6 +10,8 @@ and the GraphQL check, which need no podman.
 | `test/apply-parse.sh` | The site file parser, no Envoy needed |
 | `test/run-envoy.sh test/t2.conf` then `test/t2-checks.sh` | The CONNECT tunnel, from a box-shaped client |
 | `luajit test/graphql-check.lua` | The GitHub GraphQL write check (skipped without luajit) |
+| `luajit test/git-protect-check.lua` | The push check of `protect`: bodies, replies, the handle |
+| `test/protect-e2e.sh` | `protect` end to end, no podman or root: a rendered config in a real Envoy, a TLS git upstream (git-http-backend), real git pushes (needs envoy, git, python3, openssl, socat) |
 | `test/run-envoy.sh test/site.conf` then `test/site-checks.sh` | Site listeners, each reaching exactly its own list |
 
 ## All the tests at once

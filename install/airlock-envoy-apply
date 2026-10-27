@@ -113,7 +113,7 @@ fi
 # ---- parse ----------------------------------------------------------------------------------
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
-declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=() HTTP_RREPOS=()
+declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=() HTTP_RREPOS=() HTTP_PROTECT=()
 declare -A CLIENT=() CLIENT_AT=() CLIENT_UID=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
 SOCKETS=()   # the listeners with a client, in file order: each gets a box socket
@@ -178,11 +178,11 @@ parse() {  # parse <source label>, text on stdin
     n=$((n + 1))
     line=${line%%#*}
     charset_ok=1
-    # Project IDs and repo names (an http line's "projects", "repos" and "repos-read" values) may be mixed
-    # case and hold _, / and *; parse_http checks them.
+    # Project IDs, repo and branch names (an http line's "projects", "repos", "repos-read" and
+    # "protect" values) may be mixed case and hold _, / and *; parse_http checks them.
     chk=$line
     if [[ "$line" =~ ^[[:blank:]]*http[[:blank:]] ]]; then
-      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos|repos-read)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
+      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos|repos-read|protect)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
     fi
     # User names may have an underscore; the client line checks its words itself.
     [[ ! "$line" =~ ^[[:blank:]]*client[[:blank:]] ]] || chk=${chk//_/}
@@ -281,7 +281,7 @@ parse() {  # parse <source label>, text on stdin
 }
 
 # http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
-#   [repos <owner>/<repo>[,...]] [repos-read <owner>/<repo>[,...]]:
+#   [repos <owner>/<repo>[,...]] [repos-read <owner>/<repo>[,...]] [protect <branch>[,...]]:
 # how the box reaches a host by plain HTTP. Envoy answers the box, checks method and path
 # against the preset, adds the credential, and is the TLS client to the host (its certificate
 # checked, Host and SNI fixed). The host may be an IPv4 address (a Kubernetes API server, say):
@@ -295,9 +295,12 @@ parse() {  # parse <source label>, text on stdin
 # those repos (<owner>/<repo>, or <owner>/* for all of an owner's), and refuses GraphQL.
 # repos-read (the same presets but git-read, which is read only already) adds repos the box
 # may only read: their read routes (GET and HEAD, git fetch), no write route.
+# protect (the git and forgejo presets) refuses a push that would create, update or delete one
+# of those branches (<name>, or <prefix>/* for every branch under it), checked on the push's
+# ref updates before anything goes upstream (install/git-protect.lua).
 parse_http() {  # parse_http <where> <words...>
-  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" rrepos="" id r a b list; local -a ids; shift
-  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...] [repos-read <owner>/<repo>,...]"
+  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" rrepos="" protect="" id r a b list; local -a ids; shift
+  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...] [repos-read <owner>/<repo>,...] [protect <branch>,...]"
   hp=$1; shift
   if [[ "$hp" == *@* ]]; then
     variant=${hp#*@} hp=${hp%%@*}
@@ -332,7 +335,18 @@ parse_http() {  # parse_http <where> <words...>
         done
         if [ "$1" = repos ]; then repos=$list; else rrepos=$list; fi
         shift 2 ;;
-      *) die "$where: unknown http option '$1' (rules, credential, ca, projects, repos, repos-read)" ;;
+      protect) [ $# -ge 2 ] || die "$where: protect needs branch names"
+        [ -z "$protect" ] || die "$where: protect given twice"
+        [[ "$2" != *, ]] || die "$where: bad branch '' (a trailing comma)"
+        IFS=, read -ra ids <<< "$2"
+        for r in "${ids[@]}"; do
+          valid_branch "$r" || die "$where: bad branch '$r' (want a branch name, or <prefix>/* for every branch under it)"
+          r=${r,,}
+          case " $protect " in *" $r "*) ;; *) protect="${protect:+$protect }$r" ;; esac
+        done
+        [ "${#ids[@]}" -le 32 ] || die "$where: over 32 protected branches"
+        shift 2 ;;
+      *) die "$where: unknown http option '$1' (rules, credential, ca, projects, repos, repos-read, protect)" ;;
     esac
   done
   case " $PRESETS " in *" $rules "*) ;; *) die "$where: unknown rules '$rules' (one of: $PRESETS)" ;; esac
@@ -344,6 +358,10 @@ parse_http() {  # parse_http <where> <words...>
     git-read) [ -z "$rrepos" ] || die "$where: repos-read with the git-read rules: they are read only already, use repos" ;;
     *) [ -z "$rrepos" ] || die "$where: repos-read only with the git, forgejo, github-api or github-issues rules" ;;
   esac
+  case "$rules" in git|forgejo) ;;
+    git-read) [ -z "$protect" ] || die "$where: protect with the git-read rules: they refuse every push already" ;;
+    *) [ -z "$protect" ] || die "$where: protect only with the git or forgejo rules (the only ones that push)" ;;
+  esac
   # Projects writes go through GraphQL, which repos refuses: one line can't have both.
   [ -z "$repos$rrepos" ] || [ -z "$projects" ] || die "$where: repos (or repos-read) and projects can't be on one line (repos refuses GraphQL, which Projects writes need)"
   read -ra ids <<< "$repos $rrepos"   # read, not a bare expansion: <owner>/* must not glob
@@ -354,7 +372,7 @@ parse_http() {  # parse_http <where> <words...>
   for a in "${rw[@]}"; do for b in "${ro[@]}"; do
     ! repo_clash "$a" "$b" || die "$where: repo $a (repos) and $b (repos-read) overlap: each repo in one list"
   done; done
-  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos HTTP_RREPOS[$k]=$rrepos
+  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos HTTP_RREPOS[$k]=$rrepos HTTP_PROTECT[$k]=$protect
   HTTP_HOSTS+=("$k")
 }
 # A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (owners
@@ -365,6 +383,15 @@ valid_repo() {
   [[ "$1" == */* ]] && [[ "$o" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,38}[A-Za-z0-9])?$ ]] || return 1
   [ "$n" = "*" ] && return 0
   [[ "$n" =~ ^[A-Za-z0-9._-]{1,100}$ ]] && [[ ! "$n" =~ ^\.\.?$ ]] && [[ ! "${n,,}" =~ \.(git|wiki)$ ]]
+}
+# A protect entry: a branch name as git allows it, kept to plain characters (letters, digits,
+# . _ - and / between parts; no part starting with . or ending in .lock, no ..), or
+# <prefix>/* for every branch under <prefix>/. Matched in any case.
+valid_branch() {
+  local b=${1%/\*} part
+  [ -n "$b" ] && [ "${#1}" -le 200 ] && [[ "$b" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] && [[ "$b" != *..* ]] || return 1
+  IFS=/ read -ra part <<< "$b"
+  for b in "${part[@]}"; do [[ "$b" != .* && "${b,,}" != *.lock && "$b" != -* ]] || return 1; done
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
 # Two definitions of one host on one listener: the same rules, or the two GitHub presets
@@ -596,9 +623,9 @@ listing() {
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
     for d in ${HDESTS[$l]:-}; do
-      printf '%s http://%s:%s%s rules %s%s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
+      printf '%s http://%s:%s%s rules %s%s%s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
         "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_CA[$d]:+ ca ${HTTP_CA[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}" \
-        "${HTTP_REPOS[$d]:+ repos ${HTTP_REPOS[$d]// /,}}" "${HTTP_RREPOS[$d]:+ repos-read ${HTTP_RREPOS[$d]// /,}}"
+        "${HTTP_REPOS[$d]:+ repos ${HTTP_REPOS[$d]// /,}}" "${HTTP_RREPOS[$d]:+ repos-read ${HTTP_RREPOS[$d]// /,}}" "${HTTP_PROTECT[$d]:+ protect ${HTTP_PROTECT[$d]// /,}}"
     done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
     [ -z "${CLIENT[$l]:-}" ] || printf '%s client %s\n' "$l" "${CLIENT[$l]}"
@@ -821,6 +848,84 @@ preset_rules_scoped() {  # preset_rules_scoped <rules> <repos> <read-only repos>
 }
 CRED_DIR=/etc/airlock-envoy/credentials
 CA_DIR=/etc/airlock-envoy/ca
+# git reads a push's reply only from a 200 of type application/x-git-receive-pack-result (a 403
+# shows as "HTTP 403" alone). The push check refuses a protected branch with a 403 whose body is
+# that reply, so on a listener with protect, an ext_authz refusal (flag UAEX) of status 403 is
+# sent as a 200 of that type: git prints the reason and "[remote rejected]". It is a local reply
+# all the same, nothing went upstream. The check's other refusals (400) and its failure (503)
+# stay as they are.
+protect_local_reply() {
+  local d
+  for d in ${HDESTS[$1]:-}; do
+    [ -n "${HTTP_PROTECT[$d]}" ] || continue
+    cat <<'EOF'
+          local_reply_config:
+            mappers:
+            - filter:
+                and_filter:
+                  filters:
+                  - response_flag_filter: { flags: [UAEX] }
+                  - status_code_filter: { comparison: { op: EQ, value: { default_value: 403, runtime_key: airlock_protect_reply_status } } }
+              status_code: 200
+              headers_to_add:
+              - header: { key: content-type, value: application/x-git-receive-pack-result }
+                append_action: OVERWRITE_IF_EXISTS_OR_ADD
+EOF
+    return
+  done
+}
+any_protect() {  # some box listener has a protected definition
+  local l d
+  for l in "${SOCKETS[@]}"; do
+    for d in ${HDESTS[$l]:-}; do [ -z "${HTTP_PROTECT[$d]}" ] || return 0; done
+  done
+  return 1
+}
+protect_lua_file() {  # the push check: next to this script in a checkout, else where install put it
+  local f
+  f="$(dirname "$(readlink -f "$0")")/git-protect.lua"
+  [ -r "$f" ] || f=/usr/local/share/airlock-envoy/git-protect.lua
+  printf '%s' "$f"
+}
+# The push check's own listener, internal (no socket): ext_authz asks it, it answers 200 or
+# 403 from the Lua alone (the route behind it answers 500, which ext_authz takes as a refusal).
+protect_listener() {
+  local f
+  f="$(protect_lua_file)"
+  [ -r "$f" ] || die "protect needs $f (install/install-service.sh installs it)"
+  cat <<'EOF'
+  - name: protect-check
+    internal_listener: {}
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: protect-check
+          codec_type: HTTP1
+          route_config:
+            name: protect-check
+            virtual_hosts:
+            - name: protect-check
+              domains: ["*"]
+              routes:
+              - name: no-decision
+                match: { prefix: "/" }
+                direct_response: { status: 500, body: { inline_string: "airlock-envoy: the push check made no decision\n" } }
+          http_filters:
+          - name: git-protect
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                inline_string: |
+EOF
+  sed 's/^/                  /' "$f"
+  cat <<'EOF'
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+EOF
+}
 lua_file() {  # the GraphQL check: next to this script in a checkout, else where install put it
   local f
   f="$(dirname "$(readlink -f "$0")")/github-graphql.lua"
@@ -897,6 +1002,7 @@ EOF
   # Built first, not read from a process substitution: a die in there would end only the
   # subshell, and the render would go on with routes missing.
   routes=$(if [ -n "$repos$rrepos" ]; then preset_rules_scoped "$rules" "$repos" "$rrepos"; else preset_rules "$rules"; fi) || exit 1
+  [ -z "${HTTP_PROTECT[$k]}" ] || routes=$(push_guard_routes <<< "$routes") || exit 1
   # A further definition's refusals must be the first one's, which stand for it.
   d1=$(while read -r name methods kind pat flag; do [ "${flag:-}" != deny ] || echo "$methods $kind $pat"; done <<< "$routes")
   if [ "$k" = "$first" ]; then denies=$d1
@@ -920,16 +1026,17 @@ EOF
       printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules (listener %s): this repo is read only on %s (repos-read): reads and git fetch only\\n" } }\n' "$rules" "$l" "$h"
       continue
     fi
-    if [ "${flag:-}" = long ]; then
+    if [ "${flag:-}" = long ] || [ "${flag:-}" = guard ]; then
       echo "                route: { cluster: \"http-$id\", host_rewrite_literal: \"$h\", timeout: 0s, idle_timeout: 300s }"
     else
       echo "                route: { cluster: \"http-$id\", host_rewrite_literal: \"$h\", timeout: $timeout, idle_timeout: 300s$maxdur }"
     fi
     # The GraphQL check reads the preset's allowlist (and any projects) from the route's metadata.
     [ "${flag:-}" != lua ] || echo "                metadata: { filter_metadata: { github-graphql: { rules: \"$rules\", projects: \"$projects\" } } }"
-    if [ -n "$cred" ] || [ "${flag:-}" = lua ]; then
+    if [ -n "$cred" ] || [ "${flag:-}" = lua ] || [ "${flag:-}" = guard ]; then
       echo "                typed_per_filter_config:"
       if [ "${flag:-}" = lua ]; then graphql_route_filters; fi
+      [ "${flag:-}" != guard ] || echo "                  \"$(protect_filter "$k")\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
       [ -z "$cred" ] || echo "                  \"inject-$cred\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
     fi
   done <<< "$routes"
@@ -940,6 +1047,27 @@ EOF
                 match: { prefix: "/" }
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the $rules rules (listener $l): this method and path are not allowed on $h (what each preset allows: airlock-envoy docs/presets.md)\\n" } }
 EOF
+}
+# Under protect, each pack route (pack, or pack-<n> per repo) splits in two: push-guard first
+# (git-receive-pack, the only way a box changes a ref: no preset allows a ref, contents or
+# merge write through the API), which runs the push check, then pack for fetch alone.
+push_guard_routes() {
+  local name methods kind pat flag n=0 rx='git-(upload|receive)-pack'
+  while read -r name methods kind pat flag; do
+    if [[ "$name" =~ ^pack(-[0-9]+)?$ ]] && [[ "$pat" == *"$rx" ]]; then
+      echo "push-guard${BASH_REMATCH[1]} $methods $kind ${pat%"$rx"}git-receive-pack guard"
+      echo "$name $methods $kind ${pat%"$rx"}git-upload-pack ${flag:-}"
+      n=$((n + 1))
+    else
+      echo "$name $methods $kind $pat ${flag:-}"
+    fi
+  done
+  [ "$n" -gt 0 ] || die "internal: protect, but no push route to guard"
+}
+# A protected definition's push check: one ext_authz filter per rules, host and branch list in
+# a listener (they are its headers), named by their hash.
+protect_filter() {
+  printf 'protect-%s' "$(printf '%s|%s|%s' "${HTTP_RULES[$1]}" "${HTTP_HOST[$1]}" "${HTTP_PROTECT[$1]}" | sha256sum | cut -c1-12)"
 }
 # The GraphQL route's filters: a rate limit per listener (10 a second, bursts of 20, one bucket
 # for all its GraphQL routes: the filter's own, as no route sets one), the body
@@ -958,6 +1086,37 @@ EOF
 # The injected header is never logged: no log format here names a request header.
 http_filters() {
   local d c lua=0 seen=" " f
+  # The push checks first, before any credential is added: ext_authz holds the request (nothing
+  # goes upstream) until the protect-check listener answers on the first 64 KiB of the body; a
+  # longer push then streams on unbuffered. The listener, rules, host and branches go along as
+  # headers of the check request (a box's own headers of those names are not passed to it).
+  # The check failing or not answering refuses the push.
+  for d in ${HDESTS[$1]:-}; do
+    [ -n "${HTTP_PROTECT[$d]}" ] || continue
+    f=$(protect_filter "$d")
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    cat <<EOF
+          - name: "$f"
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+              transport_api_version: V3
+              failure_mode_allow: false
+              status_on_error: { code: ServiceUnavailable }
+              with_request_body: { max_request_bytes: 65536, allow_partial_message: true }
+              http_service:
+                server_uri: { uri: "http://protect-check", cluster: protect-check, timeout: 5s }
+                authorization_request:
+                  allowed_headers: { patterns: [{ exact: content-encoding }, { exact: x-envoy-auth-partial-body }] }
+                  headers_to_add:
+                  - { key: x-airlock-protect, value: "${HTTP_PROTECT[$d]}" }
+                  - { key: x-airlock-rules, value: "${HTTP_RULES[$d]}" }
+                  - { key: x-airlock-host, value: "${HTTP_HOST[$d]}" }
+                  - { key: x-airlock-listener, value: "$1" }
+EOF
+  done
+  seen=" "
   for d in ${HDESTS[$1]:-}; do
     case "${HTTP_RULES[$d]}" in github-api|github-issues) lua=1 ;; esac
   done
@@ -1158,6 +1317,7 @@ EOF
                   log_type: "%ACCESS_LOG_TYPE%"
           upgrade_configs:
           - upgrade_type: CONNECT
+$(protect_local_reply "$l")
           route_config:
             name: "$l"
             virtual_hosts:
@@ -1315,8 +1475,23 @@ EOF
 EOF
   done
 
+  ! any_protect || protect_listener
   echo
   if [ ${#SOCKETS[@]} -gt 0 ]; then echo "  clusters:"; else echo "  clusters: []"; fi
+  ! any_protect || cat <<'EOF'
+  # The push check (protect), on its internal listener.
+  - name: protect-check
+    transport_socket:
+      name: envoy.transport_sockets.internal_upstream
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.internal_upstream.v3.InternalUpstreamTransport
+        transport_socket:
+          name: envoy.transport_sockets.raw_buffer
+          typed_config: { "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer }
+    load_assignment:
+      cluster_name: protect-check
+      endpoints: [{ lb_endpoints: [{ endpoint: { address: { envoy_internal_address: { server_listener_name: protect-check } } } }] }]
+EOF
   echo "  # Where the HTTP routes send allowed tunnels: the destination's internal listener."
   for d in "${USED[@]}"; do
     k=$(key "$d")

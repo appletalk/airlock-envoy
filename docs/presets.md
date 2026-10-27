@@ -23,7 +23,7 @@ git fetch only (smart HTTP `info/refs` and `git-upload-pack`).
 
 git fetch **and push, to any branch the token can write**: force-push, branch deletion and a
 push to `main` included. That is a merge, without any GraphQL check. Protect branches on the
-server (rulesets or branch protection), or use `git-read`.
+server (rulesets or branch protection), list them in `protect` (below), or use `git-read`.
 
 ### `forgejo`
 
@@ -37,8 +37,9 @@ Forgejo or Gitea for a bot account. One credential covers git and the API: a tok
   `token`, `access_token` and `sudo` query parameters; form bodies. (Forgejo reads a token from
   the query string or a form body before the Authorization header.)
 - **Limits**:
-  - Which branches and tags a push may touch is the server's branch and tag protection. A push
-    can create, force-push or delete any branch or tag that is not protected.
+  - Which branches and tags a push may touch is the server's branch and tag protection, and
+    `protect` (below). A push can create, force-push or delete any branch or tag that neither
+    protects.
   - Edits reach other people's issues, PRs and comments, not only the bot's (Forgejo keeps the
     edit history).
   - Set `DISABLE_QUERY_AUTH_TOKEN` on the server too.
@@ -225,6 +226,56 @@ writes (LFS, `/repositories/<id>`) are refused too, with the generic message.
   `closes owner/ro#1` closes that issue, and a mention adds a cross-reference to its timeline.
   Envoy sees only the writable repo's request. Keep the token from writing it where that
   matters.
+
+### Protected branches (`protect`)
+
+`protect <branch>[,...]` on a `git` or `forgejo` line refuses a push that would create, update,
+force-update or delete one of those branches: `<name>` exactly, or `<prefix>/*` for every
+branch under `<prefix>/`, in any case (`MAIN` is refused with `main`). The whole push is
+refused, its other ref updates too. It works with or without `repos` and `repos-read`. Nothing
+is protected by default: list the branches per line. For one repo with and one without, use two
+definitions of the host (variants, each with its `repos`; the same credential may serve both):
+
+```
+http github.com@deploy rules git credential gh-git repos example-org/config protect main
+http github.com@work   rules git credential gh-git repos example-org/app
+```
+
+**Why the push is the whole surface.** No preset lets a box change a ref through the API: the
+REST routes write issues, PRs, comments, labels and reviewers only (no ref, contents or merge
+writes, no PUT or DELETE), and the GraphQL allowlist has no ref, commit or merge mutation (and
+GraphQL is refused under `repos`). A ref changes only through `POST <repo>/git-receive-pack`.
+
+**How it's checked.** On a protected line, `git-receive-pack` gets a route of its own whose
+`ext_authz` filter holds the request: no header or body byte goes upstream until a check
+decides. The check (Lua, `install/git-protect.lua`, on an internal listener of the same Envoy)
+reads at most the first 64 KiB of the body: the ref updates (`<old> <new> <ref>` pkt-lines,
+optional `shallow` lines before them) up to their flush. It never reads the pack. A longer push
+that passes then streams on, unbuffered. Refused, by default deny:
+
+- a ref update naming a protected branch;
+- a body it can't read for certain: no flush within the first 64 KiB, a malformed pkt-line or
+  ref update, an encoded body (`Content-Encoding` other than identity; git never compresses a
+  push), a signed push (`push-cert`);
+- any failure of the check itself (`ext_authz` fails closed: 503).
+
+**What the box sees.** git shows a push's reply only from a 200, so a refused protected branch
+is answered as git's own protocol would: `remote: airlock-envoy: refused by the git rules
+(listener ...): push to protected branch refs/heads/main on <host> (protect): push another
+branch and open a PR`, then `! [remote rejected] HEAD -> main (protected branch ...)`. The
+answer is Envoy's (nothing reached the upstream), and the HTTP status is 200; the access log
+shows the route `...-push-guard`, flag `UAEX` and details `ext_authz_denied`. A body it can't
+read gets 400 with the reason as text. On a push larger than what Envoy had read when it
+refused, git (curl) resends the rest on a new connection; that is refused as unreadable, and
+git adds `RPC failed; HTTP 400` after the reason.
+
+**Limits:**
+
+- It guards pushes through Envoy only: a merge in the server's web UI or by a person's own
+  token, and a server's own default-branch change, don't pass here.
+- Tags are not protected (they are not branches). A symbolic ref pointing at a protected branch
+  would be updated through its own name; GitHub and Forgejo don't let a push create one.
+- git's empty probe before a large pack (`0000`, no ref update) passes: it changes nothing.
 
 ### Several credentials on one host
 

@@ -44,15 +44,21 @@ graphql() {  # the GitHub GraphQL write check, under LuaJIT as in Envoy
   command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
   luajit test/graphql-check.lua
 }
+# shellcheck disable=SC2329  # run via run()
+protect() {  # the push check of protected branches: its parser under LuaJIT, then end to end
+  command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
+  luajit test/git-protect-check.lua && test/protect-e2e.sh
+}
 { run shellcheck lint
   run private-names names
   run private-names-check test/private-names-check-test.sh
   run apply-parse test/apply-parse.sh
   run graphql graphql
+  run protect protect
   with_envoy t2 test/t2.conf test/t2-checks.sh
   with_envoy site-checks test/site.conf test/site-checks.sh
 } &
-order=(shellcheck private-names private-names-check apply-parse graphql t2 site-checks "${order[@]}")
+order=(shellcheck private-names private-names-check apply-parse graphql protect t2 site-checks "${order[@]}")
 wait
 failed=0
 for name in "${order[@]}"; do
