@@ -113,7 +113,7 @@ fi
 # ---- parse ----------------------------------------------------------------------------------
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
-declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=()
+declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=() HTTP_RREPOS=()
 declare -A CLIENT=() CLIENT_AT=() CLIENT_UID=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
 SOCKETS=()   # the listeners with a client, in file order: each gets a box socket
@@ -178,11 +178,11 @@ parse() {  # parse <source label>, text on stdin
     n=$((n + 1))
     line=${line%%#*}
     charset_ok=1
-    # Project IDs and repo names (an http line's "projects" and "repos" values) may be mixed
+    # Project IDs and repo names (an http line's "projects", "repos" and "repos-read" values) may be mixed
     # case and hold _, / and *; parse_http checks them.
     chk=$line
     if [[ "$line" =~ ^[[:blank:]]*http[[:blank:]] ]]; then
-      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
+      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos|repos-read)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
     fi
     # User names may have an underscore; the client line checks its words itself.
     [[ ! "$line" =~ ^[[:blank:]]*client[[:blank:]] ]] || chk=${chk//_/}
@@ -253,7 +253,7 @@ parse() {  # parse <source label>, text on stdin
   done
   # One mode per host and listener: a host reached by plain HTTP (rules, credential) must not
   # also be a CONNECT entry, or a box could tunnel around the rules. And one definition of a
-  # host per listener, so its requests can only go one way; or several, each with repos and no
+  # host per listener, so its requests can only go one way; or several, each with repos (or repos-read) and no
   # repo in two of them, so each request still goes one way: by its repo.
   local l h k seen first
   local -A first_of=()
@@ -263,8 +263,8 @@ parse() {  # parse <source label>, text on stdin
       h=${HTTP_HOST[$k]}
       case "$seen" in
         *" $h "*) first=${first_of[$h]}
-          [ -n "${HTTP_REPOS[$first]}" ] && [ -n "${HTTP_REPOS[$k]}" ] \
-            || die "$src: listener $l lists $h twice (as http://$first and http://$k): use one, or give both repos (each repo in one of them)"
+          { scoped "$first" && scoped "$k"; } \
+            || die "$src: listener $l lists $h twice (as http://$first and http://$k): use one, or give both repos or repos-read (each repo in one of them)"
           same_family "${HTTP_RULES[$first]}" "${HTTP_RULES[$k]}" \
             || die "$src: listener $l lists $h with rules ${HTTP_RULES[$first]} (http://$first) and ${HTTP_RULES[$k]} (http://$k): definitions of one host share their rules (github-api and github-issues may mix)"
           [ "${HTTP_PORT[$first]} ${HTTP_CA[$first]} ${HTTP_CRED[$first]:+cred}" = "${HTTP_PORT[$k]} ${HTTP_CA[$k]} ${HTTP_CRED[$k]:+cred}" ] \
@@ -281,7 +281,7 @@ parse() {  # parse <source label>, text on stdin
 }
 
 # http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
-#   [repos <owner>/<repo>[,...]]:
+#   [repos <owner>/<repo>[,...]] [repos-read <owner>/<repo>[,...]]:
 # how the box reaches a host by plain HTTP. Envoy answers the box, checks method and path
 # against the preset, adds the credential, and is the TLS client to the host (its certificate
 # checked, Host and SNI fixed). The host may be an IPv4 address (a Kubernetes API server, say):
@@ -289,13 +289,15 @@ parse() {  # parse <source label>, text on stdin
 # checked against $CA_DIR/<name>.pem alone, not the system CAs (a cluster's own CA). A variant
 # is another definition of the same host (its own rules and credential, e.g. a second
 # identity), listed as http://<host>@<variant>; a listener uses one definition per host, or
-# several with repos (each repo in one of them).
+# several with repos or repos-read (each repo in one of them).
 # projects (GitHub presets only) lets Projects v2 item writes through for those project node
 # IDs and no others. repos (the git, forgejo and GitHub presets) narrows every repo route to
 # those repos (<owner>/<repo>, or <owner>/* for all of an owner's), and refuses GraphQL.
+# repos-read (the same presets but git-read, which is read only already) adds repos the box
+# may only read: their read routes (GET and HEAD, git fetch), nothing that writes.
 parse_http() {  # parse_http <where> <words...>
-  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" id r; local -a ids; shift
-  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...]"
+  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" rrepos="" id r a b list; local -a ids; shift
+  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...] [repos-read <owner>/<repo>,...]"
   hp=$1; shift
   if [[ "$hp" == *@* ]]; then
     variant=${hp#*@} hp=${hp%%@*}
@@ -318,18 +320,19 @@ parse_http() {  # parse_http <where> <words...>
           case " $projects " in *" $id "*) ;; *) projects="${projects:+$projects }$id" ;; esac
         done
         shift 2 ;;
-      repos) [ $# -ge 2 ] || die "$where: repos needs <owner>/<repo> names"
-        [ -z "$repos" ] || die "$where: repos given twice"
+      repos|repos-read) [ $# -ge 2 ] || die "$where: $1 needs <owner>/<repo> names"
+        if [ "$1" = repos ]; then list=$repos; else list=$rrepos; fi
+        [ -z "$list" ] || die "$where: $1 given twice"
         [[ "$2" != *, ]] || die "$where: bad repo '' (a trailing comma)"
         IFS=, read -ra ids <<< "$2"
         for r in "${ids[@]}"; do
           valid_repo "$r" || die "$where: bad repo '$r' (want <owner>/<repo> or <owner>/*)"
           r=${r,,}
-          case " $repos " in *" $r "*) ;; *) repos="${repos:+$repos }$r" ;; esac
+          case " $list " in *" $r "*) ;; *) list="${list:+$list }$r" ;; esac
         done
-        [ "${#ids[@]}" -le 64 ] || die "$where: over 64 repos"
+        if [ "$1" = repos ]; then repos=$list; else rrepos=$list; fi
         shift 2 ;;
-      *) die "$where: unknown http option '$1' (rules, credential, ca, projects, repos)" ;;
+      *) die "$where: unknown http option '$1' (rules, credential, ca, projects, repos, repos-read)" ;;
     esac
   done
   case " $PRESETS " in *" $rules "*) ;; *) die "$where: unknown rules '$rules' (one of: $PRESETS)" ;; esac
@@ -337,9 +340,21 @@ parse_http() {  # parse_http <where> <words...>
   [ -z "$ca" ] || [[ "$ca" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad ca name '$ca'"
   case "$rules" in github-api|github-issues) ;; *) [ -z "$projects" ] || die "$where: projects only with the github-api or github-issues rules" ;; esac
   case "$rules" in git|git-read|forgejo|github-api|github-issues) ;; *) [ -z "$repos" ] || die "$where: repos only with the git, git-read, forgejo, github-api or github-issues rules" ;; esac
+  case "$rules" in git|forgejo|github-api|github-issues) ;;
+    git-read) [ -z "$rrepos" ] || die "$where: repos-read with the git-read rules: they are read only already, use repos" ;;
+    *) [ -z "$rrepos" ] || die "$where: repos-read only with the git, forgejo, github-api or github-issues rules" ;;
+  esac
   # Projects writes go through GraphQL, which repos refuses: one line can't have both.
-  [ -z "$repos" ] || [ -z "$projects" ] || die "$where: repos and projects can't be on one line (repos refuses GraphQL, which Projects writes need)"
-  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos
+  [ -z "$repos$rrepos" ] || [ -z "$projects" ] || die "$where: repos (or repos-read) and projects can't be on one line (repos refuses GraphQL, which Projects writes need)"
+  read -ra ids <<< "$repos $rrepos"   # read, not a bare expansion: <owner>/* must not glob
+  [ "${#ids[@]}" -le 64 ] || die "$where: over 64 repos"
+  # A repo is writable or read only, not both (<owner>/* takes every repo of that owner).
+  local -a rw ro
+  read -ra rw <<< "$repos"; read -ra ro <<< "$rrepos"
+  for a in "${rw[@]}"; do for b in "${ro[@]}"; do
+    ! repo_clash "$a" "$b" || die "$where: repo $a (repos) and $b (repos-read) overlap: each repo in one list"
+  done; done
+  HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos HTTP_RREPOS[$k]=$rrepos
   HTTP_HOSTS+=("$k")
 }
 # A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (owners
@@ -363,21 +378,23 @@ same_family() {
 # (<owner>/* takes every repo of that owner).
 repos_overlap() {
   local l=$1 h=$2 k=$3 o a b; local -a mine theirs
-  read -ra mine <<< "${HTTP_REPOS[$k]}"
+  read -ra mine <<< "${HTTP_REPOS[$k]} ${HTTP_RREPOS[$k]}"
   for o in ${HDESTS[$l]}; do
     [ "$o" != "$k" ] || break
     [ "${HTTP_HOST[$o]}" = "$h" ] || continue
-    read -ra theirs <<< "${HTTP_REPOS[$o]}"
+    read -ra theirs <<< "${HTTP_REPOS[$o]} ${HTTP_RREPOS[$o]}"
     for a in "${mine[@]}"; do
       for b in "${theirs[@]}"; do
-        [ "${a%%/*}" = "${b%%/*}" ] || continue
-        if [ "${a#*/}" = "${b#*/}" ] || [ "${a#*/}" = "*" ] || [ "${b#*/}" = "*" ]; then
-          die "$src: listener $l has $h's repo $a (http://$k) also in http://$o ($b): each repo in one definition"
-        fi
+        ! repo_clash "$a" "$b" || die "$src: listener $l has $h's repo $a (http://$k) also in http://$o ($b): each repo in one definition"
       done
     done
   done
 }
+# Two repos entries naming a repo in common: the same, or one is <owner>/* of the other's owner.
+repo_clash() {
+  [ "${1%%/*}" = "${2%%/*}" ] && { [ "${1#*/}" = "${2#*/}" ] || [ "${1#*/}" = "*" ] || [ "${2#*/}" = "*" ]; }
+}
+scoped() { [ -n "${HTTP_REPOS[$1]}${HTTP_RREPOS[$1]}" ]; }   # definition $1 has repos or repos-read
 http_hosts_of() {  # listener $1's plain-HTTP hosts, once each, in the order listed
   local d seen=" "
   for d in ${HDESTS[$1]:-}; do
@@ -390,9 +407,9 @@ defs_of() {  # listener $1's definitions of host $2, in the order listed (the fi
   for d in ${HDESTS[$1]:-}; do [ "${HTTP_HOST[$d]}" != "$2" ] || out="${out:+$out }$d"; done
   printf '%s' "$out"
 }
-any_repos() {  # some http line has repos
+any_repos() {  # some http line has repos or repos-read
   local k
-  for k in "${HTTP_HOSTS[@]}"; do [ -z "${HTTP_REPOS[$k]}" ] || return 0; done
+  for k in "${HTTP_HOSTS[@]}"; do ! scoped "$k" || return 0; done
   return 1
 }
 
@@ -579,9 +596,9 @@ listing() {
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
     for d in ${HDESTS[$l]:-}; do
-      printf '%s http://%s:%s%s rules %s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
+      printf '%s http://%s:%s%s rules %s%s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
         "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_CA[$d]:+ ca ${HTTP_CA[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}" \
-        "${HTTP_REPOS[$d]:+ repos ${HTTP_REPOS[$d]// /,}}"
+        "${HTTP_REPOS[$d]:+ repos ${HTTP_REPOS[$d]// /,}}" "${HTTP_RREPOS[$d]:+ repos-read ${HTTP_RREPOS[$d]// /,}}"
     done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
     [ -z "${CLIENT[$l]:-}" ] || printf '%s client %s\n' "$l" "${CLIENT[$l]}"
@@ -761,10 +778,16 @@ repo_regex() {  # repo_regex <owner>/<repo or *>
 # could decode into another repo's path, and c%6fmpare would slip past the next rule; the
 # listener already rejects escaped slashes), and a compare across repos (base...owner:branch
 # reads another repo of the fork network by branch name), compare in any case.
-preset_rules_scoped() {  # preset_rules_scoped <rules> <repos>
-  local name methods kind pat flag any='[^/]+/[^/]+' i r api="" ; local -a list rxs
+# Read-only repos (repos-read) get the read routes alone (<name>-ro-1, ...): GET and HEAD, and
+# git fetch (the pack route narrowed to upload-pack). After every allowing route, a push and
+# any other method on their API paths are refused as read only, so the box sees why (flag ro:
+# a refusal of this definition's own, which a further definition keeps, unlike deny).
+preset_rules_scoped() {  # preset_rules_scoped <rules> <repos> <read-only repos>
+  local name methods kind pat flag any='[^/]+/[^/]+' i r api="" ro; local -a list rxs rorxs
   read -ra list <<< "$2"   # read, not a bare $2: <owner>/* must not glob
   for r in "${list[@]}"; do rxs+=("$(repo_regex "$r")"); done
+  read -ra list <<< "${3:-}"
+  for r in "${list[@]}"; do rorxs+=("$(repo_regex "$r")"); done
   echo 'escaped-unreserved * regex .*%(3[0-9]|[46][1-9a-fA-F]|[57][0-9aA]|2[dDeE]|5[fF]|7[eE]).* deny'
   case "$1" in github-*) api=/repos ;; forgejo) api=/api/v1/repos ;; esac
   [ -z "$api" ] || echo "compare-across * regex $api/[^/]+/[^/]+/$(ci_lit compare)/.*(:|%3[aA]).* deny"
@@ -782,7 +805,18 @@ preset_rules_scoped() {  # preset_rules_scoped <rules> <repos>
     for i in "${!rxs[@]}"; do
       echo "$name-$((i + 1)) $methods $kind ${pat//"$any"/"${rxs[$i]}"} ${flag:-}"
     done
+    ro=""
+    case "$methods" in GET|HEAD|'GET|HEAD') ro=$pat ;; esac
+    [ "$name" != pack ] || ro=${pat//"git-(upload|receive)-pack"/git-upload-pack}
+    [ -n "$ro" ] || continue
+    for i in "${!rorxs[@]}"; do
+      echo "$name-ro-$((i + 1)) $methods $kind ${ro//"$any"/"${rorxs[$i]}"} ${flag:-}"
+    done
   done < <(preset_rules "$1")
+  for i in "${!rorxs[@]}"; do
+    case "$1" in git|forgejo) echo "ro-refused-git-$((i + 1)) * regex /${rorxs[$i]}/git-receive-pack ro" ;; esac
+    [ -z "$api" ] || echo "ro-refused-$((i + 1)) * regex $api/${rorxs[$i]}(/.*)? ro"
+  done
 }
 CRED_DIR=/etc/airlock-envoy/credentials
 CA_DIR=/etc/airlock-envoy/ca
@@ -821,7 +855,7 @@ creds_used() {  # every credential some listener's http destinations use, once e
 # checked) add only their repos' routes, each with its own credential and upstream: the
 # first one's refusals and its routes outside a repo (/user) stand for all.
 http_vhost() {
-  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} first=$1 k cred projects repos name methods kind pat flag timeout maxdur routes denies="" d1=""
+  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} first=$1 k cred projects repos rrepos name methods kind pat flag timeout maxdur routes denies="" d1=""
   id=$(hid "$1")
   cat <<EOF
             - name: "http-$id"
@@ -854,14 +888,14 @@ EOF
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: no protocol upgrades here\\n" } }
 EOF
   for k in "$@"; do
-  id=$(hid "$k") rules=${HTTP_RULES[$k]} cred=${HTTP_CRED[$k]} projects=${HTTP_PROJECTS[$k]} repos=${HTTP_REPOS[$k]}
+  id=$(hid "$k") rules=${HTTP_RULES[$k]} cred=${HTTP_CRED[$k]} projects=${HTTP_PROJECTS[$k]} repos=${HTTP_REPOS[$k]} rrepos=${HTTP_RREPOS[$k]}
   # A clone or push can take long (the idle timeout still applies); anything else gets a cap
   # on the whole stream, so a slowly sent body can't hold a connection for good.
   timeout=120s maxdur=", max_stream_duration: { max_stream_duration: 300s }"
   case "$rules" in git|git-read) timeout=0s maxdur= ;; esac
   # Built first, not read from a process substitution: a die in there would end only the
   # subshell, and the render would go on with routes missing.
-  routes=$(if [ -n "$repos" ]; then preset_rules_scoped "$rules" "$repos"; else preset_rules "$rules"; fi) || exit 1
+  routes=$(if [ -n "$repos$rrepos" ]; then preset_rules_scoped "$rules" "$repos" "$rrepos"; else preset_rules "$rules"; fi) || exit 1
   # A further definition's refusals must be the first one's, which stand for it.
   d1=$(while read -r name methods kind pat flag; do [ "${flag:-}" != deny ] || echo "$methods $kind $pat"; done <<< "$routes")
   if [ "$k" = "$first" ]; then denies=$d1
@@ -879,6 +913,10 @@ EOF
     [ "$methods" = "*" ] || echo "                  headers: [{ name: \":method\", string_match: { safe_regex: { regex: \"$methods\" } } }]"
     if [ "${flag:-}" = deny ]; then
       printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules (listener %s): this path is refused on %s\\n" } }\n' "$rules" "$l" "$h"
+      continue
+    fi
+    if [ "${flag:-}" = ro ]; then
+      printf '                direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the %s rules (listener %s): this repo is read only on %s (repos-read): reads and git fetch only\\n" } }\n' "$rules" "$l" "$h"
       continue
     fi
     if [ "${flag:-}" = long ]; then

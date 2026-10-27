@@ -15,7 +15,8 @@ two modes:
 | **Plain HTTP with an injected credential** | Clients you can point at a plain-HTTP URL (`gh`, `git`, `curl`, `kubectl`) | Checks method and path against a preset, adds the credential, opens TLS upstream itself. The box never holds the token |
 
 Not yet built: branch-only pushes and minted per-repo tokens (an `ext_authz` decision
-service). Per-repo scoping is the `repos` option of the `http` line.
+service). Per-repo scoping is the `repos` option of the `http` line, and read-only repos its
+`repos-read`.
 
 Status: **spike**. The install path is tested on Ubuntu 22.04, 24.04 and 26.04, Debian 13 and
 Arch (in systemd-booted containers), and runs as a service on an Arch workstation.
@@ -224,7 +225,7 @@ client dev alice
 
 ```
 http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
-     [repos <owner>/<repo>[,<owner>/<repo>...]]
+     [repos <owner>/<repo>[,<owner>/<repo>...]] [repos-read <owner>/<repo>[,<owner>/<repo>...]]
 ```
 
 It is site-wide and must come above any listener that uses it. A listener lists it as
@@ -240,7 +241,7 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   that, being pinned to the API port.)
 - **Variants**: `http <host>@<variant> ...` is a second definition of the same host, with its
   own rules, credential and projects (a second identity, or narrower rules for one profile). A
-  listener uses one definition per host, or several with `repos` (below).
+  listener uses one definition per host, or several with `repos` or `repos-read` (below).
   ```
   http api.github.com        rules github-api    credential gh-dev
   http api.github.com@agent  rules github-issues credential agent-app projects PVT_kwDOAB12cd
@@ -257,8 +258,16 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   http github.com      rules git        credential github-git repos example-org/*,alice/tools
   http api.github.com  rules github-api credential github-api repos example-org/*,alice/tools
   ```
+- **`repos-read`** (the same presets but `git-read`, which is read only already): repos the box
+  may only read, on the same line as `repos` or alone. Their reads (GET and HEAD) and git fetch
+  pass with the line's credential; a write or push to one gets 403 "this repo is read only". So one token that may write some repos serves a box that should only read others.
+  A repo is in one of the two lists (`<owner>/*` takes every repo of that owner). See
+  [docs/presets.md](docs/presets.md#read-only-repos-repos-read).
+  ```
+  http api.github.com  rules github-api credential github-api repos example-org/app repos-read alice/tools,example-org/docs
+  ```
 - **A credential per repo**: a listener may list several definitions of one host if each has
-  `repos` and no repo is in two of them. Each repo's requests carry its own definition's
+  `repos` (or `repos-read`) and no repo is in two of them. Each repo's requests carry its own definition's
   credential (say an organisation's App for its repos and a personal token for your own).
   See [docs/presets.md](docs/presets.md#several-credentials-on-one-host).
   ```
@@ -347,7 +356,7 @@ GitHub presets check every `POST /graphql` write against an allowlist.
 - **Repo scoping is opt-in.** Without `repos`, a box can read any repo the token can (a GitHub
   token also reads every public repo), and write issues and comments in any it may write: it
   could copy a private repo into another repo's issue. Only the token's (or App installation's)
-  repo list bounds this. With `repos`, GraphQL is refused, and a listed repo still reads its
+  repo list bounds this. With `repos` (or `repos-read`), GraphQL is refused, and a listed repo still reads its
   fork network (parent and forks) and can reach other repos by reference
   ([docs/presets.md](docs/presets.md#repo-scoping-repos)).
 - **Label and comment writes also land on PRs**, where org automation (an auto-merge label, a

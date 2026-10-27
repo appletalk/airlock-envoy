@@ -195,15 +195,41 @@ What that loses:
   the token or App installation may write is still the site's to set: keep it to the same
   repos.
 
+### Read-only repos (`repos-read`)
+
+`repos-read <owner>/<repo>[,...]` lists repos a box may only read, on the same line as `repos`
+or alone, on the `git`, `forgejo`, `github-api` and `github-issues` presets (`git-read` is read
+only already: give it `repos`). It is the same scoping as `repos`, with GraphQL refused just the
+same, but for these repos only the preset's read routes pass:
+
+| Preset | In a `repos-read` repo |
+|---|---|
+| `git` | fetch (`info/refs`, `git-upload-pack`); a push is refused at `git-receive-pack` |
+| `forgejo` | fetch, and API reads under `/api/v1/repos/<repo>/` |
+| `github-api`, `github-issues` | REST reads (GET, HEAD) under `/repos/<repo>/` |
+
+A push or an API write to one gets 403 "this repo is read only on <host> (repos-read)", so a
+box can tell the cause from a repo not listed at all.
+
+- A repo is in `repos` or `repos-read`, not both; `<owner>/*` in one list takes every repo of
+  that owner, so a named repo of it in the other list is refused. Together, at most 64.
+- The point is the token. A token, or an App installation, has one set of permissions for
+  every repo it covers, so a box that may write some repos and only read others can't get the
+  difference from the token. `repos-read` puts it in Envoy, and also keeps a repo read only if
+  the token is later widened to write it.
+- The limits of `repos` hold here too, the fork network above all: a fetch by SHA through a
+  read-only repo reads the rest of its network that the token can.
+
 ### Several credentials on one host
 
 A listener may list several definitions of one host (variants, `http <host>@<variant>`) when
-each has `repos`, no repo is in two of them (`<owner>/*` takes every repo of that owner), and
+each has `repos` or `repos-read`, no repo is in two of them (`<owner>/*` takes every repo of that owner), and
 they share their rules (`github-api` and `github-issues` may mix), port, `ca`, and having a
 credential or none (the credential itself may differ). Apply refuses anything else.
 
 - They make one virtual host. Each listed repo's routes carry the credential of the definition
-  that lists it, and go to that definition's upstream.
+  that lists it, and go to that definition's upstream. A read-only repo is read only whichever
+  definition lists it.
 - The first definition the listener lists (in the order of its lines, an include's where the
   include stands) stands for all
   in what no repo decides: its refusals, and its routes outside a repo (`/user`,

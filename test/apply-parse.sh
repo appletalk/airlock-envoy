@@ -294,7 +294,7 @@ printf 'http api.example.com@org rules github-api credential c-org repos example
 r="$("$apply" --render "$work/site")"
 mfail=""
 # The route that takes a path (the first match, as Envoy does), and its injected credential.
-takes() {  # takes <method> <path>: route name and credential, or "refused"
+takes() {  # takes <method> <path> <vhost>: route name and credential, or "refused" ("refused-ro" for a read-only repo)
   local name="" rx m cred cl ci
   while IFS= read -r name; do
     rx="$(grep -A3 "name: \"$name\"" <<< "$r" | sed -n 's/.*\(regex\|path\|prefix\): "\(.*\)"\( }\)\{0,1\}$/\1 \2/p' | head -1)"
@@ -311,7 +311,10 @@ takes() {  # takes <method> <path>: route name and credential, or "refused"
       prefix) [[ "$2" == "${rx#* }"* ]] || continue ;;
       *) continue ;;
     esac
-    if sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -q direct_response; then echo refused; return; fi
+    if sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -q direct_response; then
+      if sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -q 'this repo is read only'; then echo refused-ro; else echo refused; fi
+      return
+    fi
     cred="$(sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -o '"inject-[a-z-]*"' | head -1)"
     cl="$(sed -n "/name: \"$name\"/,/- name:/p" <<< "$r" | grep -o 'cluster: "[^"]*"' | head -1)"
     echo "$name $cl $cred"; return
@@ -338,6 +341,68 @@ grep -q 'cluster_name: "http-api.example.com_me"' <<< "$r" || mfail+=" me-cluste
 [ "$("$apply" --clients b "$work/site" | grep -v '^#')" = "$(printf 'api.example.com 443 github-api yes\ngit.example.com 443 git yes')" ] || mfail+=" manifest"
 if [ -z "$mfail" ]; then echo "ok   several definitions of a host: one virtual host, each repo its own credential, refusals and /user once (the first's), one manifest line"
 else echo "FAIL several definitions of a host:$mfail"; fails=$((fails+1)); fi
+
+# repos-read: repos the box may only read, on the same line as repos (or alone). Not on
+# git-read (read only already), nor where repos isn't; a repo in one list only.
+refuses "repos-read: with git-read"     "read only already"      'http x.example rules git-read repos-read a/b\n'
+refuses "repos-read: with other rules"  "repos-read only with"   'http x.example rules any repos-read a/b\n'
+refuses "repos-read: with kubernetes-read" "repos-read only with" 'http x.example rules kubernetes-read repos-read a/b\n'
+refuses "repos-read: none given"        "repos-read needs"       'http x.example rules git repos-read\n'
+refuses "repos-read: given twice"       "repos-read given twice" 'http x.example rules git repos-read a/b repos-read a/c\n'
+refuses "repos-read: a bad name"        "bad repo 'acme/..'"     'http x.example rules git repos-read acme/..\n'
+refuses "repos-read: and projects"      "can't be on one line"   'http x.example rules github-api projects PVT_a repos-read a/b\n'
+refuses "repos-read: a repo in both lists" "overlap"             'http x.example rules git repos a/b repos-read A/B\n'
+refuses "repos-read: under an owner/* in repos" "overlap"        'http x.example rules git repos a/* repos-read a/b\n'
+refuses "repos-read: an owner/* over a repo in repos" "overlap"  'http x.example rules git repos a/b repos-read a/*\n'
+refuses "repos-read: over 64 with repos" "over 64 repos"         "http x.example rules git repos $(for i in $(seq 40); do printf 'o/r%s,' "$i"; done | sed 's/,$//') repos-read $(for i in $(seq 25); do printf 'p/r%s,' "$i"; done | sed 's/,$//')\\n"
+refuses "repos-read: two definitions, one repo in each" "also in" 'http x.example@a rules git repos o/a\nhttp x.example@b rules git repos-read o/a\nl http://x.example@a http://x.example@b\n'
+refuses "...an owner/* read-only, a repo of it in another" "also in" 'http x.example@a rules git repos-read o/*\nhttp x.example@b rules git repos o/b\nl http://x.example@a http://x.example@b\n'
+lists "repos-read: lowercased, with repos or alone, a second definition with only repos-read" \
+  'b http://x.example:443 variant a rules git credential c repos acme/r repos-read octo-cat/hello.world,zed/*\nb http://x.example:443 variant b rules git credential d repos-read o/b\nb client t' \
+  'http x.example@a rules git credential c repos acme/r repos-read Octo-Cat/Hello.World,zed/*\nhttp x.example@b rules git credential d repos-read o/b\nb http://x.example@a http://x.example@b\nclient b t\n'
+# What repos-read lets through: reads and git fetch with the line's credential; writes and
+# push refused with their own message; other repos as before. On GitHub, git and Forgejo,
+# and in a further definition of a host (its refusals are its own, not the first's).
+printf 'http api.example.com rules github-api credential c-ro repos alice/tools repos-read bob/lib,ro-org/*\nhttp git.example.com@w rules git credential g-w repos alice/tools\nhttp git.example.com@r rules git credential g-r repos-read bob/lib\nhttp fj.example.com rules forgejo credential f-ro repos-read me/r\nb http://api.example.com http://git.example.com@w http://git.example.com@r http://fj.example.com\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+ofail=""
+[[ "$(takes GET /repos/bob/lib/pulls/1 api.example.com)" == 'api.example.com-read-ro-1 cluster: "http-api.example.com" "inject-c-ro"' ]] || ofail+=" api-read"
+[[ "$(takes HEAD /repos/Bob/Lib api.example.com)" == 'api.example.com-read-ro-1 '* ]] || ofail+=" api-head"
+[[ "$(takes GET /repos/ro-org/any.thing/contents/x api.example.com)" == 'api.example.com-read-ro-2 '* ]] || ofail+=" api-owner-read"
+for mp in "POST /repos/bob/lib/issues" "POST /repos/bob/lib/pulls" "PATCH /repos/bob/lib/issues/1" "POST /repos/bob/lib/issues/1/comments" \
+          "PATCH /repos/bob/lib/issues/comments/1" "POST /repos/bob/lib/pulls/1/requested_reviewers" "POST /repos/ro-org/x/issues" \
+          "DELETE /repos/bob/lib" "PUT /repos/bob/lib/pulls/1/merge" "POST /repos/BOB/LIB.git/issues"; do
+  # shellcheck disable=SC2086  # method and path
+  [ "$(takes $mp api.example.com)" = refused-ro ] || ofail+=" api-write[$mp]"
+done
+[[ "$(takes POST /repos/alice/tools/issues api.example.com)" == 'api.example.com-create-1 '* ]] || ofail+=" api-write-listed"
+[ "$(takes POST /repos/carol/x/issues api.example.com)" = refused ] || ofail+=" api-other"
+[ "$(takes GET /repos/bob/lib/compare/a...x:b api.example.com)" = refused ] || ofail+=" api-compare-across"
+[ "$(takes GET /repos/bob/lib/%2e%2e/%2e%2e/carol/x api.example.com)" = refused ] || ofail+=" api-escape"
+[ "$(takes POST /graphql api.example.com)" = refused ] || ofail+=" api-graphql"
+[[ "$(takes GET /user api.example.com)" == 'api.example.com-user '* ]] || ofail+=" api-user"
+[[ "$(takes GET /bob/lib.git/info/refs git.example.com_w)" == 'git.example.com_r-info-refs-ro-1 cluster: "http-git.example.com_r" "inject-g-r"' ]] || ofail+=" git-info-refs"
+[[ "$(takes POST /bob/lib/git-upload-pack git.example.com_w)" == 'git.example.com_r-pack-ro-1 cluster: "http-git.example.com_r" "inject-g-r"' ]] || ofail+=" git-fetch"
+[ "$(takes POST /bob/lib.git/git-receive-pack git.example.com_w)" = refused-ro ] || ofail+=" git-push"
+[[ "$(takes POST /alice/tools.git/git-receive-pack git.example.com_w)" == 'git.example.com_w-pack-1 '*'"inject-g-w"' ]] || ofail+=" git-push-listed"
+[ "$(takes POST /carol/x/git-receive-pack git.example.com_w)" = refused ] || ofail+=" git-other"
+[[ "$(takes GET /api/v1/repos/me/r/pulls fj.example.com)" == 'fj.example.com-read-ro-1 '*'"inject-f-ro"' ]] || ofail+=" fj-read"
+[[ "$(takes POST /me/r.git/git-upload-pack fj.example.com)" == 'fj.example.com-pack-ro-1 '* ]] || ofail+=" fj-fetch"
+[ "$(takes POST /me/r.git/git-receive-pack fj.example.com)" = refused-ro ] || ofail+=" fj-push"
+[ "$(takes POST /api/v1/repos/me/r/issues/1/comments fj.example.com)" = refused-ro ] || ofail+=" fj-comment"
+[ "$(takes GET /me/r.wiki.git/info/refs fj.example.com)" = refused ] || ofail+=" fj-wiki"
+[ "$(takes GET /me/r/issues fj.example.com)" = refused ] || ofail+=" fj-web-ui"
+[ "$(takes GET '/api/v1/repos/me/r?token=x' fj.example.com)" != none ] || ofail+=" fj-token"
+# The read-only routes keep the git timeouts (fetch streams long) and the API's caps.
+grep -A4 'name: "git.example.com_r-pack-ro-1"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' || ofail+=" git-timeout"
+grep -A4 'name: "fj.example.com-pack-ro-1"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 300s }' || ofail+=" fj-long"
+grep -A4 'name: "api.example.com-read-ro-1"' <<< "$r" | grep -q 'max_stream_duration: 300s' || ofail+=" api-cap"
+grep -q 'this repo is read only on api.example.com (repos-read): reads and git fetch only' <<< "$r" || ofail+=" message"
+[ "$("$apply" --clients b "$work/site" | grep -v '^#')" = "$(printf 'api.example.com 443 github-api yes\ngit.example.com 443 git yes\nfj.example.com 443 forgejo yes')" ] || ofail+=" manifest"
+if ! python3 -c 'import yaml' 2>/dev/null; then :
+elif ! python3 -I -c 'import sys, yaml; yaml.safe_load(sys.stdin)' <<< "$r" 2>/dev/null; then ofail+=" yaml"; fi
+if [ -z "$ofail" ]; then echo "ok   repos-read: reads and fetch with the line's credential, writes and push refused as read only (GitHub, git, Forgejo, a further definition), the rest as before"
+else echo "FAIL repos-read rendering:$ofail"; fails=$((fails+1)); fi
 
 # The render stops if a further definition would refuse other paths than the first (it couldn't
 # stand for it): a copy whose parser lets git and github-api share a host.

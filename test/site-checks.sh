@@ -268,7 +268,9 @@ for c in "listed repo:GET:/repos/octocat/hello-world:401" "listed repo, other ca
          "compare in the repo:GET:/repos/octocat/hello-world/compare/master...master:401" \
          "compare across the fork network:GET:/repos/octocat/hello-world/compare/master...octocat:spoon-knife:master:403" \
          "compare across, upper case:GET:/repos/octocat/hello-world/COMPARE/master...octocat:spoon-knife:master:403" \
-         "compare across, an escaped letter:GET:/repos/octocat/hello-world/c%6fmpare/master...octocat:spoon-knife:master:403"; do
+         "compare across, an escaped letter:GET:/repos/octocat/hello-world/c%6fmpare/master...octocat:spoon-knife:master:403" \
+         "read-only repo, read:GET:/repos/octocat/linguist/pulls:401" "read-only repo, issue create:POST:/repos/octocat/linguist/issues:403" \
+         "read-only repo, PR create:POST:/repos/octocat/linguist/pulls:403" "read-only repo, delete:DELETE:/repos/octocat/linguist:403"; do
   cw=${c##*:} c=${c%:*}; cn=${c%%:*} c=${c#*:}; cm=${c%%:*} cp=${c#*:}   # the path may hold a colon
   check 3130 "repos, GitHub API: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" -H "Content-Type: application/json" "http://api.github.com$cp"
 done
@@ -289,7 +291,10 @@ for c in "listed repo:GET:/api/v1/repos/o/r:404" "listed repo, other case:GET:/a
          "git fetch, unlisted repo:GET:/o/other.git/info/refs:403" "wiki of a listed repo:GET:/o/r.wiki.git/info/refs:403" \
          "token in the query, listed repo:GET:/api/v1/repos/o/r?token=x:403" \
          "escaped dots out of a listed repo:GET:/api/v1/repos/o/r/%2e%2e/%2e%2e/o/other:403" \
-         "compare across repos:GET:/api/v1/repos/o/r/compare/main...other:main:403"; do
+         "compare across repos:GET:/api/v1/repos/o/r/compare/main...other:main:403" \
+         "read-only repo:GET:/api/v1/repos/o/ro/pulls/1:404" "read-only repo, comment:POST:/api/v1/repos/o/ro/issues/1/comments:403" \
+         "read-only repo, git fetch:GET:/o/ro.git/info/refs:404" "read-only repo, git fetch pack:POST:/o/ro.git/git-upload-pack:404" \
+         "read-only repo, git push:POST:/o/ro.git/git-receive-pack:403"; do
   cw=${c##*:} c=${c%:*}; cn=${c%%:*} c=${c#*:}; cm=${c%%:*} cp=${c#*:}   # the path may hold a colon
   check 3128 "repos, forgejo: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" -H "Content-Type: application/json" "http://httpbin.org$cp"
 done
@@ -301,6 +306,14 @@ slot; { r="$(curl -s -x http://127.0.0.1:3128 http://httpbingo.org/anything/a/in
 pids+=($!)
 check 3128 "several definitions: a repo in neither refused" "$P http=403 exit=0" http://httpbingo.org/anything/c/info/refs
 check 3128 "several definitions: push to a listed repo passes the rules" "$P http=200 exit=0" -X POST http://httpbingo.org/anything/a/git-receive-pack
+# repos-read (t-site: anything/ro on httpbingo@ra): fetch passes with the credential of its
+# credential, push is refused here and says why.
+check 3128 "repos-read: git fetch passes the rules" "$P http=200 exit=0" -X POST http://httpbingo.org/anything/ro/git-upload-pack
+check 3128 "repos-read: git push refused" "$P http=403 exit=0" -X POST http://httpbingo.org/anything/ro/git-receive-pack
+slot; { r="$(curl -s -x http://127.0.0.1:3128 http://httpbingo.org/anything/RO.git/info/refs | grep -o "SITE-TEST-TOKEN-1\|dummy-not-a-github-token" | sort -u | tr "\n" " ")
+    $(curl -s -x http://127.0.0.1:3128 -X POST http://httpbingo.org/anything/ro/git-receive-pack)"
+  verdict "repos-read: fetch carries the credential of its line, push says read only" "SITE-TEST-TOKEN-1 *this repo is read only on httpbingo.org (repos-read)*" "$(echo $r)" > "$f"; } &
+pids+=($!)
 check 3132 "github-api: GraphQL requestReviewsByLogin passes" "$P http=404 exit=0" -H "Content-Type: application/json" --data "{\"query\":\"mutation { requestReviewsByLogin(input: {}) { clientMutationId } }\"}" http://httpbin.org/graphql
 settle
 # Alone: 40 GraphQL requests at once on one listener, 20 to each of two GitHub-rule hosts; one
