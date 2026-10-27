@@ -174,7 +174,10 @@ ck "logrotate timer enabled and active" '[ "$(x systemctl is-enabled airlock-env
 x systemctl stop airlock-envoy-logrotate.timer   # no timer run during the forced ones below
 x mkdir -p /etc/systemd/system/airlock-envoy-logrotate.service.d
 x sh -c 'printf "[Service]\nExecStart=\nExecStart=/usr/sbin/logrotate -f --state /var/lib/airlock-envoy/logrotate.status /etc/airlock-envoy/logrotate.conf\n" > /etc/systemd/system/airlock-envoy-logrotate.service.d/test.conf'
-x systemctl daemon-reload; x systemctl start airlock-envoy-logrotate.service
+# Eight forced runs inside a few seconds pass systemd's default start limit (5 in 10 s), which
+# the 15-minute timer never nears: reset it before each run, as for Envoy's restart burst below.
+rotate() { x systemctl reset-failed airlock-envoy-logrotate.service 2>/dev/null; x systemctl start airlock-envoy-logrotate.service; }
+x systemctl daemon-reload; rotate
 rot1="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -E "^access\.jsonl-[0-9]{8}T[0-9]{6}Z$" | head -1')"
 ck "logrotate rotated the audit log to access.jsonl-<time>, as airlock-envoy 0600: '$rot1'" \
    '[ -n "$rot1" ] && [ "$(x stat -c %U:%a "/var/log/airlock-envoy/$rot1")" = airlock-envoy:600 ] && [ "$(x systemctl show -p Result --value airlock-envoy-logrotate.service)" = success ]'
@@ -183,17 +186,17 @@ x sh -c 'for _ in $(seq 60); do grep -q deny-connect "$0" 2>/dev/null && exit 0;
 ck "Envoy reopened its log: new decisions land in a new access.jsonl, 0600: got '$r'" \
    '[ "$r" = "200 403" ] && [ "$(x grep -c deny-connect /var/log/airlock-envoy/access.jsonl)" -ge 1 ] && [ "$(x stat -c %U:%a /var/log/airlock-envoy/access.jsonl)" = airlock-envoy:600 ]'
 sleep 1   # the next rotation's name must differ by a second
-x systemctl start airlock-envoy-logrotate.service
+rotate
 plain="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}Z$"')"
 ck "a second rotation compresses the first (delaycompress), the newest stays plain: $plain plain" \
    'x gzip -t "/var/log/airlock-envoy/$rot1.gz" && [ "$plain" = 1 ]'
 # Retention is by age only: more forced rotations (each with a line to rotate) remove nothing.
-for _ in 1 2 3 4 5; do tunnel >/dev/null; sleep 1.2; x systemctl start airlock-envoy-logrotate.service; done
+for _ in 1 2 3 4 5; do tunnel >/dev/null; sleep 1.2; rotate; done
 nrot="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}Z(\.gz)?$"')"
 ck "seven rotations, seven rotated files kept (no count limit): $nrot" '[ "$nrot" = 7 ]'
 # ...and by age: a rotated file made 31 days old goes at the next rotation, the others stay.
 x touch -d '31 days ago' "/var/log/airlock-envoy/$rot1.gz"
-tunnel >/dev/null; sleep 1.2; x systemctl start airlock-envoy-logrotate.service
+tunnel >/dev/null; sleep 1.2; rotate
 nrot2="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}Z(\.gz)?$"')"
 ck "maxage 30: the 31-day-old rotated file is gone, the other seven stay (and the new one): $nrot2" \
    '! x test -e "/var/log/airlock-envoy/$rot1.gz" && [ "$nrot2" = 7 ]'
