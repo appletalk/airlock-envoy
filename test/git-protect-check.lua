@@ -24,6 +24,8 @@ local cases = {
   { true,  "a delete of a feature branch",  cmd(A, Z, "refs/heads/f", CAPS) .. "0000" },
   { true,  "push options after the flush",  cmd(Z, A, "refs/heads/f", CAPS .. " push-options") .. "0000" .. pkt("refs/heads/main") .. "0000" .. PACK },
   { true,  "the pack may hold anything",    cmd(Z, A, "refs/heads/f", CAPS) .. "0000" .. "PACK" .. cmd(Z, A, "refs/heads/main") },
+  { true,  "dots, @, + and UTF-8 inside names", cmd(Z, A, "refs/heads/a.b/c-d_e@f+g/caf\195\169", CAPS) .. "0000" .. PACK },
+  { true,  "lock not at a component's end", cmd(Z, A, "refs/heads/main.lockx/y.lock2", CAPS) .. "0000" .. PACK },
   { true,  "no newline on the command",     pkt(Z .. " " .. A .. " refs/heads/f\0" .. CAPS) .. "0000" },
   -- refused: a protected branch, whatever the update does
   { false, "update main",                   cmd(A, B, "refs/heads/main", CAPS) .. "0000" .. PACK },
@@ -90,6 +92,19 @@ for _, c in ipairs({
   { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a[b", CAPS) .. "0000" },
   { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a\\b", CAPS) .. "0000" },
   { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a\127", CAPS) .. "0000" },
+  -- git check-ref-format's rules beyond characters: names near "main" a server might read as it
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads//main", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/./main", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/x/../main", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/main/", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/main.", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/main.lock", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/main.LOCK", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/.main", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/main@{0}", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "/refs/heads/main", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a..b", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "@", CAPS) .. "0000" },
 }) do
   local why = P.check_body(c[2], set, false)
   if why ~= c[1] then fails = fails + 1; print(string.format("FAIL reason: want %q, got %q", c[1], tostring(why))) end

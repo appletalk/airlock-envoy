@@ -43,9 +43,21 @@ end
 
 local function oid(s) return (#s == 40 or #s == 64) and s:match("^%x+$") ~= nil end
 
--- A refname git itself would take: no control character, space or ~^:?*[\ (git refuses those
--- as a "funny refname"). Refused here too, so no such name is ever matched, logged or echoed.
-local function plain_ref(r) return not r:find("[%c ~^:?*%[\\\127]") end
+-- A refname git itself would take (git check-ref-format, which receive-pack applies): no
+-- control character, space or ~^:?*[\; no empty component ("//", a leading or trailing "/"),
+-- no component starting with "." or ending in ".lock" (in any case, stricter than git), no "..",
+-- no trailing ".", no "@{", not "@" alone. Refused here too (default deny), so a name the
+-- server might read differently is never matched, logged or echoed: refs/heads//main and
+-- refs/heads/x/../main are refused, not compared with "main".
+local function plain_ref(r)
+  if r == "" or r == "@" or r:find("[%c ~^:?*%[\\]") then return false end
+  if r:find("..", 1, true) or r:find("@{", 1, true) or r:find("//", 1, true) then return false end
+  if r:sub(1, 1) == "/" or r:sub(-1) == "/" or r:sub(-1) == "." then return false end
+  for part in r:gmatch("[^/]+") do
+    if part:sub(1, 1) == "." or part:lower():sub(-5) == ".lock" then return false end
+  end
+  return true
+end
 
 -- nil to allow; or the reason, and for a protected branch also that ref, every ref update
 -- read (up to the flush, or up to where the body stops making sense) and the push's

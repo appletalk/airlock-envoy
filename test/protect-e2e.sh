@@ -168,5 +168,32 @@ n="$(grep 'POST /alice/tools.git/git-receive-pack' requests.log | grep -vc ' 4$'
 rm -rf c && git clone -q http://git.example.com/alice/tools.git c 2>/dev/null && [ -n "$(git -C c branch -r)" ] && ok "clone passes" || fail "clone"
 
 grep -q 'protect refused' envoy.log && ok "Envoy logs each refusal" || fail "no refusal in the Envoy log"
+
+# The check's ref-name rules against git's own (git check-ref-format): never more permissive.
+# Names from every one- and two-part combination of tricky pieces, as bytes (printf, not echo).
+python3 -I - > refnames <<'PY'
+import itertools
+atoms = ["main", "a", "x.y", "/", "//", ".", "..", ".lock", ".LOCK", "@", "@{", "{", "}", "-", "+", "~", "^",
+         ":", "?", "*", "[", "]", "\\", " ", "\t", "é", "main.lock", "a.", "@{x}", "/.", "./", "..."]
+for n in (1, 2):
+    for c in itertools.product(atoms, repeat=n):
+        print("refs/heads/" + "".join(c))
+PY
+while IFS= read -r n; do
+  if git check-ref-format "$n" 2>/dev/null; then printf '1 %s\n' "$n"; else printf '0 %s\n' "$n"; fi
+done < refnames > refnames.git
+cat > refcmp.lua <<'LUA'
+local src = io.open(arg[1]):read("*a")
+local plain_ref = loadstring(src:match("(local function plain_ref%(r%)\n.-\nend)") .. "\nreturn plain_ref")()
+local more = 0
+for line in io.lines(arg[2]) do
+  local g, n = line:match("^(%d) (.*)$")
+  if plain_ref(n) and g == "0" then more = more + 1; print("allowed, git refuses: " .. n) end
+end
+os.exit(more == 0 and 0 or 1)
+LUA
+if ! command -v luajit >/dev/null; then echo "skip ref names against git: no luajit"
+elif luajit refcmp.lua "$repo/install/git-protect.lua" refnames.git; then ok "ref names: the check is never more permissive than git check-ref-format ($(wc -l < refnames) names)"
+else fail "ref names the check allows and git refuses"; fi
 echo "failures: $fails"
 exit "$fails"
