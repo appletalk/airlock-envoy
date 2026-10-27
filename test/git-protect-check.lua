@@ -66,6 +66,38 @@ for _, c in ipairs(cases) do
   end
 end
 
+-- Each refusal for its own reason, not a fallback's (a guard removed must fail here).
+for _, c in ipairs({
+  { "a signed push (push-cert)",         pkt("push-cert\0" .. CAPS .. "\n") .. "0000" },
+  { "a malformed pkt-line length",       "fff1" .. string.rep("x", 65520) .. "0000" },
+  { "a malformed pkt-line length",       "0003" .. "0000" },
+  { "a malformed ref update",            cmd("abc", A, "refs/heads/f", CAPS) .. "0000" },
+  { "a malformed ref update",            cmd(Z, string.rep("a", 41), "refs/heads/f", CAPS) .. "0000" },
+  { "a malformed ref update",            cmd(Z, A2, "refs/heads/f", CAPS) .. "0000" },
+  { "a malformed ref update",            cmd(string.rep("0", 41), string.rep("a", 41), "refs/heads/f", CAPS) .. "0000" },
+  { "a malformed ref update",            cmd(string.rep("0", 39), string.rep("a", 39), "refs/heads/main", CAPS) .. "0000" },
+  { "the push ends before its flush",    cmd(Z, A, "refs/heads/f", CAPS):sub(1, 30) },
+  { "the push ends before its flush",    "00ff" .. Z },
+  { "a malformed shallow line",          pkt("shallow xyz\n") .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/release/x\n[1][critical] forged\27[31m", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a b", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a\r", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a~1", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a^", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a:b", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a?", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a*", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a[b", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a\\b", CAPS) .. "0000" },
+  { "a ref name git would refuse",       cmd(Z, A, "refs/heads/a\127", CAPS) .. "0000" },
+}) do
+  local why = P.check_body(c[2], set, false)
+  if why ~= c[1] then fails = fails + 1; print(string.format("FAIL reason: want %q, got %q", c[1], tostring(why))) end
+end
+if P.check_body(cmd(Z, A, "refs/heads/release/1.0-rc_2/x.y", CAPS) .. "0000", set, false) ~= "push to protected branch refs/heads/release/1.0-rc_2/x.y" then
+  fails = fails + 1; print("FAIL a plain name under release/ not matched")
+end
+
 -- The 64 KiB cut: commands complete within it pass, a flush beyond it is refused as cut.
 local many = cmd(Z, A, "refs/heads/f0", CAPS)
 for k = 1, 700 do many = many .. cmd(Z, A, "refs/heads/f" .. k) end
@@ -156,6 +188,18 @@ r = run(with("x-envoy-auth-partial-body", "true"), cmd(A, B, "refs/heads/f", CAP
 if r.status ~= "400" or not r.body:find("64 KiB", 1, true) then fails = fails + 1; print("FAIL partial without flush: " .. tostring(r.body)) end
 r = run(H, "garbage")
 if r.status ~= "400" then fails = fails + 1; print("FAIL garbage") end
+-- What it logs has no control characters (a box-chosen name can't forge a log line).
+local logged
+local function runlog(body)
+  local h = {}
+  function h:headers() return { get = function(_, k) return H[k] end } end
+  function h:body() return { length = function() return #body end, getBytes = function(_, a, n) return body:sub(a + 1, a + n) end } end
+  function h:logWarn(m) logged = m end
+  function h:respond() end
+  envoy_on_request(h)
+end
+runlog(cmd(Z, A, "refs/heads/release/x\n[1][critical] forged", CAPS) .. "0000")
+if not logged or logged:find("%c") then fails = fails + 1; print("FAIL a control character in the log: " .. string.format("%q", tostring(logged))) end
 
 if fails == 0 then print(string.format("ok   push check: %d bodies, the replies, the handle", #cases)) end
 print(string.format("%d cases, failures: %d", #cases, fails))

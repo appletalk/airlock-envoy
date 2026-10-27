@@ -276,6 +276,9 @@ git adds `RPC failed; HTTP 400` after the reason.
 - Tags are not protected (they are not branches). A symbolic ref pointing at a protected branch
   would be updated through its own name; GitHub and Forgejo don't let a push create one.
 - git's empty probe before a large pack (`0000`, no ref update) passes: it changes nothing.
+- A ref name git would refuse (control characters, space, `~^:?*[\`) is refused here too.
+- A repo's other names reach it as well: GitHub serves a renamed repo under its old name. Don't
+  list a protected repo's old name in another, unprotected definition.
 
 ### Several credentials on one host
 

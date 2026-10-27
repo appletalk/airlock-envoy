@@ -340,6 +340,7 @@ parse_http() {  # parse_http <where> <words...>
         [[ "$2" != *, ]] || die "$where: bad branch '' (a trailing comma)"
         IFS=, read -ra ids <<< "$2"
         for r in "${ids[@]}"; do
+          [[ "${r,,}" != refs/* ]] || die "$where: bad branch '$r' (the name alone: ${r#[Rr][Ee][Ff][Ss]/[Hh][Ee][Aa][Dd][Ss]/}, not refs/heads/...)"
           valid_branch "$r" || die "$where: bad branch '$r' (want a branch name, or <prefix>/* for every branch under it)"
           r=${r,,}
           case " $protect " in *" $r "*) ;; *) protect="${protect:+$protect }$r" ;; esac
@@ -1105,10 +1106,10 @@ http_filters() {
               failure_mode_allow: false
               status_on_error: { code: ServiceUnavailable }
               with_request_body: { max_request_bytes: 65536, allow_partial_message: true }
+              allowed_headers: { patterns: [{ exact: content-encoding }, { exact: x-envoy-auth-partial-body }] }
               http_service:
                 server_uri: { uri: "http://protect-check", cluster: protect-check, timeout: 5s }
                 authorization_request:
-                  allowed_headers: { patterns: [{ exact: content-encoding }, { exact: x-envoy-auth-partial-body }] }
                   headers_to_add:
                   - { key: x-airlock-protect, value: "${HTTP_PROTECT[$d]}" }
                   - { key: x-airlock-rules, value: "${HTTP_RULES[$d]}" }

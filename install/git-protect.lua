@@ -43,6 +43,10 @@ end
 
 local function oid(s) return (#s == 40 or #s == 64) and s:match("^%x+$") ~= nil end
 
+-- A refname git itself would take: no control character, space or ~^:?*[\ (git refuses those
+-- as a "funny refname"). Refused here too, so no such name is ever matched, logged or echoed.
+local function plain_ref(r) return not r:find("[%c ~^:?*%[\\\127]") end
+
 -- nil to allow; or the reason, and for a protected branch also that ref, every ref update
 -- read (up to the flush, or up to where the body stops making sense) and the push's
 -- capabilities (what git asked to be answered in).
@@ -75,6 +79,7 @@ function M.check_body(body, set, partial)
     else
       local old, new, ref = line:match("^(%x+) (%x+) (.+)$")
       if not old or not oid(old) or not oid(new) or #old ~= #new then return refuse("a malformed ref update") end
+      if not plain_ref(ref) then return refuse("a ref name git would refuse") end
       refs[#refs + 1] = ref
       if not hit and M.is_protected(ref, set) then hit = ref end
     end
@@ -140,7 +145,8 @@ function envoy_on_request(handle)
     handle:respond({ [":status"] = "200" }, "")
     return
   end
-  handle:logWarn("airlock-envoy protect refused: " .. why)
+  -- No control character reaches the log (a second layer: check_body refuses such ref names).
+  handle:logWarn("airlock-envoy protect refused: " .. (why:gsub("%c", "?")))
   local msg = "airlock-envoy: refused by the " .. rules .. " rules (listener " .. listener .. "): " .. why
     .. " on " .. host .. " (protect)" .. (ref and ": push another branch and open a PR" or "") .. "\n"
   local reply = ref and M.git_reply(msg, refs, caps, set)
