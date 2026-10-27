@@ -340,7 +340,8 @@ parse_http() {  # parse_http <where> <words...>
         [[ "$2" != *, ]] || die "$where: bad branch '' (a trailing comma)"
         IFS=, read -ra ids <<< "$2"
         for r in "${ids[@]}"; do
-          [[ "${r,,}" != refs/* ]] || die "$where: bad branch '$r' (the name alone: ${r#[Rr][Ee][Ff][Ss]/[Hh][Ee][Aa][Dd][Ss]/}, not refs/heads/...)"
+          [[ "${r,,}" != refs/heads/?* ]] || die "$where: bad branch '$r' (the name alone: ${r:11}, not refs/heads/...)"
+          [[ "${r,,}" != refs/* ]] || die "$where: bad branch '$r' (protect takes branch names, not refs/...)"
           valid_branch "$r" || die "$where: bad branch '$r' (want a branch name, or <prefix>/* for every branch under it)"
           r=${r,,}
           case " $protect " in *" $r "*) ;; *) protect="${protect:+$protect }$r" ;; esac

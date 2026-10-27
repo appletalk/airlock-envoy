@@ -423,7 +423,8 @@ refuses "protect: .lock"                "bad branch 'a.LOCK'"    'http x.example
 refuses "protect: starting with -"      "bad branch '-a'"        'http x.example rules git protect -a\n'
 refuses "protect: a refs/heads/ path"   "the name alone: main"   'http x.example rules git protect refs/heads/main\n'
 refuses "...in another case"            "the name alone: Main"   'http x.example rules git protect REFS/Heads/Main\n'
-refuses "protect: a refs/tags/ path"    "bad branch 'refs/tags/v1'" 'http x.example rules git protect refs/tags/v1\n'
+refuses "protect: a refs/tags/ path"    "branch names, not refs/" 'http x.example rules git protect refs/tags/v1\n'
+refuses "protect: refs/heads/ alone"    "branch names, not refs/" 'http x.example rules git protect refs/heads/\n'
 refuses "protect: a colon"              "bad branch 'ma:n'"      'http x.example rules git protect ma:n\n'
 refuses "protect: an empty part"        "bad branch 'a//b'"      'http x.example rules git protect a//b\n'
 refuses "protect: over 32"              "over 32 protected"      "http x.example rules git protect $(for i in $(seq 33); do printf 'b%s,' "$i"; done | sed 's/,$//')\\n"
