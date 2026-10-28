@@ -141,16 +141,21 @@ else
   x airlock-envoy-apply >/dev/null
 fi
 ck "envoy and the box socket active" '[ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@c-anthropic.socket | tr "\n" " ")" = "active active " ]'
-# A crash dump's credential lines never reach the journal: the unit's own LogFilterPatterns on a
-# throwaway unit that prints lines as Envoy's dump does (only those with a credential go).
-# Needs systemd 253 (older ones ignore the key): checked where the distribution has it.
+# A crash dump's credential lines never reach the journal: a throwaway unit FILE carrying the
+# installed unit's own LogFilterPatterns line (so the unit-file parsing is what's tested) prints
+# lines as Envoy's dump does; only those with a credential may go. Needs systemd 253 (older ones
+# ignore the key): checked where the distribution has it.
 if [ "$(x systemctl --version | awk 'NR == 1 { print $2 }')" -ge 253 ]; then
-  pat="$(x sed -n 's/^LogFilterPatterns=//p' /etc/systemd/system/airlock-envoy.service)"
-  x systemd-run --wait --quiet --collect --unit=t-logfilter -p "LogFilterPatterns=$pat" /bin/sh -c \
-    "printf '%s\\n' \"    'authorization', 'Bearer T-LEAK-1'\" \"  'Proxy-Authorization', 'Basic T-LEAK-2'\" \"authorization: Bearer T-LEAK-3\" \"    ':authority', 't-kept'\"" >/dev/null 2>&1
-  x journalctl --sync 2>/dev/null
-  lf="$(x journalctl -q -o cat -u t-logfilter 2>/dev/null)"
-  ck "LogFilterPatterns keeps a crash dump's credential lines out of the journal, other lines kept" '[ -n "$pat" ] && [[ "$lf" == *t-kept* ]] && [[ "$lf" != *T-LEAK* ]]'
+  x sh -c 'cat > /root/t-logfilter.sh' <<'EOF'
+printf '%s\n' "    'authorization', 'Bearer T-LEAK-1'" "  'Proxy-Authorization', 'Basic T-LEAK-2'" "authorization: Bearer T-LEAK-3" "    ':authority', 't-kept'"
+EOF
+  x sh -c '{ printf "[Service]\nType=oneshot\nExecStart=/bin/sh /root/t-logfilter.sh\n"; grep "^LogFilterPatterns=" /etc/systemd/system/airlock-envoy.service; } > /etc/systemd/system/t-logfilter.service && systemctl daemon-reload && systemctl start t-logfilter.service' || true
+  x journalctl --sync 2>/dev/null || true
+  lf="$(x journalctl -q -o cat -u t-logfilter 2>/dev/null || true)"
+  ck "LogFilterPatterns keeps a crash dump's credential lines out of the journal, other lines kept" \
+     'x grep -q "^LogFilterPatterns=" /etc/systemd/system/t-logfilter.service && [[ "$lf" == *t-kept* ]] && [[ "$lf" != *T-LEAK* ]]'
+  [[ "$lf" == *t-kept* ]] || x journalctl -u t-logfilter --no-pager -n 20 2>/dev/null | sed 's/^/       /' || true
+  x sh -c 'rm -f /etc/systemd/system/t-logfilter.service /root/t-logfilter.sh && systemctl daemon-reload' || true
 else echo "skip LogFilterPatterns: systemd older than 253 ignores it"; fi
 # With an ACL the group bits show the mask, so check the ACL itself.
 ck "box socket owned by airlock-envoy; ACL: owner rw, client rw, group/other none" \
