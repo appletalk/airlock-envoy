@@ -12,6 +12,9 @@ StartLimitIntervalSec=0
 Type=simple
 User=airlock-envoy
 Group=airlock-envoy
+# Pass credentials (airlock-envoy-cred add) live in a tmpfs: after a reboot, make each one's
+# file, locked, before Envoy reads it. A no-op without pass credentials.
+ExecStartPre=-+/usr/local/sbin/airlock-envoy-cred boot
 # Rendered from /etc/airlock-envoy/site.conf by airlock-envoy-apply.
 ExecStart=/usr/local/bin/envoy -c /etc/airlock-envoy/envoy.yaml --disable-hot-restart --file-flush-interval-msec 1000 --log-level warn
 # Ready only once all of Envoy's sockets (every listener's, and admin) exist, so a start or

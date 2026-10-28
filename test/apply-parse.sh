@@ -467,6 +467,28 @@ printf 'http g.example rules git credential c-g\nc http://g.example\nclient c u\
 if [ -z "$pfail" ]; then echo "ok   protect: a push-guard per pack route, fetch apart, a check filter per definition before the credential, the check listener and reply mapping only where used"
 else echo "FAIL protect rendering:$pfail"; fails=$((fails+1)); fi
 
+# Pass credentials (airlock-envoy-cred add): read from the tmpfs, the locked check after the
+# injectors, upstream's x-airlock-envoy removed; only on listeners that use one. A copy of
+# apply with its pass directory here (which credentials are pass ones is root's to read).
+mkdir -p "$work/pass" "$work/pcopy"
+sed "s#^PASS_DIR=/etc/airlock-envoy/pass#PASS_DIR=$work/pass#" "$apply" > "$work/pcopy/apply"; chmod +x "$work/pcopy/apply"
+cp install/github-graphql.lua install/git-protect.lua "$work/pcopy/"
+: > "$work/pass/c-pass"
+printf 'http api.example.com rules github-api credential c-pass repos o/a\nhttp g.example.com rules git credential c-file\nhttp k.example.com rules git credential c-k\nb http://api.example.com http://g.example.com\nc http://k.example.com\nclient b t\nclient c u\n' > "$work/site"
+r="$("$work/pcopy/apply" --render "$work/site")"
+cfail=""
+grep -q 'path: "/run/airlock-envoy-cred/secrets/c-pass.yaml", watched_directory: { path: "/run/airlock-envoy-cred/secrets" }' <<< "$r" || cfail+=" pass-path"
+grep -q 'path: "/etc/airlock-envoy/credentials/c-file.yaml", watched_directory: { path: "/etc/airlock-envoy/credentials" }' <<< "$r" || cfail+=" file-path"
+lb="$(sed -n '/^  - name: "b"$/,/^  - name: "c"$/p' <<< "$r")"; lc="$(sed -n '/^  - name: "c"$/,/^  - name: /p' <<< "$r" | sed '$d')"
+fl="$(grep -o '^          - name: "*[a-z0-9.-]*' <<< "$lb" | sed 's/.*name: "*//' | tr '\n' ' ')"
+[[ "$fl" == *"inject-c-pass inject-c-file credential-locked envoy.filters.http.router"* ]] || cfail+=" order($fl)"
+[ "$(grep -c 'response_headers_to_remove: \[x-airlock-envoy\]' <<< "$lb")" = 2 ] || cfail+=" strip-on-b"
+grep -q 'credential-locked\|x-airlock-envoy' <<< "$lc" && cfail+=" listener-c-touched"
+grep -q 'a:sub(1, 21) == "airlock-envoy-locked "' <<< "$lb" || cfail+=" check"
+[ "$("$apply" --render "$work/site" | grep -c '/run/airlock-envoy-cred')" = 0 ] || cfail+=" no-pass-dir-renders-file"
+if [ -z "$cfail" ]; then echo "ok   pass credentials: read from the tmpfs, the locked check after the injectors, upstream's marker removed, only where used"
+else echo "FAIL pass credential rendering:$cfail"; fails=$((fails+1)); fi
+
 # The render stops if a further definition would refuse other paths than the first (it couldn't
 # stand for it): a copy whose parser lets git and github-api share a host.
 # shellcheck disable=SC2016  # $1 and $2 are the script's text, not this shell's

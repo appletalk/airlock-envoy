@@ -55,10 +55,12 @@ protect() {  # the push check of protected branches: its parser under LuaJIT, th
   run apply-parse test/apply-parse.sh
   run graphql graphql
   run protect protect
+  run cred-backends test/cred-backends.sh
+  run cred-e2e test/cred-e2e.sh
   with_envoy t2 test/t2.conf test/t2-checks.sh
   with_envoy site-checks test/site.conf test/site-checks.sh
 } &
-order=(shellcheck private-names private-names-check apply-parse graphql protect t2 site-checks "${order[@]}")
+order=(shellcheck private-names private-names-check apply-parse graphql protect cred-backends cred-e2e t2 site-checks "${order[@]}")
 wait
 failed=0
 for name in "${order[@]}"; do

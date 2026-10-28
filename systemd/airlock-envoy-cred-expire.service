@@ -1,0 +1,31 @@
+[Unit]
+Description=Lock the airlock Envoy pass credentials at the unlock's deadline
+Documentation=https://github.com/appletalk/airlock-envoy
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/airlock-envoy-cred expire
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+ProtectSystem=strict
+ReadWritePaths=/run/airlock-envoy-cred
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

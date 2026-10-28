@@ -482,6 +482,37 @@ ck "plain HTTP: a new credential (basic format) is used without a restart" '[ "$
 x airlock-envoy-cred revoke t-cred >/dev/null
 r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(httpget "$E" http://httpbin.org/anything/z | sed -n 's/.*"Authorization": "\([^"]*\)".*/\1/p')"; [ "$r" = airlock-envoy-revoked ] && break; sleep 0.3; done
 ck "plain HTTP: revoke replaces it with a value that grants nothing: got $r" '[ "$r" = airlock-envoy-revoked ]'
+# Pass credentials under the real units: locked at apply (made by the boot step), answered 423
+# by Envoy itself, unlocked by receive (what unlock hands root through sudo) with the expiry
+# timer started, locked again by the expiry service under its sandbox, locked after a reboot.
+ck "pass: the expiry units are installed, the timer not enabled (unlock starts it)" \
+   'x test -f /etc/systemd/system/airlock-envoy-cred-expire.service && [ "$(x systemctl is-enabled airlock-envoy-cred-expire.timer 2>/dev/null)" != enabled ] && [ "$(x systemctl is-active airlock-envoy-cred-expire.timer)" != active ]'
+x airlock-envoy-cred add t-pass --pass work/t-pass >/dev/null
+site "http httpbin.org rules any credential t-pass" "extra @anthropic example.com:443 http://httpbin.org" "client extra client"
+x airlock-envoy-apply >/dev/null
+r="$(httpget "$E" http://httpbin.org/anything/p)"
+ck "pass: locked, Envoy answers 423 itself: got ${r:0:70}" '[[ "$r" == *"credential t-pass is locked on this host"* ]]'
+x sh -c 'printf "t-pass PASS-SECRET-1\n" | airlock-envoy-cred receive' >/dev/null
+r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(httpget "$E" http://httpbin.org/anything/q | sed -n 's/.*"Authorization": "\([^"]*\)".*/\1/p')"; [ "$r" = "Bearer PASS-SECRET-1" ] && break; sleep 0.3; done
+ck "pass: unlocked, the token used without a restart, the expiry timer running: got $r" \
+   '[ "$r" = "Bearer PASS-SECRET-1" ] && [ "$(x systemctl is-active airlock-envoy-cred-expire.timer)" = active ]'
+ck "pass: the secret only in the tmpfs (root:airlock-envoy 0640), not in /etc or the log" \
+   '[ "$(x stat -c %U:%G:%a /run/airlock-envoy-cred/secrets/t-pass.yaml)" = root:airlock-envoy:640 ] && ! x grep -rq PASS-SECRET-1 /etc/airlock-envoy /var/log/airlock-envoy'
+# The deadline passed: the timer fires by itself (within 30 s of the unlock, then every 30 s)
+# and the expiry service locks under its sandbox.
+x sed -i 's/^deadline .*/deadline 1/' /run/airlock-envoy-cred/state
+x sh -c 'for _ in $(seq 50); do grep -q "^locked" /run/airlock-envoy-cred/state && exit 0; sleep 1; done; exit 1' || true
+r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(httpget "$E" http://httpbin.org/anything/s)"; [[ "$r" == *"is locked"* ]] && break; sleep 0.3; done
+ck "pass: the timer fires by itself, the expiry service locks at the deadline (its sandbox lets it) and stops the timer: got ${r:0:50}" \
+   '[[ "$r" == *"credential t-pass is locked"* ]] && [ "$(x systemctl is-active airlock-envoy-cred-expire.timer)" != active ] && x grep -q "^locked" /run/airlock-envoy-cred/state'
+x sh -c 'printf "t-pass PASS-SECRET-2\n" | airlock-envoy-cred receive' >/dev/null
+x rm -rf /run/airlock-envoy-cred
+x systemctl restart airlock-envoy
+r="$(httpget "$E" http://httpbin.org/anything/t)"
+ck "pass: after a reboot (its tmpfs gone) Envoy starts, the credential locked, the timer stopped: got ${r:0:50}" \
+   '[ "$(x systemctl is-active airlock-envoy)" = active ] && [[ "$r" == *"credential t-pass is locked"* ]] && [ "$(x systemctl is-active airlock-envoy-cred-expire.timer)" != active ]'
+x airlock-envoy-cred lock >/dev/null
+x rm -f /etc/airlock-envoy/pass/t-pass
 # The GraphQL check under the real unit (MemoryDenyWriteExecute): LuaJIT must not try to
 # compile, or its panic takes the whole Envoy down.
 printf 'INSTALL-TEST-SECRET-3' | x airlock-envoy-cred set t-cred >/dev/null

@@ -1,7 +1,7 @@
 # Testing
 
 Every suite runs as your own user with rootless podman, except `apply-parse.sh`, shellcheck,
-the GraphQL check and the two `protect` suites, which need no podman.
+the GraphQL check, the two `protect` suites and the two credential suites, which need no podman.
 
 | Command | What |
 |---|---|
@@ -12,6 +12,8 @@ the GraphQL check and the two `protect` suites, which need no podman.
 | `luajit test/graphql-check.lua` | The GitHub GraphQL write check (skipped without luajit) |
 | `luajit test/git-protect-check.lua` | The push check of `protect`: bodies, replies, the handle |
 | `test/protect-e2e.sh` | `protect` end to end, no podman or root: a rendered config in a real Envoy, a TLS git upstream (git-http-backend), real git pushes (needs envoy, git, python3, openssl, socat) |
+| `test/cred-backends.sh` | Pass credentials, no root or podman: unlock, lock, expiry on both clocks, migrate, all-or-nothing, who may run what |
+| `test/cred-e2e.sh` | Pass credentials in a real Envoy: 423 while locked, the token after unlock and the 423 after lock without a restart (needs envoy, python3, openssl, curl) |
 | `test/run-envoy.sh test/site.conf` then `test/site-checks.sh` | Site listeners, each reaching exactly its own list |
 
 ## All the tests at once

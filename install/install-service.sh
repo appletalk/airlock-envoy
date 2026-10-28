@@ -96,8 +96,10 @@ install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/credentials
 install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/ca
 
 # airlock-envoy-web is enabled and started by airlock-envoy-apply, only while a listener lists web.
+# airlock-envoy-cred-expire.timer is started by airlock-envoy-cred unlock, and stopped when it locks.
 for u in airlock-envoy.service airlock-envoy-web.service airlock-envoy-proxy@.socket airlock-envoy-proxy@.service \
-         airlock-envoy-logrotate.service airlock-envoy-logrotate.timer; do
+         airlock-envoy-logrotate.service airlock-envoy-logrotate.timer \
+         airlock-envoy-cred-expire.service airlock-envoy-cred-expire.timer; do
   install -m 0644 "$repo/systemd/$u" "/etc/systemd/system/$u"
 done
 # Earlier versions' one global client: each listener's own drop-in (airlock-envoy-apply) has

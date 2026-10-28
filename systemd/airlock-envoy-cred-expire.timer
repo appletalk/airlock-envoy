@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the airlock Envoy unlock's deadline every 30 seconds
+Documentation=https://github.com/appletalk/airlock-envoy
+
+# Started by airlock-envoy-cred unlock and stopped when it locks: no [Install], so it never
+# runs at boot (a reboot locks, the secrets being in a tmpfs). The deadline is checked on the
+# wall and the boot clock; after a suspend this fires within 30 s of waking.
+[Timer]
+OnActiveSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s

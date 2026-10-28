@@ -318,6 +318,26 @@ sudo airlock-envoy-cred ca cluster < ca.pem
 
 Apply refuses a listener whose credential isn't set.
 
+**Pass credentials (unlocked for the working day).** A credential can instead live in the
+operator's `pass` store, so it is not on disk in usable form and Envoy holds it only while
+unlocked:
+
+```
+sudo airlock-envoy-cred add github-api --pass work/github-token   # locked until unlocked
+airlock-envoy-cred migrate github-git --pass work/github-git      # a file credential -> pass (applies)
+airlock-envoy-cred unlock [--for 2h]   # as yourself, on the host: pass show, then sudo
+airlock-envoy-cred lock                # every pass credential, now
+airlock-envoy-cred status
+```
+
+`unlock` reads only the entries of the pass credentials the applied config uses, and hands them
+to Envoy (a tmpfs, root:airlock-envoy 0640) until `max_lifetime` (default 10h, at most 24h),
+the next `expire_at` (both in `/etc/airlock-envoy/unlock.conf`) or `--for`, whichever is first.
+Locked, a request using one gets **423 Locked** from Envoy itself (`x-airlock-envoy: locked`,
+"credential <name> is locked on this host: ... do not retry"); nothing goes upstream. A box can
+never unlock: see [docs/unlock.md](docs/unlock.md) for the boundary, the expiry and the limits.
+File credentials work as before; the backend is per credential.
+
 **Credentials are never logged.** Envoy's access log sees request headers *after* the credential
 is added, so no rendered log format names a request header (a test checks this), and Envoy runs
 at log level `warn`. The admin config dump shows secrets as `[redacted]`.

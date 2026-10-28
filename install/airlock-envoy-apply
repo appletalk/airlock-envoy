@@ -849,6 +849,17 @@ preset_rules_scoped() {  # preset_rules_scoped <rules> <repos> <read-only repos>
   done
 }
 CRED_DIR=/etc/airlock-envoy/credentials
+# A pass credential (airlock-envoy-cred add or migrate) is read from a tmpfs while unlocked;
+# locked, the file there holds "airlock-envoy-locked <name>". Which credentials are pass ones is
+# root's to read: a render as another user takes every credential as a file one.
+PASS_DIR=/etc/airlock-envoy/pass
+PASS_SEC=/run/airlock-envoy-cred/secrets
+cred_dir() { if [ -f "$PASS_DIR/$1" ]; then printf '%s' "$PASS_SEC"; else printf '%s' "$CRED_DIR"; fi; }
+listener_has_pass() {  # some credential listener $1 uses is a pass one
+  local d
+  for d in ${HDESTS[$1]:-}; do [ -z "${HTTP_CRED[$d]}" ] || [ ! -f "$PASS_DIR/${HTTP_CRED[$d]}" ] || return 0; done
+  return 1
+}
 CA_DIR=/etc/airlock-envoy/ca
 # git reads a push's reply only from a 200 of type application/x-git-receive-pack-result (a 403
 # shows as "HTTP 403" alone). The push check refuses a protected branch with a 403 whose body is
@@ -875,6 +886,12 @@ protect_local_reply() {
 EOF
     return
   done
+}
+cred_tool() {  # airlock-envoy-cred: next to this script in a checkout, else where install put it
+  local f
+  f="$(dirname "$(readlink -f "$0")")/airlock-envoy-cred"
+  [ -x "$f" ] || f=/usr/local/sbin/airlock-envoy-cred
+  printf '%s' "$f"
 }
 any_protect() {  # some box listener has a protected definition
   local l d
@@ -968,6 +985,9 @@ http_vhost() {
   cat <<EOF
             - name: "http-$id"
               domains: ["$h", "$h:80"]
+EOF
+  ! listener_has_pass "$l" || echo '              response_headers_to_remove: [x-airlock-envoy]'
+  cat <<EOF
               routes:
 EOF
   # Forgejo reads a token from the query string or a form body before the Authorization header
@@ -1166,9 +1186,28 @@ EOF
                   header: Authorization
                   credential:
                     name: "$c"
-                    sds_config: { path_config_source: { path: "$CRED_DIR/$c.yaml", watched_directory: { path: "$CRED_DIR" } } }
+                    sds_config: { path_config_source: { path: "$(cred_dir "$c")/$c.yaml", watched_directory: { path: "$(cred_dir "$c")" } } }
 EOF
   done
+  # A locked pass credential: the injector added "airlock-envoy-locked <name>", which this
+  # answers with 423 (marked x-airlock-envoy: locked; upstream's own header of that name is
+  # removed from its responses) and never sends upstream.
+  listener_has_pass "$1" && cat <<'EOF'
+          - name: credential-locked
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                inline_string: |
+                  function envoy_on_request(h)
+                    local a = h:headers():get("authorization")
+                    if a and a:sub(1, 21) == "airlock-envoy-locked " then
+                      h:respond({ [":status"] = "423", ["content-type"] = "text/plain", ["x-airlock-envoy"] = "locked" },
+                        "airlock-envoy: credential " .. a:sub(22) .. " is locked on this host: stop, and ask the"
+                        .. " operator to unlock it on the host (airlock-envoy-cred unlock); do not retry\n")
+                    end
+                  end
+EOF
+  return 0
 }
 # One upstream per plain-HTTP host in use: TLS, the host's certificate checked against the
 # system CAs (or the host's own ca) and its name (or, for an address, that address).
@@ -1787,7 +1826,12 @@ trap 'rm -rf "$work"' EXIT
 if [ "$(id -u)" = 0 ]; then
   while IFS= read -r c; do
     [ -n "$c" ] || continue
-    [ -f "$CRED_DIR/$c.yaml" ] || die "credential $c is not set: sudo airlock-envoy-cred set $c (nothing was changed)"
+    if [ -f "$PASS_DIR/$c" ]; then
+      # A pass credential: locked until unlocked, its file in the tmpfs made if missing.
+      [ -f "$PASS_SEC/$c.yaml" ] || "$(cred_tool)" boot || die "could not prepare pass credential $c (nothing was changed)"
+    else
+      [ -f "$CRED_DIR/$c.yaml" ] || die "credential $c is not set: sudo airlock-envoy-cred set $c (nothing was changed)"
+    fi
   done < <(creds_used)
   while IFS= read -r c; do
     [ -n "$c" ] || continue
