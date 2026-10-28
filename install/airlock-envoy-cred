@@ -7,18 +7,22 @@
 # always usable) or pass (kept in the operator's pass store; Envoy has it only while unlocked,
 # in a tmpfs, until the unlock expires; locked, its requests get 423 from Envoy itself).
 #
-#   airlock-envoy-cred set <name> [--format bearer|token|raw|basic:<user>]
+#   airlock-envoy-cred set <name> [--format bearer|token|raw|basic:<user>] [--file]
 #       as root: a file credential. Read the secret from stdin (a prompt without echo on a
 #       terminal) and make the Authorization value: bearer "Bearer <s>" (the default), token
 #       "token <s>", raw "<s>", basic:<user> "Basic base64(<user>:<s>)". Envoy picks it up
-#       within a second, no restart.
+#       within a second, no restart. --file turns a pass credential into a file one (its format
+#       unless --format): the file is written, the config applied, and only then the pass
+#       credential forgotten and its tmpfs copy locked; an apply that fails changes nothing.
 #   airlock-envoy-cred add <name> --pass <entry> [--format ...]
 #       as root: a pass credential (the first line of the pass entry), locked until unlocked
 #   airlock-envoy-cred migrate <name> --pass <entry>
 #       as the operator, on the host: move a file credential to pass. Only once the entry gives
 #       the same value: the config is applied (Envoy reads it from the tmpfs, locked) and then
 #       the file is removed. Then unlock
-#   airlock-envoy-cred remove <name>   as root: lock a pass credential and forget it
+#   airlock-envoy-cred remove <name>   as root: lock a pass credential and forget it; or remove
+#                                     a GitHub App no applied line uses, once no token minted
+#                                     with it is left unrevoked (it runs a mint first)
 #   airlock-envoy-cred add-app <name> --app-id <n> --org <org>|--installation-id <n>
 #                    --key pass:<entry>|file [--api <https url>] [--ca <file>]   (or add-github-app)
 #       as root: a GitHub App, installed on <org> (its installation is looked up with the App's
@@ -470,7 +474,30 @@ case "$cmd" in
     echo "==> $name is a pass credential now ($entry), applied and locked. Next: airlock-envoy-cred unlock (as yourself)" ;;
   remove)
     [ $# = 1 ] || die "usage: airlock-envoy-cred remove <name>"
-    valid_name "$1"; is_pass "$1" || die "no pass credential $1"
+    valid_name "$1"
+    if is_app "$1"; then
+      ! apps_in_conf | grep -qxF -- "$1" || die "app $1 is in use: take its lines out of the site file and apply first (nothing was changed)"
+      # Its tokens are revoked with its definition: a run first sweeps what is still recorded
+      # (lines gone), then, under the run lock, the mint account says whether any is left.
+      systemctl start "$MINT_SVC" 2>/dev/null || true
+      mint_dirs
+      exec 7< "$MRUN/.lock"
+      flock -w 30 7 || die "a mint run holds its lock: try again (nothing was changed)"
+      ! apps_in_conf | grep -qxF -- "$1" || die "app $1 is in use: take its lines out of the site file and apply first (nothing was changed)"
+      rc=0; left=$(timeout 10 setpriv --reuid="$MINT_USER" --regid="$MINT_USER" --clear-groups --no-new-privs -- "$(mint_tool)" forget "$1" 7<&- 9>&- 2>/dev/null | head -c 32) || rc=$?
+      case "$rc:$left" in
+        0:0) ;;
+        1:[1-9]*) die "app $1: $left token(s) minted with it not revoked yet (GitHub unreachable? journalctl -u airlock-envoy-mint); the mint timer retries: remove it again later (nothing was changed)" ;;
+        *) die "app $1: the mint account could not say what is left to revoke (nothing was changed)" ;;
+      esac
+      k=$(app_field "$1" key)
+      rm -f "${APPS:?}/$1" "$APPS/$1.pem"
+      [ -L "$MKEYS" ] || rm -f "${MKEYS:?}/$1.pem"
+      exec 7<&-
+      echo "==> app $1 removed, nothing minted with it left unrevoked$([ "$k" != pass ] || echo " (its key stays in pass)")"
+      exit 0
+    fi
+    is_pass "$1" || die "no pass credential or App $1"
     write "$SEC" "$1" "$LOCKED $1" locked
     rm -f "$PASS_DIR/$1"
     echo "==> $1 locked and forgotten (its entry stays in pass). Take it out of the site file and apply" ;;
@@ -582,15 +609,22 @@ case "$cmd" in
       timeout 120 setpriv --reuid="$MINT_USER" --regid="$MINT_USER" --clear-groups --no-new-privs -- "$(mint_tool)" check 2>&1 7<&- 9>&- | sed 's/^/    /' || true
     fi ;;
   set)
-    [ $# -ge 1 ] || die "usage: airlock-envoy-cred set <name> [--format bearer|token|raw|basic:<user>]"
+    [ $# -ge 1 ] || die "usage: airlock-envoy-cred set <name> [--format bearer|token|raw|basic:<user>] [--file]"
     name=$1; shift; valid_name "$name"
-    ! is_pass "$name" || die "$name is a pass credential: its secret is the pass entry (airlock-envoy-cred unlock)"
-    ! is_app "$name" || die "$name is a GitHub App"
-    fmt=bearer
-    if [ $# -gt 0 ]; then
-      [ "$1" = --format ] && [ $# = 2 ] || die "unknown arguments: $* (want --format <format>)"
-      fmt=$2
+    ! is_app "$name" || die "$name is a GitHub App (airlock-envoy-cred remove $name, once no line uses it)"
+    fmt="" tofile=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --format) [ $# -ge 2 ] || die "--format needs a value"; fmt=$2; shift 2 ;;
+        --file) tofile=1; shift ;;
+        *) die "unknown arguments: $* (want --format <format>, --file)" ;;
+      esac
+    done
+    if is_pass "$name"; then
+      [ "$tofile" = 1 ] || die "$name is a pass credential: its secret is the pass entry (airlock-envoy-cred unlock). To make it a file credential instead (the secret then on disk, never locked): set $name --file, which applies"
+      [ -n "$fmt" ] || fmt=$(pass_field "$name" format)
     fi
+    [ -n "$fmt" ] || fmt=bearer
     if [ -t 0 ]; then read -rs -p "Secret for $name: " secret; echo >&2
     else secret="$(cat)"; secret=${secret%$'\n'}; fi
     [ -n "$secret" ] || die "empty secret"
@@ -609,8 +643,30 @@ case "$cmd" in
         value="Basic $(printf '%s:%s' "$user" "$secret" | base64 -w0)" ;;
       *) die "unknown format '$fmt' (bearer, token, raw, basic:<user>)" ;;
     esac
-    write "$DIR" "$name" "$value" "$fmt"
-    echo "==> $name set ($fmt): Envoy uses it from the next request"
+    if ! is_pass "$name"; then
+      write "$DIR" "$name" "$value" "$fmt"
+      echo "==> $name set ($fmt): Envoy uses it from the next request"
+      exit 0
+    fi
+    # Pass -> file, the reverse of migrate: the file first, then the apply (Envoy reads the file
+    # from then on), and only then the pass credential goes and its tmpfs copy is locked. Under
+    # the lock, taken once the secret is read, and released for the apply (Envoy's start runs
+    # boot, which takes it).
+    run_dirs; exec 9> "$RUN/.lock"; flock 9
+    is_pass "$name" || die "$name changed meanwhile: nothing was changed"
+    write "$DIR" "$name" "$value" "$fmt"; value="" secret=""
+    mv -f "$PASS_DIR/$name" "$PASS_DIR/.$name.set"
+    exec 9>&-
+    if ! cred_apply; then
+      exec 9> "$RUN/.lock"; flock 9
+      mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"; rm -f "$DIR/$name.yaml"
+      die "the apply failed: $name stays a pass credential; fix the apply and set it again (if the apply got as far as Envoy, apply again once it works)"
+    fi
+    exec 9> "$RUN/.lock"; flock 9
+    rm -f "$PASS_DIR/.$name.set"
+    write "$SEC" "$name" "$LOCKED $name" locked
+    { [ -f "$STATE" ] && grep -q '^unlocked' "$STATE"; } || write_state locked
+    echo "==> $name is a file credential now ($fmt), applied: Envoy uses it from the next request (its entry stays in pass)"
     ;;
   revoke)
     [ $# = 1 ] || die "usage: airlock-envoy-cred revoke <name>"

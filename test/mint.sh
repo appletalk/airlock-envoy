@@ -131,13 +131,19 @@ sed -i '/^token tok-[xy] \|^token bad /d' "$E/mint.conf"
 printf 'token tok-org app org-app owner example-org repos tools perms contents=read format token\n' >> "$E/mint.conf"
 mint run >/dev/null 2>&1
 n="$(grep -c '"/orgs/example-org/installation"' api.log)"
-[[ "$(val tok-org)" == "token ghs_"* ]] && [ "$n" = 1 ] && [ "$(cat "$R/installations/org-app")" = 678 ] && ok "an App by org: its installation looked up, the id kept" || fail "org lookup: $n, $(val tok-org)"
+[[ "$(val tok-org)" == "token ghs_"* ]] && [ "$n" = 1 ] && [ "$(cut -d' ' -f1 "$R/installations/org-app")" = 678 ] && ok "an App by org: its installation looked up, the id kept" || fail "org lookup: $n, $(val tok-org)"
 age; mint run >/dev/null 2>&1
 [ "$(grep -c '"/orgs/example-org/installation"' api.log)" = 1 ] && ok "...and not looked up again" || fail "org looked up again"
 printf 'kind github-app\napp_id 12345\norg other-org\napi https://127.0.0.1:%s\nkey file\nca %s\n' "$PORT" "$work/ca.pem" > "$E/apps/lost-app"; cp app.pem "$E/apps/lost-app.pem"
-printf 'token tok-lost app lost-app owner example-org repos tools perms contents=read format token\n' >> "$E/mint.conf"
-mint run >/dev/null 2>&1
-[ "$(val tok-lost)" = "airlock-envoy-unavailable lost-app" ] && ok "an org the App isn't installed on: unavailable" || fail "lost org: $(val tok-lost)"
+printf 'token tok-lost app lost-app owner other-org repos tools perms contents=read format token\n' >> "$E/mint.conf"
+# A cached id from the App's earlier definition (another org), and one from before the cache
+# named what it was looked up for: neither is used.
+printf '678 12345 example-org https://127.0.0.1:%s\n' "$PORT" > "$R/installations/lost-app"
+mint run >/dev/null 2>&1; v1="$(val tok-lost)"
+printf '678' > "$R/installations/lost-app"
+mint run >/dev/null 2>&1; v2="$(val tok-lost)"
+[ "$v1" = "airlock-envoy-unavailable lost-app" ] && [ "$v2" = "$v1" ] && [ "$(grep -c '"/orgs/other-org/installation"' api.log)" = 2 ] \
+  && ok "an org the App isn't installed on: unavailable, a cached id for another definition not used" || fail "lost org: $v1 / $v2"
 sed -i '/tok-lost/d' "$E/mint.conf"
 
 # A failed install of a new token (the tokens directory not writable): the working token stays,

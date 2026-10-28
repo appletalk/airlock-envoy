@@ -225,6 +225,20 @@ printf 'X\n' | root set basicc --format basic:x-access-token >/dev/null; printf 
 cred migrate basicc --pass work/basicc >/dev/null && [ "$(sed -n 's/^format //p' "$E/pass/basicc")" = basic:x-access-token ] \
   && ok "migrate: the format comes along (basic:<user>)" || fail "migrate basic"
 
+# set --file: pass -> file in one step, the reverse of migrate (the file first, then the apply).
+printf 'PASS-VALUE\n' > "$work/store/work/pc"; root add pc --pass work/pc --format token >/dev/null
+! printf 'X\n' | root set pc >/dev/null 2>&1 && [ -f "$E/pass/pc" ] && [ ! -f "$E/credentials/pc.yaml" ] \
+  && ok "set: a pass credential needs --file" || fail "set pc without --file"
+! printf 'NEW\n' | FAIL_APPLY=1 root set pc --file >/dev/null 2>&1 && [ -f "$E/pass/pc" ] && [ ! -f "$E/credentials/pc.yaml" ] && [ ! -e "$E/pass/.pc.set" ] \
+  && ok "set --file: an apply that fails leaves it a pass credential, no file" || fail "set --file with a failing apply"
+: > "$work/apply.log"
+out="$(printf 'NEW\n' | root set pc --file 2>&1)"
+[ ! -e "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "token NEW" ] \
+  && [ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && grep -q "pc.yaml" "$work/apply.log" && [[ "$out" == *"file credential now (token)"* ]] \
+  && ok "set --file: applied with the file in place, then the pass credential forgotten and locked; the format kept" || fail "set --file: $out / $(cat "$work/apply.log")"
+printf 'X\n' | root add pc2 --pass work/pc >/dev/null; printf 'NEW2\n' | root set pc2 --file --format raw >/dev/null
+[ "$(secret_of "$E/credentials/pc2.yaml")" = "NEW2" ] && ok "set --file --format: the format given wins" || fail "set --file --format"
+
 # boot: makes each missing file locked, leaves an existing one.
 rm -f "$R/secrets/kube.yaml"; uses gh kube; cred unlock >/dev/null; rm -f "$R/secrets/kube.yaml"
 root boot
@@ -359,6 +373,22 @@ root add-app a2 --app-id 1 --installation-id 2 --key pass:work/app-key >/dev/nul
   && ok "add-app with a pass key: the entry named, no key on disk" || fail "add-app pass"
 ! root add a2 --pass work/gh >/dev/null 2>&1 && ok "add: an App's name refused" || fail "add over an App"
 printf 'token tok-aaaaaaaaaaaa-rw app a2 repos tools perms contents=write format basic\n' > "$E/mint/mint.conf"
+# remove: an App no applied line uses, once nothing minted with it is left to revoke.
+! root remove a2 >/dev/null 2>&1 && [ -f "$E/mint/apps/a2" ] && ok "remove: an App in use refused" || fail "remove of an App in use"
+mkdir -p "$R/mint/minted" "$R/mint/installations"; printf 'a1 ghs_left' > "$R/mint/minted/tok-bbbbbbbbbbbb-rw"; printf '7 1  https://api.github.com\n' > "$R/mint/installations/a1"
+: > "$work/systemctl.log"
+out="$(root remove a1 2>&1)"
+[[ "$out" == *"1 token(s) minted with it not revoked yet"* ]] && [ -f "$E/mint/apps/a1" ] && [ -f "$E/mint/apps/a1.pem" ] && grep -q "start airlock-envoy-mint.service" "$work/systemctl.log" \
+  && ok "remove: an App with a token still to revoke refused, after a mint run" || fail "remove a1 with a record: $out"
+rm "$R/mint/minted/tok-bbbbbbbbbbbb-rw"; printf 'a1 ghs_check' > "$R/mint/minted/.check.a1"
+! root remove a1 >/dev/null 2>&1 && [ -f "$E/mint/apps/a1" ] && ok "remove: a check's token still recorded counts too" || fail "remove a1 with a check record"
+rm "$R/mint/minted/.check.a1"; : > "$work/setpriv.log"
+out="$(root remove a1 2>&1)"
+[ ! -e "$E/mint/apps/a1" ] && [ ! -e "$E/mint/apps/a1.pem" ] && [ ! -e "$R/mint/installations/a1" ] && [[ "$out" == *"app a1 removed"* ]] \
+  && grep -q -- "--reuid=airlock-envoy-mint .*airlock-envoy-mint forget a1" "$work/setpriv.log" \
+  && ok "remove: an App removed (key, definition, cached installation), asked of the mint account" || fail "remove a1: $out"
+root add-app a1 --app-id 1 --installation-id 2 --key file < "$work/app.pem" >/dev/null && ! printf 'X\n' | root set a1 >/dev/null 2>&1 \
+  && ok "add-app again after remove; set over an App refused" || fail "re-add after remove, or set over an App"
 uses gh
 [ "$(root entries)" = "gh work/gh token
 a2 work/app-key pem" ] && ok "entries: the App's pass key as a pem" || fail "entries with an App: $(root entries)"
@@ -417,7 +447,7 @@ root expire; grep -q '^locked' "$R/state" && ok "...which, with the lock, finish
 echo 1000000 > "$work/clock/now"
 
 # The root-only verbs refuse the operator.
-for v in "receive" "receive-migrate x y" "expire" "boot" "add x --pass a/b" "set x" "remove x" "add-app x --app-id 1 --installation-id 1 --key file"; do
+for v in "receive" "receive-migrate x y" "expire" "boot" "add x --pass a/b" "set x" "set x --file" "remove x" "add-app x --app-id 1 --installation-id 1 --key file"; do
   # shellcheck disable=SC2086
   ! echo | cred $v >/dev/null 2>&1 || fail "$v ran as the operator"
 done; ok "receive, expire, boot, add, set: root only"

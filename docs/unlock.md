@@ -54,7 +54,8 @@ is given.
 - **The deadline first.** The deadline is written and the expiry timer started before any
   secret is installed; if the deadline can't be worked out or the timer can't start, nothing is
   unlocked.
-- **One verb at a time.** receive, lock, the expiry, boot, add, remove and migrate take a lock
+- **One verb at a time.** receive (and receive-migrate), lock, the expiry, boot, add, add-app,
+  remove, migrate and `set --file` take a lock
   (`/run/airlock-envoy-cred/.lock`), so a lock or an expiry can't interleave with an unlock and
   leave secrets without their timer. (The expiry waits a minute for it; if it can't have it, it
   still locks every secret, and leaves the state and the timer to the next expiry. Unlock releases
@@ -96,6 +97,12 @@ neither, and none where Envoy keeps the old value with no expiry. If the apply f
 a file credential (if the apply got as far as Envoy, the config reads the locked tmpfs file:
 apply again once the apply works). Then unlock. `remove <name>` (as root) locks a pass credential and forgets
 it; take it out of the site file and apply.
+
+`set <name> --file` (as root) goes the other way, a pass credential back to a file one: it reads
+the secret as `set` does (the pass credential's format unless `--format`), writes the file,
+applies (Envoy reads the file from then on), and only then forgets the pass credential and locks
+its tmpfs copy. If the apply fails, it stays a pass credential and the file goes. Without
+`--file`, `set` refuses a pass credential, since the secret then lives on disk, never locked.
 
 ## Expiry
 
@@ -164,7 +171,8 @@ git shows the body as `remote:` lines on a fetch; on a push it may show only
   (default, `--for`, `max_lifetime`, `expire_at` including the 18:00 and 19:00 cases and a DST
   gap), the deadline and timer before any secret, an expiry during an unlock, the verb lock, the
   expiry on each clock and on a damaged state, all-or-nothing receive, migrate (applied before
-  the file goes), remove, boot (a reboot, Envoy restarted within and past an unlock), status,
+  the file goes), `set --file` (the reverse, applied before the pass credential goes; a failed
+  apply changing nothing), remove, boot (a reboot, Envoy restarted within and past an unlock), status,
   and that each root-only verb refuses the operator and `unlock`/`migrate` refuse root.
 - `test/cred-e2e.sh` (no root, no podman): a rendered config in a real Envoy: 423 while locked
   with nothing upstream, the token used after unlock and the 423 after lock without a restart,

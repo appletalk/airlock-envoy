@@ -29,6 +29,12 @@ On the host, as its operator (not in a box):
 5. A pass key: `airlock-envoy-cred unlock` (as yourself, in a host shell), daily. `airlock-envoy-cred
    lock` locks it early; `sudo airlock-envoy-cred status` shows each App, its tokens, and the check.
 
+To take an App away: take its lines out of the site file, apply (its tokens are revoked), then
+`sudo airlock-envoy-cred remove <name>`. That refuses an App a line still uses, runs a mint first,
+and removes the App (its definition, a file key, an unlocked key, the cached installation) only if
+no token minted with it is left unrevoked. Otherwise it says how many and changes nothing; the
+timer keeps retrying, so run it again later. A pass key's entry stays in pass.
+
 In a box, a request on such a line just works (Envoy adds the token). **423 Locked** means the key
 is locked: stop and ask the operator to unlock. **503** naming the App means minting failed: tell the
 operator (`journalctl -u airlock-envoy-mint`). Neither clears by retrying.
@@ -167,9 +173,11 @@ revokes them at GitHub.
 ## Limits
 
 - **Revoked with the App as it is now.** A record is revoked against its App's current
-  definition: an App re-added with another `--api` sends older revokes to the new server. A
-  record whose App was removed is kept (logged each run) and can't be revoked; remove it by hand
-  once its hour is over (`/run/airlock-envoy-mint/minted/`).
+  definition: an App re-added (`add-app` over the same name) with another `--api` sends older
+  revokes to the new server. `remove` won't remove an App with a record left, but an App whose
+  files were deleted by hand leaves its records unrevokable (logged each run); remove those by hand
+  once their hour is over (`/run/airlock-envoy-mint/minted/`). An installation looked up by `--org`
+  is cached with the App id, org and API it was looked up for, so a re-added App looks it up again.
 - **Revocation is best effort.** A token whose revoke failed (GitHub unreachable at the time)
   stays valid at GitHub for up to its hour; Envoy stops using it at the lock regardless, and the
   next run retries the revoke while it still has the token recorded.
@@ -192,7 +200,9 @@ revokes them at GitHub.
   lock revoking both, a file-key App untouched by the lock.
 - `test/apply-parse.sh`: the refusals, `mint.conf`, which token each route injects.
 - `test/cred-backends.sh`: `add-app`'s checks, unlock reading the key whole, a key openssl can't
-  read, an unlock whose mint gives no token locking everything.
+  read, an unlock whose mint gives no token locking everything, `remove` refusing an App in use or
+  with a token left to revoke, then removing it.
 - `test/install-test.sh` (podman): the account and units under systemd, minting under the
   unit's sandbox against the stand-in, a pass key unlocked and locked with its token revoked, the
-  timer enabled and disabled by apply.
+  timer enabled and disabled by apply, `remove` refused while a line uses the App and then
+  removing both Apps.

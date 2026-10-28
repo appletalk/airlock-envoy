@@ -21,6 +21,9 @@
 #   airlock-envoy-mint mark <name> locked|unavailable <app>
 #                              (root runs this as the mint account, never writing here itself)
 #                              set a token's file to the locked or unavailable value
+#   airlock-envoy-mint forget <app>   (root, before removing an App) exit 1 with the count if a
+#                              token minted with it is still recorded; else drop its cached
+#                              installation id
 #
 # mint.conf (written by airlock-envoy-apply from the site file), a line per token:
 #   token <name> app <app> owner <owner> repos <repo>[,<repo>...] perms <permission>=<read|write>[,...] format basic|token
@@ -115,18 +118,23 @@ status_of() { tail -n 1 <<< "$1"; }
 body_of() { sed '$d' <<< "$1"; }
 
 # The App's installation id: from its file, or (an org alone) looked up with the App's JWT and
-# kept in /run.
+# kept in /run with what it was looked up for (an App re-added with another org, App id or API
+# looks it up again).
 inst_id() {  # inst_id <app>
-  local id org out
+  local id org out for cid cfor
   id=$(field "$1" installation_id)
   if [ -n "$id" ]; then printf '%s' "$id"; return; fi
-  if [ -f "$INST/$1" ]; then id=$(cat "$INST/$1"); [[ "$id" =~ ^[1-9][0-9]{0,19}$ ]] && { printf '%s' "$id"; return; }; fi
   org=$(field "$1" org)
+  for="$(field "$1" app_id) $org $(field "$1" api)"
+  if [ -f "$INST/$1" ]; then
+    read -r cid cfor < "$INST/$1" || true
+    [[ "${cid:-}" =~ ^[1-9][0-9]{0,19}$ ]] && [ "${cfor:-}" = "$for" ] && { printf '%s' "$cid"; return; }
+  fi
   [[ "$org" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,38})$ ]] || { log "app $1: no installation_id and no org"; return 1; }
   out=$(api "$1" GET "/orgs/$org/installation" "Bearer $(jwt "$1")") || { log "app $1: the API could not be reached"; return 1; }
   [ "$(status_of "$out")" = 200 ] || { log "app $1: no installation on $org (HTTP $(status_of "$out"))"; return 1; }
   id=$(body_of "$out" | json_id) || { log "app $1: no id in GitHub's answer"; return 1; }
-  { printf '%s' "$id" > "$INST/.$1.new" && mv -f "$INST/.$1.new" "$INST/$1"; } || log "app $1: the installation id was not kept"
+  { printf '%s %s\n' "$id" "$for" > "$INST/.$1.new" && mv -f "$INST/.$1.new" "$INST/$1"; } || log "app $1: the installation id was not kept"
   printf '%s' "$id"
 }
 
@@ -249,6 +257,22 @@ case "$cmd" in
     [ $# = 4 ] && [[ "$2" =~ ^[a-z][a-z0-9-]{0,62}$ ]] && [[ "$3" =~ ^(locked|unavailable)$ ]] && [[ "$4" =~ ^[a-z][a-z0-9-]{0,62}$ ]] \
       || die "usage: airlock-envoy-mint mark <name> locked|unavailable <app>"
     write "$2" "airlock-envoy-$3 $4" "$3" || die "could not mark $2" ;;
+  forget)
+    # For root, before it removes an App (holding the run lock): refused (exit 1, the count) while
+    # a token minted with it is still recorded, since without the App it could never be revoked;
+    # else its cached installation id goes.
+    [ $# = 2 ] && [[ "$2" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "usage: airlock-envoy-mint forget <app>"
+    left=0
+    shopt -s nullglob dotglob
+    for f in "$MINTED"/*; do
+      [ -f "$f" ] && [ ! -L "$f" ] || continue
+      a=""; read -r a _ < "$f" || true
+      [ "$a" != "$2" ] || left=$((left + 1))
+    done
+    shopt -u nullglob dotglob
+    [ "$left" = 0 ] || { echo "$left"; exit 1; }
+    rm -f "${INST:?}/${2:?}" "$INST/.$2.new"
+    echo 0 ;;
   run)
     # One run at a time (the timer, an apply, an unlock and Envoy's start may each start one, and
     # root's lock waits for a run): two would each mint, and revoke the other's fresh token.

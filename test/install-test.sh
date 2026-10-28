@@ -629,17 +629,22 @@ x sh -c 'printf "t-papp %s\n" "$(base64 -w0 < /root/k/app.pem)" | airlock-envoy-
 r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(kreq "http://$KIP/repos/example-org/p")"; [ "$(tail -1 <<< "$r")" = 200 ] && break; sleep 0.3; done
 ck "mint: unlocked: the key root's, readable by the mint account only (0440), the installation found by org, minted under the sandbox, live: got $(tail -1 <<< "$r")" \
    '[ "$(tail -1 <<< "$r")" = 200 ] && [[ "$r" == *"\"live\": true"* ]] && [ "$(x stat -c %U:%G:%a /run/airlock-envoy-mint/keys/t-papp.pem)" = root:airlock-envoy-mint:440 ] \
-    && [ "$(x cat /run/airlock-envoy-mint/installations/t-papp)" = 678 ]'
+    && [ "$(x cut -d" " -f1 /run/airlock-envoy-mint/installations/t-papp)" = 678 ]'
 x airlock-envoy-cred lock >/dev/null
 r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(kreq "http://$KIP/repos/example-org/p")"; [ "$(tail -1 <<< "$r")" = 423 ] && break; sleep 0.3; done
 x sh -c 'for _ in $(seq 50); do grep -q revoked /root/k/api.log && exit 0; sleep 0.2; done; exit 1' || true
 ck "mint: locked again: 423, the key gone, its token revoked at the API" \
    '[ "$(tail -1 <<< "$r")" = 423 ] && ! x test -e /run/airlock-envoy-mint/keys/t-papp.pem && x grep -q "\"revoked\"" /root/k/api.log'
+ck "mint: remove refuses an App a line uses" '! x airlock-envoy-cred remove t-app >/dev/null 2>&1 && x test -f /etc/airlock-envoy-mint/apps/t-app'
 site "extra @anthropic example.com:443" "client extra client"
 x airlock-envoy-apply >/dev/null
 ck "plain HTTP dropped: a running socket's manifest is updated by the apply (no hosts)" 'x test -f "$EM" && ! x grep -qv "^#" "$EM"'
 ck "mint: no line uses an App any more: its tokens revoked, the timer disabled, mint.conf gone" \
    '[ "$(x systemctl is-enabled airlock-envoy-mint.timer 2>/dev/null)" != enabled ] && ! x test -e /etc/airlock-envoy-mint/mint.conf && [ -z "$(x ls -A /run/airlock-envoy-mint/minted)" ]'
+ck "mint: remove, no line using them and nothing left to revoke: both Apps gone (definition, key, cached installation)" \
+   'x airlock-envoy-cred remove t-app >/dev/null && x airlock-envoy-cred remove t-papp >/dev/null \
+    && ! x test -e /etc/airlock-envoy-mint/apps/t-app && ! x test -e /etc/airlock-envoy-mint/apps/t-app.pem && ! x test -e /etc/airlock-envoy-mint/apps/t-papp \
+    && ! x test -e /run/airlock-envoy-mint/installations/t-papp'
 x systemctl stop t-gh-app 2>/dev/null || true
 
 echo "== $distro: per-user sockets"
