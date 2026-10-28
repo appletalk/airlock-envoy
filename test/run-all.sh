@@ -1,7 +1,8 @@
 #!/bin/bash
 # Every test, as fast as this machine allows: the install test on each distribution at once,
-# and alongside them shellcheck, the site-details checks, the parser, t2 and the site checks
-# (in turn: they share one test Envoy).
+# and alongside them, one after another, shellcheck, the site-details checks, the parser, the
+# GraphQL and protect checks, the credential and App suites, t2 and the site checks (these two
+# share one test Envoy).
 # Prints each suite's result and time; exits non-zero if any failed. Logs stay in a temp dir.
 # Usage: test/run-all.sh [distro...]     default: arch debian ubuntu-26.04
 #   OLD_REPO=<earlier checkout> and AIRLOCK_REPO=<claude-airlock checkout> reach install-test.sh.

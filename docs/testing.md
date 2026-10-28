@@ -1,7 +1,8 @@
 # Testing
 
 Every suite runs as your own user with rootless podman, except `apply-parse.sh`, shellcheck,
-the GraphQL check, the two `protect` suites and the credential and App suites, which need no podman.
+the site-details checks, the GraphQL check, the two `protect` suites and the credential and App
+suites, which need no podman.
 
 | Command | What |
 |---|---|
@@ -9,10 +10,12 @@ the GraphQL check, the two `protect` suites and the credential and App suites, w
 | `test/install-test.sh <distro> [envoy version]` | The whole install in a systemd-booted container |
 | `test/lint.sh` | shellcheck over every shell script (`SHELLCHECK=<path>` if not on `PATH`) |
 | `test/apply-parse.sh` | The site file parser, no Envoy needed |
+| `scripts/private-names-check --tree HEAD` | No site details in the tracked files, against your private pattern list (see the README's Tests) |
+| `test/private-names-check-test.sh` | The site-details checker itself, with a stand-in list |
 | `test/run-envoy.sh test/t2.conf` then `test/t2-checks.sh` | The CONNECT tunnel, from a box-shaped client |
 | `luajit test/graphql-check.lua` | The GitHub GraphQL write check (skipped without luajit) |
 | `luajit test/git-protect-check.lua` | The push check of `protect`: bodies, replies, the handle |
-| `test/protect-e2e.sh` | `protect` end to end, no podman or root: a rendered config in a real Envoy, a TLS git upstream (git-http-backend), real git pushes (needs envoy, git, python3, openssl, socat) |
+| `test/protect-e2e.sh` | `protect` end to end, no podman or root: a rendered config in a real Envoy, a TLS git upstream (git-http-backend), real git pushes (needs envoy, git, python3, openssl, socat; luajit for the ref names against git) |
 | `test/cred-backends.sh` | Pass credentials, no root or podman: unlock, lock, expiry on both clocks, migrate, all-or-nothing, who may run what |
 | `test/cred-e2e.sh` | Pass credentials in a real Envoy: 423 while locked, the token after unlock and the 423 after lock without a restart (needs envoy, python3, openssl, curl) |
 | `test/mint.sh` | GitHub App minting against a stand-in App API (`test/fake-github-app.py`: TLS, checks each JWT's RS256 signature with the App's key): each line's repos and permissions, renewal, revocation, locked and refused keys (needs python3, openssl, curl) |
@@ -28,8 +31,10 @@ test/run-all.sh [distro...]
 Runs the install test on Arch, Debian 13 and Ubuntu 26.04 (the default; name others to change
 it) in parallel. Alongside them it runs shellcheck, the site-details checks
 (`scripts/private-names-check --tree HEAD`, skipped without a private pattern list, and the
-checker's own tests, `test/private-names-check-test.sh`), the parser, the GraphQL check, t2
-and the site checks, then prints each suite's result and time. About 20 s in all on a
+checker's own tests, `test/private-names-check-test.sh`), the parser, the GraphQL check, the
+`protect` checks, the pass credential suites (`cred-backends`, `cred-e2e`), the App suites
+(`mint`, `mint-e2e`), t2 and the site checks, then prints each suite's result and time. The
+suites besides the install tests run one after another; about two minutes in all on a
 20-thread workstation.
 
 - `OLD_REPO` and `AIRLOCK_REPO` pass through to the install test.
@@ -87,13 +92,26 @@ Plain `ubuntu` is 24.04. It runs the whole install in a systemd-booted container
   nothing changed;
 - a listener given to another user moves its socket there.
 
+**Also, with the real units:**
+
+- log rotation: the timer, forced rotations past systemd's start limit, retention by age only;
+- the kill switch, a failed `--start`, and recovery from crashes (Envoy and the relay restarted,
+  a box connection starting both);
+- web: its Envoy, its kernel filter, and configs it won't start with rolled back;
+- plain HTTP with a credential: the helper, apply's checks, the injection, no secret in sight;
+- pass credentials: locked at apply, 423, unlock, the expiry timer firing, a reboot starting locked;
+- the GraphQL check under `MemoryDenyWriteExecute`;
+- `kubernetes-read` against a stand-in API server (TLS, the test's own CA);
+- GitHub App minting under the mint unit's sandbox against a stand-in API (see
+  [github-app.md](github-app.md#tests));
+- refused clients: inside another user's subordinate uids (hex too), above `UID_MAX`, a deleted user.
+
 **Upgrade**, with `OLD_REPO=<earlier checkout>`: it installs that first, then checks that a site
 file without client lines is refused before anything changes, and that the old flat sockets go.
 
 `install-envoy.sh` runs in the test image's build, so the download repeats only when the script,
 the release key or the version changes. The test runs inside one `podman unshare` and enters the
-container with `nsenter` (about 2 ms a command, against about 160 ms for `podman exec`). About
-20 s a distribution.
+container with `nsenter` (about 2 ms a command, against about 160 ms for `podman exec`).
 
 ## The spike harness
 

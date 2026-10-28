@@ -40,8 +40,19 @@ systemd's sandboxing:
 - read-only system, no home, private `/tmp` and devices;
 - a syscall allowlist (`@system-service`; the Envoy units add `mincore`, which Envoy's allocator
   needs);
-- no core dumps; the Envoy units also no swap;
+- no core dumps; the Envoy and mint units also no swap;
 - the relay also has no network at all.
+
+The other units:
+
+- `airlock-envoy-cred boot` runs before Envoy starts, as root outside Envoy's sandbox (`+`): it
+  makes the locked pass credential and App token files Envoy's config reads.
+- `airlock-envoy-mint.service` runs as its own account (`airlock-envoy-mint`), no capabilities,
+  a read-only system but for its three directories under `/run/airlock-envoy-mint`
+  ([github-app.md](github-app.md#the-key-and-who-holds-it)).
+- `airlock-envoy-cred-expire.service` and `airlock-envoy-logrotate.service` run as root with only
+  the file capabilities they need, no network (`PrivateNetwork`, Unix sockets only), and write
+  only their own paths.
 
 The web Envoy cannot reach the main Envoy's sockets (`InaccessiblePaths`), so a compromised web
 Envoy can't use the main one's listeners to get around its filter.

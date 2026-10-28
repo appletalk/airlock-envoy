@@ -88,7 +88,8 @@ it:
   the installation is wider than it needs to be).
 
 It exits 0 when the lines fit, 1 on an error, 3 when it couldn't check (a pass key locked, the
-API unreachable): apply then says so and goes on; minting reports any refusal.
+API unreachable), 2 when it didn't run: apply refuses on 1, otherwise says so and goes on;
+minting reports any refusal.
 
 ## The key, and who holds it
 

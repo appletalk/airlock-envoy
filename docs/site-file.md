@@ -2,7 +2,8 @@
 
 `/etc/airlock-envoy/site.conf` defines this host's listeners. The README has the overview and
 the keyword table; this page has every rule. `configs/site.conf.example` is a worked example,
-and `airlock-envoy-apply --help` is the built-in summary.
+and `airlock-envoy-apply --help` is the built-in summary of listeners and modes (the `http`
+line's options are in the README).
 
 ## Destinations
 
@@ -110,6 +111,12 @@ Site-wide lines, not listeners. They say what `web` treats as internal, beyond t
    user's directory once Envoy runs it. Boxes set to the old path need a relaunch.
 6. Removes the socket of each listener that is gone (and a user's directory once it has none),
    so a box set to it no longer launches.
+
+Before step 3 it also prepares the credentials: each pass credential's locked tmpfs file, and
+for GitHub App lines each token's file (locked or unavailable until minted) and a check of the
+lines against the App's installation, refusing a line that doesn't fit. After it, it installs
+`mint.conf`, enables the mint timer and mints; with no App line left, a last run revokes every
+token, and the timer stops once none is left ([github-app.md](github-app.md)).
 
 If Envoy does not start with the new config, the previous one goes back.
 

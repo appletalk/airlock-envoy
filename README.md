@@ -35,6 +35,8 @@ More detail lives in `docs/`:
 - [docs/site-file.md](docs/site-file.md): every site-file rule, apply behaviour, upgrading
 - [docs/presets.md](docs/presets.md): each preset's routes, the GitHub GraphQL check, limits
 - [docs/design.md](docs/design.md): sockets and sandboxing, how a tunnel and web decide, why IPv4 only
+- [docs/unlock.md](docs/unlock.md): pass credentials: unlock, lock, the expiry, the boundary
+- [docs/github-app.md](docs/github-app.md): GitHub App credentials: setup, minting, revoking
 - [docs/audit-log.md](docs/audit-log.md): what each log line holds
 - [docs/testing.md](docs/testing.md): the test suites and the spike harness
 - [docs/spike-results.md](docs/spike-results.md): what the first spike found
@@ -51,9 +53,11 @@ January 2023, to v1.40.0). Nothing comes from the AUR or a third-party repositor
 ### 1. Prerequisites
 
 ```
-sudo apt install curl gpg acl                 # Ubuntu / Debian
-sudo pacman -S --needed curl gnupg acl        # Arch
+sudo apt install curl gpg acl logrotate                 # Ubuntu / Debian
+sudo pacman -S --needed curl gnupg acl logrotate        # Arch
 ```
+
+GitHub App credentials also need `python3` and `openssl`; `airlock-envoy-cred ca` needs `openssl`.
 
 ### 2. Install Envoy and the service
 
@@ -69,14 +73,16 @@ sudo install/install-service.sh               # system account, units, airlock-e
 
 - downloads the binary and the signed checksum list;
 - verifies the signature against the pinned key, and the binary against the list;
-- refuses a changed binary, a broken signature or any other key (tested);
+- refuses a changed binary, a broken signature or any other key;
 - switches `/usr/local/bin/envoy` to the new version atomically.
 
 `install-service.sh`:
 
-- creates the `airlock-envoy` system account (sysusers); it refuses if a login account of that
-  name already exists;
-- installs the units, `/usr/local/sbin/airlock-envoy-apply` and `/usr/local/sbin/airlock-envoy-cred`;
+- creates the `airlock-envoy` and `airlock-envoy-mint` system accounts (sysusers); it refuses if
+  a login account of either name already exists;
+- installs the units, `airlock-envoy-apply`, `airlock-envoy-cred` and `airlock-envoy-mint` in
+  `/usr/local/sbin`, the GraphQL and push checks, and the mint's tmpfiles.d entry;
+- enables the log rotation timer;
 - runs `airlock-envoy-apply`, which renders `/etc/airlock-envoy/envoy.yaml` from
   `/etc/airlock-envoy/site.conf` and starts Envoy and one box socket per listener.
 
@@ -179,6 +185,7 @@ Rules that matter most (full list in [docs/site-file.md](docs/site-file.md)):
 | `airlock-envoy-apply --list [FILE]` | any user who can read FILE | Print each listener's destinations |
 | `airlock-envoy-apply --render [FILE]` | any user who can read FILE | Print the Envoy config |
 | `airlock-envoy-apply --clients NAME [FILE]` | any user who can read FILE | Print listener NAME's client manifest |
+| `airlock-envoy-apply --render-mint [FILE]` | any user who can read FILE | Print the GitHub App tokens apply would mint (`mint.conf`) |
 
 An apply validates the new config with `envoy --mode validate` (as the service account), prints
 the change in allowed destinations, swaps the config in atomically and restarts Envoy only if
@@ -250,7 +257,7 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   ```
 - **`projects`** (GitHub presets only): lets Projects v2 item writes through for those project
   IDs. See [docs/presets.md](docs/presets.md#projects-v2).
-- **`repos`** (the git, forgejo and GitHub presets): the box's requests may name only those
+- **`repos`** (the `git`, `git-read`, `forgejo` and GitHub presets): the box's requests may name only those
   repos (`<owner>/*` for all of an owner's) to read, clone or write; on GitHub, GraphQL is
   refused, so `gh` works through `gh api` (REST). A listed repo's fork network stays readable
   through it. See [docs/presets.md](docs/presets.md#repo-scoping-repos).
@@ -310,7 +317,8 @@ sudo airlock-envoy-cred ca cluster < ca.pem
   git use `basic:x-access-token`. Envoy uses the new value from the next request, no restart.
 - `revoke <name>`: writes a value that grants nothing. Deleting the file would not work:
   Envoy keeps the last good value. Revoke it at the issuer too.
-- `list`: names, formats and dates (and the CAs), never values.
+- `list`: file credentials (name, format, date), pass credentials (name, pass entry, format)
+  and the CAs, never values. GitHub Apps are in `airlock-envoy-cred status`.
 - `ca <name>`: CA certificates only. It prints each one's SHA-256 fingerprint to compare with
   the source. Envoy reads CA files when it starts, so changing a ca already in use needs
   `sudo systemctl restart airlock-envoy`.
@@ -448,6 +456,10 @@ start`. An apply or `install-service.sh` still updates the config but starts not
 
 `--start` makes new socket files, so boxes need a relaunch afterwards.
 
+`--stop` cuts egress only. Unlocked pass credentials stay unlocked until their expiry, and
+`airlock-envoy-mint.timer` keeps renewing GitHub App tokens; with Envoy down nothing can use them.
+To drop them as well, `airlock-envoy-cred lock` (a pass-key App's tokens are revoked too).
+
 Stopping units by hand also cuts egress, but only until the next apply, which treats a stopped
 or failed Envoy or box socket as something to recover (a crash looks the same).
 
@@ -521,9 +533,18 @@ path its rules don't allow), so boxed Claude can report the cause instead of gue
 | `/var/log/airlock-envoy/access.jsonl` | airlock-envoy, 0600 (dir 0750) | The audit log (rotated: `access.jsonl-<time>`, then `.gz`) |
 | `/etc/airlock-envoy/credentials/<name>.yaml` | root:airlock-envoy, 0640 (dir 0750) | Credentials for plain-HTTP destinations, written by `airlock-envoy-cred` |
 | `/etc/airlock-envoy/ca/<name>.pem` | root, 0644 (dir root:airlock-envoy 0750) | CAs for plain-HTTP hosts with `ca <name>` |
-| `/usr/local/sbin/airlock-envoy-apply`, `/usr/local/sbin/airlock-envoy-cred` | root, 0755 | The apply tool and the credential helper |
+| `/etc/airlock-envoy/clients/` | root:airlock-envoy, 0750 | Each listener's client manifest, copied into its user's directory when its socket starts |
+| `/etc/airlock-envoy/site.conf.prev` | as `site.conf` | The site file a `--site` install replaced |
+| `/etc/airlock-envoy/pass/<name>` | root, 0600 (dir 0700) | A pass credential: its pass entry and format, no secret |
+| `/etc/airlock-envoy/unlock.conf` | yours to write (optional) | `max_lifetime`, `expire_at` for unlocks |
+| `/run/airlock-envoy-cred/secrets/<name>.yaml` | root:airlock-envoy, 0640 (dir 0750; a tmpfs) | Each pass credential, unlocked or the locked marker |
+| `/run/airlock-envoy-cred/state`, `.lock` | root, 0644 / 0600 | Locked or unlocked, until when; one verb at a time |
+| `/etc/airlock-envoy-mint/`, `apps/` | root:airlock-envoy-mint, 0750 | GitHub Apps (`apps/<name>`, a file key `apps/<name>.pem`, 0640) and `mint.conf` (0640, written by apply) |
+| `/run/airlock-envoy-mint/` | root, 0755 (tmpfiles.d) | `keys/` (root:airlock-envoy-mint 0750, unlocked keys 0440) and `.lock` are root's; `tokens/` (airlock-envoy-mint:airlock-envoy 2750, tokens 0640), `minted/` and `installations/` (0700) the mint account's |
+| `/usr/local/sbin/airlock-envoy-apply`, `airlock-envoy-cred`, `airlock-envoy-mint` | root, 0755 | The apply tool, the credential helper, the minter |
 | `/etc/airlock-envoy/logrotate.conf` | root, 0644 | Log rotation, run by its own timer (not `/etc/logrotate.d`) |
-| `/usr/local/share/airlock-envoy/github-graphql.lua` | root, 0644 | The GitHub GraphQL write check |
+| `/usr/local/share/airlock-envoy/github-graphql.lua`, `git-protect.lua` | root, 0644 | The GitHub GraphQL write check; the push check of `protect` |
+| `/var/lib/airlock-envoy/logrotate.status` | root | Log rotation's state |
 | `/etc/airlock-envoy/envoy-web.yaml` | root:airlock-envoy, 0640 | The web Envoy's config, while a listener lists `web` |
 | `/etc/systemd/system/airlock-envoy-web.service.d/site.conf` | root, 0644 | Web's kernel filter: the site's `internal-net`, the resolvers allowed |
 | `/run/airlock-envoy-web/<listener>.sock` | airlock-envoy (dir 0700) | The web Envoy's socket for each web profile (only the main Envoy connects) |
@@ -533,11 +554,13 @@ path its rules don't allow), so boxed Claude can report the cause instead of gue
 
 | Unit | Role |
 |---|---|
-| `airlock-envoy.service` | The main Envoy |
+| `airlock-envoy.service` | The main Envoy; `airlock-envoy-cred boot` runs as root before it starts (locked pass credentials, App token files) |
 | `airlock-envoy-proxy@<listener>.socket` | A box socket, in its user's directory |
 | `airlock-envoy-proxy@<listener>.service` | `systemd-socket-proxyd`, relaying box connections to Envoy |
 | `airlock-envoy-web.service` | The web Envoy, enabled only while a listener lists `web` |
 | `airlock-envoy-logrotate.timer`, `.service` | Every 15 minutes, logrotate with `/etc/airlock-envoy/logrotate.conf` and its own state (`/var/lib/airlock-envoy/`) |
+| `airlock-envoy-cred-expire.timer`, `.service` | Every 30 s while unlocked: locks at the deadline. Started by `unlock`, stopped by `lock` |
+| `airlock-envoy-mint.timer`, `.service` | Every 5 minutes, as `airlock-envoy-mint`: mints, renews and revokes App tokens. Enabled by apply only while a line uses an App |
 
 ### Limits at a glance
 

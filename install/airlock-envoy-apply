@@ -10,6 +10,8 @@
 #   airlock-envoy-apply --render [SITE]  print the Envoy config (any user)
 #   airlock-envoy-apply --clients NAME [SITE]
 #                                        print listener NAME's client manifest (any user)
+#   airlock-envoy-apply --render-mint [SITE]
+#                                        print the GitHub App tokens apply would mint (any user)
 #   airlock-envoy-apply --stop           as root: cut all box egress and keep it cut, across
 #                                        applies and reboots (the kill switch)
 #   airlock-envoy-apply --start          as root: lift it, apply, and start everything
