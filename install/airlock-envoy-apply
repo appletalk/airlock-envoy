@@ -1215,12 +1215,21 @@ EOF
 #           call that answers in plain JSON sends nothing until it is done), 30 at most.
 #   GET     the server's event stream: no timeout or cap, closed after 15 minutes with nothing sent.
 #   DELETE  the end of a session: the plain-HTTP limits.
+# GET and DELETE take no body. A POST's Content-Type is application/json, with charset=utf-8
+# at most (a server decoding another charset would read other JSON than the check).
 MCP_MAX_BODY=1048576
 mcp_routes() {  # mcp_routes <definition>, inside http_vhost
-  local k=$1 h=${HTTP_HOST[$1]} id ep i=0 mode list t rc up why inj
+  local k=$1 h=${HTTP_HOST[$1]} id ep i=0 mode list t rc up why inj nobody noinj
   id=$(hid "$k") rc=$(route_cred "$k" x)
   up="cluster: \"http-$id\", host_rewrite_literal: \"$h\""
   why="airlock-envoy: refused by the mcp rules (listener $l)"
+  # GET and DELETE carry no body (it would pass the tool check unread): a Content-Length, if any,
+  # of 0 (a missing header is matched as empty). A chunked body has no Content-Length, and the
+  # codec removes Transfer-Encoding before routing, so the mcp-nobody filter refuses it.
+  nobody=", { name: content-length, string_match: { safe_regex: { regex: \"0?\" } }, treat_missing_header_as_empty: true }"
+  noinj="                  mcp-nobody: { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
+  [ -z "$rc" ] || noinj="$noinj
+                  \"inject-$rc\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
   inj=""
   [ -z "$rc" ] || inj="                  \"inject-$rc\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
   cat <<EOF
@@ -1238,7 +1247,7 @@ EOF
                   path: "$ep"
                   headers:
                   - { name: ":method", string_match: { exact: POST } }
-                  - { name: content-type, string_match: { safe_regex: { regex: "(?i)application/json[ \\\\t]*(;.*)?" } } }
+                  - { name: content-type, string_match: { safe_regex: { regex: "(?i)application/json([ \\\\t]*;[ \\\\t]*charset=(utf-8|\"utf-8\"))?" } } }
                   - { name: content-length, range_match: { start: 0, end: $((MCP_MAX_BODY + 1)) } }
                   - { name: content-encoding, present_match: false }
                 route: { $up, timeout: 0s, idle_timeout: 600s, max_stream_duration: { max_stream_duration: 1800s } }
@@ -1255,19 +1264,24 @@ EOF
                 direct_response: { status: 413, body: { inline_string: "$why: a body over $MCP_MAX_BODY bytes on $h$ep\\n" } }
               - name: "$id-ep$i-post-refused"
                 match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: POST } }] }
-                direct_response: { status: 403, body: { inline_string: "$why: a POST to an MCP endpoint takes a JSON body (Content-Type application/json, not compressed) with a Content-Length, on $h$ep\\n" } }
+                direct_response: { status: 403, body: { inline_string: "$why: a POST to an MCP endpoint takes a JSON body (Content-Type application/json, charset utf-8 at most, not compressed) with a Content-Length, on $h$ep\\n" } }
               - name: "$id-ep$i-stream"
-                match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: GET } }] }
+                match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: GET } }$nobody] }
                 route: { $up, timeout: 0s, idle_timeout: 900s }
+                typed_per_filter_config:
+$noinj
 EOF
-    [ -z "$inj" ] || printf '                typed_per_filter_config:\n%s\n' "$inj"
     cat <<EOF
               - name: "$id-ep$i-delete"
-                match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: DELETE } }] }
+                match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: DELETE } }$nobody] }
                 route: { $up, timeout: 120s, idle_timeout: 300s, max_stream_duration: { max_stream_duration: 300s } }
+                typed_per_filter_config:
+$noinj
 EOF
-    [ -z "$inj" ] || printf '                typed_per_filter_config:\n%s\n' "$inj"
     cat <<EOF
+              - name: "$id-ep$i-body"
+                match: { path: "$ep", headers: [{ name: ":method", string_match: { safe_regex: { regex: "GET|DELETE" } } }] }
+                direct_response: { status: 403, body: { inline_string: "$why: no request body on a GET or DELETE to an MCP endpoint ($h$ep)\\n" } }
               - name: "$id-ep$i-method"
                 match: { path: "$ep" }
                 direct_response: { status: 403, body: { inline_string: "$why: only POST, GET and DELETE on an MCP endpoint ($h$ep)\\n" } }
@@ -1392,6 +1406,27 @@ EOF
 EOF
     sed 's/^/                  /' "$f"
   fi
+  # MCP GET and DELETE carry no body: a chunked one (no Content-Length for the route to match)
+  # is refused here, before anything goes upstream. Enabled on those routes only.
+  for d in ${HDESTS[$1]:-}; do
+    [ "${HTTP_RULES[$d]}" = mcp ] || continue
+    cat <<'EOF'
+          - name: mcp-nobody
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                inline_string: |
+                  function envoy_on_request(h)
+                    local b = h:body()
+                    if b and b:length() > 0 then
+                      h:respond({ [":status"] = "403", ["content-type"] = "text/plain" },
+                        "airlock-envoy: refused by the mcp rules: no request body on a GET or DELETE to an MCP endpoint\n")
+                    end
+                  end
+EOF
+    break
+  done
   # The MCP tool check, for a listener with an endpoint that has tools or deny-tools.
   if [ -n "$(for d in ${HDESTS[$1]:-}; do printf '%s' "${HTTP_TOOLS[$d]}${HTTP_DTOOLS[$d]}"; done)" ]; then
     f="$(mcp_lua_file)"

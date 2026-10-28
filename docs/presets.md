@@ -86,19 +86,23 @@ such as a gateway that checks a bearer token in front of several servers at thei
 The line's `endpoints` name them, each an exact path.
 
 - **Allowed**, on each endpoint and nothing else:
-  - POST: JSON-RPC requests, notifications and responses. `Content-Type: application/json`, a
-    `Content-Length` up to 1 MiB, no `Content-Encoding`. The answer, JSON or an event stream,
+  - POST: JSON-RPC requests, notifications and responses. `Content-Type: application/json`
+    (with `charset=utf-8` at most: no other parameter), a `Content-Length` up to 1 MiB, no
+    `Content-Encoding`. The answer, JSON or an event stream,
     streams back unbuffered and uncapped in size.
   - GET: the server's event stream. A server without one answers 405, which passes through.
   - DELETE: the end of a session.
+  - GET and DELETE carry no body (a `Content-Length` of 0 at most, nothing chunked): one would
+    reach the server past the tool check.
 - **Refused** (403, with the reason, nothing upstream):
   - every other path: a prefix or suffix of an endpoint, another case, a trailing slash the
     line doesn't list, `/.well-known/*` (OAuth discovery: the credential comes from Envoy),
     health paths;
   - every other method on an endpoint;
   - any query string;
-  - a POST with another content type, a compressed or chunked body, or no `Content-Length`;
-    over 1 MiB, 413.
+  - a POST with another content type or charset, a compressed or chunked body, or no
+    `Content-Length`; over 1 MiB, 413. A charset other than UTF-8 would let the server read
+    other JSON than the tool check: in UTF-7, `+ACI-` is a quote.
 - **Headers**: `Mcp-Session-Id` passes both ways, and so do `MCP-Protocol-Version`, `Accept`,
   `Content-Type` and `Last-Event-ID`. The credential replaces the box's `Authorization`, and the
   steering headers are stripped as on every preset ([Request handling](#request-handling-all-presets)).
@@ -171,10 +175,15 @@ body to that endpoint:
 - Every other method, notifications and responses pass. Which method decides: only
   `tools/call` is checked.
 - A batch with one refused message is refused whole.
-- Also refused: a body that isn't strict JSON, a key twice in one message or its `params`, a
-  call without a string `params.name`, a tool name outside the MCP character set (1 to 128 of
-  `A-Z a-z 0-9 _ - .`), a batch of over 100 messages, nesting over 64 deep, and any error while
-  checking.
+- Also refused: a body that isn't strict JSON, a key twice in one object, a call without a
+  string `params.name`, a tool name outside the MCP character set (1 to 128 of
+  `A-Z a-z 0-9 _ - .`), a method name with anything but printable ASCII (no space: a server
+  that trimmed `tools/call ` would run it), a batch of over 100 messages, nesting over 64
+  deep, and any error while checking.
+- In a message and its `params`, keys are read as a Go server reads them: in any case. So a
+  key twice in another case (`method` and `Method`), a protocol key in another case (`Method`,
+  `Params`, `Name`, `ID`) and a key outside printable ASCII (Go folds `ſ` to `s`, so `paramſ`
+  is `params` to it) are refused. Keys inside `arguments` are the tool's, and pass.
 - A refusal is a JSON-RPC error, HTTP 200, so the client shows the reason: one error with the
   request's `id` (code -32001), or for a batch an array with an error for each request in it.
   A body it can't read gets one error with a null `id` (code -32700).
@@ -193,6 +202,9 @@ dispatches names without regard to case.
 - `resources/read`, `prompts/get`, `completion/complete` and other methods are not checked.
 - Answers are not read: a server that starts a tool on its own (say from a sampling response)
   is not bounded by this.
+- The check reads JSON strictly (UTF-8, a key once). Where a server's reader differs, the
+  rules above close the known gaps (another charset, keys in any case, a trimmed method); a
+  reader that differs in some other way could still see another call than the check did.
 
 ## Repo scoping (`repos`)
 

@@ -192,6 +192,22 @@ refused "a form body" 403 -H "mcp-session-id: $SID" -d 'a=b' "$U/mcp"
 refused "text/plain" 403 -H 'content-type: text/plain' -H "mcp-session-id: $SID" --data-binary "$(call 9 echo)" "$U/mcp"
 refused "a compressed body" 403 -H 'content-type: application/json' -H 'content-encoding: gzip' -H "mcp-session-id: $SID" --data-binary "$(call 10 echo)" "$U/mcp"
 refused "a chunked body" 403 -H 'content-type: application/json' -H 'transfer-encoding: chunked' -H "mcp-session-id: $SID" --data-binary "$(call 11 echo)" "$U/mcp"
+# From the cold review: a charset other than utf-8 (a server decoding utf-7 reads +ACI- as a
+# quote, so this body is a call of write_thing to it and of echo to the check); a body on GET
+# or DELETE, which the tool check never reads.
+utf7='{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"echo","zz":"+ACI-,+ACI-name+ACI-:+ACI-write_thing"}}'
+for ct in 'application/json; charset=utf-7' 'application/json;charset=UTF-7' 'application/json; charset=cp037' 'application/json; x=1' 'application/json; charset=utf-8; charset=utf-7'; do
+  refused "Content-Type $ct" 403 -H "content-type: $ct" -H "mcp-session-id: $SID" --data-binary "$utf7" "$U/alpha/mcp"
+done
+for ct in 'application/json; charset=utf-8' 'application/json; charset="UTF-8"'; do
+  out="$(c -H "content-type: $ct" -H "mcp-session-id: $SID" --data-binary "$(call 41 echo)" "$U/alpha/mcp")"
+  [[ "$out" == *'"called echo"'* ]] && ok "Content-Type $ct passes" || fail "Content-Type $ct: $out"
+done
+refused "a body on GET" 403 -X GET -H 'content-type: application/json' -H "mcp-session-id: $SID" --data-binary "$(call 42 write_thing)" "$U/alpha/mcp"
+refused "a chunked body on GET" 403 -X GET -H 'transfer-encoding: chunked' -H "mcp-session-id: $SID" --data-binary "$(call 43 write_thing)" "$U/mcp"
+refused "a body on DELETE" 403 -X DELETE -H 'content-type: application/json' -H "mcp-session-id: $SID" --data-binary "$(call 44 write_thing)" "$U/mcp"
+out="$(c -X DELETE -H 'content-length: 0' -H "mcp-session-id: $SID" "$U/mcp")"
+[[ "$out" == "HTTP/1.1 200"* ]] && ok "DELETE with Content-Length 0 passes" || fail "DELETE content-length 0: $out"
 head -c 1048577 /dev/zero | tr '\0' ' ' > big
 refused "a body over 1 MiB" 413 -H 'content-type: application/json' -H "mcp-session-id: $SID" --data-binary @big "$U/mcp"
 printf '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"echo","arguments":{"x":"%s"}}}' "$(head -c 1048000 /dev/zero | tr '\0' a)" > fits
@@ -206,6 +222,12 @@ rpc_refused "deny-tools: a batch with one denied, refused whole" /alpha/mcp "[$(
   '[{"jsonrpc":"2.0","id":22,"error":{"code":-32001,"message":"airlock-envoy: refused on /alpha/mcp: a batch holding a refused message: tool other.tool is refused on this endpoint (deny-tools)"}},{"jsonrpc":"2.0","id":23,'
 rpc_refused "deny-tools: unparseable" /alpha/mcp '{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"x",}}' '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,'
 rpc_refused "deny-tools: a duplicate name" /alpha/mcp '{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"echo","name":"write_thing"}}' '"id":null,"error":{"code":-32700,"message":"airlock-envoy: refused on /alpha/mcp: the key name twice in one object"}}'
+# Keys a Go server matches in any case (and by folding non-ASCII letters): refused.
+rpc_refused "a key in another case" /alpha/mcp '{"jsonrpc":"2.0","id":28,"Method":"tools/call","Params":{"Name":"write_thing"}}' '"error":{"code":-32700,"message":"airlock-envoy: refused on /alpha/mcp: the key Method (not method)"}}'
+rpc_refused "a second method in another case" /alpha/mcp '{"jsonrpc":"2.0","id":29,"method":"ping","Method":"tools/call","params":{"name":"write_thing"}}' '"code":-32700'
+rpc_refused "tools: a second name in another case" /beta/mcp '{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"echo","Name":"write_thing"}}' '"code":-32700'
+rpc_refused "a non-ASCII key" /alpha/mcp '{"jsonrpc":"2.0","id":35,"method":"tools/call","paramſ":{"name":"write_thing"},"params":{"name":"echo"}}' '"code":-32700'
+rpc_refused "a method with a trailing space" /alpha/mcp '{"jsonrpc":"2.0","id":36,"method":"tools/call ","params":{"name":"write_thing"}}' '"id":36,"error"'
 out="$(rpc /alpha/mcp "[$(call 26 echo),$(call 27 read_a)]")"
 [[ "$out" == *'"id": 26'*'"id": 27'* ]] && ok "deny-tools: a batch of allowed calls passes" || fail "allowed batch: $out"
 out="$(rpc /beta/mcp "$(call 30 read_a)")"
@@ -216,6 +238,7 @@ out="$(rpc /beta/mcp '{"jsonrpc":"2.0","id":33,"method":"tools/list"}')"
 [[ "$out" == *'"tools"'* ]] && ok "tools: other methods pass" || fail "tools other method: $out"
 
 # ---- the rate limit of the tool check (10 a second, bursts of 20, per listener) -------------
+sleep 2   # the bucket full again (10 a second, up to 20) after the checks above
 rl=()
 for i in $(seq 40); do rpc /beta/mcp '{"jsonrpc":"2.0","id":1,"method":"ping"}' -o /dev/null -w '%{http_code}\n' > "code$i" & rl+=($!); done
 wait "${rl[@]}"

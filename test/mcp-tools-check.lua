@@ -70,6 +70,24 @@ local cases = {
   { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/list","x":' .. string.rep("[", 100000) .. string.rep("]", 100000) .. '}' },
   { false, deny,  '[' .. string.rep('{"jsonrpc":"2.0","method":"n"},', 100) .. '{"jsonrpc":"2.0","method":"n"}]' },
   { false, deny,  '{"x":"' .. string.rep("a", 1048576) .. '"}' },
+  -- from the cold review: keys a Go server would match in any case or by folding
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"Method":"tools/call","Params":{"Name":"write_thing"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"ping","Method":"tools/call","params":{"name":"write_thing"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","Name":"write_thing"}}' },
+  { false, allow, '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_a","NAME":"write_thing"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","paramſ":{"name":"write_thing"},"params":{"name":"read_a"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","param\\u017f":{"name":"write_thing"},"params":{"name":"read_a"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_a","\\u212aey":1}}' },
+  { false, deny,  '{"jsonrpc":"2.0","ID":1,"method":"tools/list"}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/list","id":2}' },
+  { true,  deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_a","arguments":{"Name":"x","name":"y","ſ":1}}}' },
+  { true,  deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_a","_meta":{"progressToken":1}}}' },
+  -- method names a server might trim or cut at a NUL
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call ","params":{"name":"write_thing"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call\\u0000","params":{"name":"write_thing"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":" tools/call","params":{"name":"write_thing"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/c\\u00e1ll","params":{"name":"write_thing"}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"","params":{}}' },
   { false, { "", "" }, call("read_a") },
   { false, { nil, nil }, call("read_a") },
 }
@@ -106,6 +124,39 @@ for i, e in ipairs(expect) do
   if e[1] ~= e[2] then rfails = rfails + 1; print("FAIL reply " .. i .. ": " .. e[1]) end
 end
 print(string.format("%s %d replies", rfails == 0 and "ok  " or "FAIL", #expect))
+
+-- The request's headers (the route checks them too): JSON alone or with charset=utf-8; another
+-- charset would let the server read other JSON (utf-7: +ACI- is a quote).
+local function handle(hdrs, body)
+  local h = { get = function(_, k) return hdrs[k] end }
+  local meta = { get = function(_, k) return ({ mode = "deny", tools = "write_thing" })[k] end }
+  local b = { length = function() return #body end, getBytes = function(_, i, n) return body:sub(i + 1, i + n) end }
+  return { headers = function() return h end, metadata = function() return meta end, body = function() return b end }
+end
+local utf7 = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","zz":"+ACI-,+ACI-name+ACI-:+ACI-write_thing"}}'
+local hcases = {
+  { true,  { [":method"] = "POST", ["content-type"] = "application/json" } },
+  { true,  { [":method"] = "POST", ["content-type"] = "application/json; charset=utf-8" } },
+  { true,  { [":method"] = "POST", ["content-type"] = "Application/JSON;charset=UTF-8" } },
+  { true,  { [":method"] = "POST", ["content-type"] = 'application/json; charset="utf-8"' } },
+  { false, { [":method"] = "POST", ["content-type"] = "application/json; charset=utf-7" } },
+  { false, { [":method"] = "POST", ["content-type"] = "application/json;charset=UTF-7" } },
+  { false, { [":method"] = "POST", ["content-type"] = "application/json; charset=cp037" } },
+  { false, { [":method"] = "POST", ["content-type"] = "application/json; charset=utf-8; charset=utf-7" } },
+  { false, { [":method"] = "POST", ["content-type"] = "application/json; x=1" } },
+  { false, { [":method"] = "POST", ["content-type"] = "application/json-seq" } },
+  { false, { [":method"] = "POST", ["content-type"] = "text/plain" } },
+  { false, { [":method"] = "POST" } },
+  { false, { [":method"] = "POST", ["content-type"] = "application/json", ["content-encoding"] = "gzip" } },
+  { false, { [":method"] = "GET", ["content-type"] = "application/json" } },
+}
+local hfails = 0
+for i, c in ipairs(hcases) do
+  local r = T.check_request(handle(c[2], utf7))
+  if (r == nil) ~= c[1] then hfails = hfails + 1; print("FAIL header case " .. i .. ": " .. tostring(c[2]["content-type"]) .. " " .. (r and r.reason or "allowed")) end
+end
+print(string.format("%s %d header cases", hfails == 0 and "ok  " or "FAIL", #hcases))
+rfails = rfails + hfails
 
 -- The worst-case body costs bounded time (the check runs on Envoy's shared worker threads).
 local worst = {

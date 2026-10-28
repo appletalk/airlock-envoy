@@ -464,7 +464,7 @@ printf 'http m.example rules mcp credential t endpoints /a/mcp,/b/mcp deny-tools
 r="$("$apply" --render "$work/site")"
 mfail=""
 order="$(grep -o 'name: "m.example-[a-z0-9-]*"' <<< "$r" | sed 's/^name: "m.example-//; s/"$//' | tr '\n' ' ')"
-[ "$order" = "query ep1-post ep1-post-too-large ep1-post-refused ep1-stream ep1-delete ep1-method ep2-post ep2-post-too-large ep2-post-refused ep2-stream ep2-delete ep2-method refused " ] || mfail+=" order:$order"
+[ "$order" = "query ep1-post ep1-post-too-large ep1-post-refused ep1-stream ep1-delete ep1-body ep1-method ep2-post ep2-post-too-large ep2-post-refused ep2-stream ep2-delete ep2-body ep2-method refused " ] || mfail+=" order:$order"
 sed -n '/name: "m.example-ep1-post"/,/name: "m.example-ep1-post-too-large"/p' <<< "$r" | grep -q 'mcp-tools: { mode: "deny", tools: "w", endpoint: "/a/mcp" }' || mfail+=" ep1-meta"
 sed -n '/name: "m.example-ep2-post"/,/name: "m.example-ep2-post-too-large"/p' <<< "$r" | grep -q 'mcp-' && mfail+=" ep2-checked"
 sed -n '/name: "m.example-ep1-post"/,/name: "m.example-ep1-post-too-large"/p' <<< "$r" | grep -q '"inject-t"' || mfail+=" ep1-cred"

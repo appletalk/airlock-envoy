@@ -156,16 +156,27 @@ end
 
 -- An object at s[i] == "{": calls on(key, i) for each member, which reads the value at i and
 -- returns the index after it (or nil). A key twice is refused: two readers could take
--- different ones. Returns the index after the object, or nil and the reason.
-local function members(s, i, on)
+-- different ones. With keys (a set of lowercase names), the object is one whose keys a
+-- server reads (a message, its params): a key only printable ASCII, a key twice even in
+-- another case, and a key of the set in another case are refused too. Go's encoding/json
+-- matches struct fields in any case (and folds some non-ASCII letters, as U+017F to s), so
+-- {"Method": ...} or "paramſ" would reach a Go server as method or params unread here.
+-- Returns the index after the object, or nil and the reason.
+local function members(s, i, on, keys)
   local seen = {}
   i = ws(s, i + 1)
   if s:sub(i, i) == "}" then return i + 1 end
   while true do
     if s:sub(i, i) ~= '"' then return nil, "bad JSON" end
     local key, j = str(s, i); if not key then return nil, "bad JSON" end
-    if seen[key] then return nil, "the key " .. key .. " twice in one object" end
-    seen[key] = true
+    local k = key
+    if keys then
+      if not key:match("^[\32-\126]*$") then return nil, "a key outside printable ASCII" end
+      k = key:lower()
+      if keys[k] and key ~= k then return nil, "the key " .. key .. " (not " .. k .. ")" end
+    end
+    if seen[k] then return nil, "the key " .. key .. " twice in one object" end
+    seen[k] = true
     i = ws(s, j); if s:sub(i, i) ~= ":" then return nil, "bad JSON" end
     local why
     i, why = on(key, ws(s, i + 1)); if not i then return nil, why or "bad JSON" end
@@ -179,6 +190,8 @@ end
 
 -- One JSON-RPC message at s[i]: { method = <string or nil>, id = <its JSON text or nil>,
 -- name = <params.name if a string>, params = <JSON type of params> } and the index after it.
+local MESSAGE_KEYS = { jsonrpc = true, id = true, method = true, params = true, result = true, error = true }
+local PARAMS_KEYS = { name = true, arguments = true }
 local function message(s, i)
   if s:sub(i, i) ~= "{" then return nil, nil, "a batch entry that is not an object" end
   local m = {}
@@ -198,10 +211,10 @@ local function message(s, i)
         if pkey == "name" and s:sub(p, p) == '"' then local v, e = str(s, p); m.name = v; return e end
         if pkey == "name" then m.name = false end
         return skip(s, p, 3)
-      end)
+      end, PARAMS_KEYS)
     end
     return skip(s, k, 2)
-  end)
+  end, MESSAGE_KEYS)
   if not j then return nil, nil, why end
   return m, j
 end
@@ -247,6 +260,9 @@ end
 local function check_message(m, mode, set)
   if m.method == false then return "a method that is not a string" end
   if not m.method then return nil end   -- a response
+  -- Method names are printable ASCII without spaces: a server that trimmed or cut at a NUL
+  -- would take "tools/call " or "tools/call\u0000" as a call.
+  if not m.method:match("^[\33-\126]+$") then return "a method name outside printable ASCII" end
   -- A server that dispatched methods in any case would take TOOLS/CALL as a call.
   if m.method:lower() ~= "tools/call" then return nil end
   if m.params ~= "{" then return "tools/call without params" end
@@ -307,14 +323,24 @@ function M.reply(r, endpoint)
   return "[" .. table.concat(out, ",") .. "]"
 end
 
+-- Whether a Content-Type is application/json, alone or with charset=utf-8 (any case, the value
+-- optionally quoted). The route's own match is the same.
+function M.json_type(ct)
+  ct = (ct or ""):lower()
+  if ct == "application/json" then return true end
+  local cs = ct:match("^application/json[ \t]*;[ \t]*charset=([^ \t;]*)[ \t]*$")
+  return cs == "utf-8" or cs == '"utf-8"'
+end
+
 -- nil if the request may go on, else the refusal.
 local function check_request(handle)
   local h = handle:headers()
   -- The route sends only POST here; anything else is a misconfiguration: refuse.
   if h:get(":method") ~= "POST" then return { reason = "not a POST", code = -32600, ids = {} } end
-  local ct = (h:get("content-type") or ""):lower()
-  if not (ct == "application/json" or ct:match("^application/json%s*;")) then
-    return { reason = "Content-Type must be application/json", code = -32600, ids = {} }
+  -- JSON alone, or with charset=utf-8: a server that decoded the body by another charset
+  -- (utf-7, cp037) would read other JSON than this check did.
+  if not M.json_type(h:get("content-type")) then
+    return { reason = "Content-Type must be application/json (charset utf-8 at most)", code = -32600, ids = {} }
   end
   if h:get("content-encoding") then return { reason = "an encoded (compressed) body", code = -32600, ids = {} } end
   -- The endpoint's list, from the route's metadata (airlock-envoy-apply sets it). Read before
@@ -325,6 +351,8 @@ local function check_request(handle)
   local body = b and b:getBytes(0, b:length()) or ""
   return M.check_body(body, mode, tools)
 end
+
+M.check_request = check_request
 
 function envoy_on_request(handle)
   local ok, r = pcall(check_request, handle)
