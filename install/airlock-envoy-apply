@@ -2145,7 +2145,7 @@ if [ -s "$work/mint.conf" ]; then
   install -m 0640 -o root -g airlock-envoy-mint "$work/mint.conf" "$MINT_CONF.new" && mv -f "$MINT_CONF.new" "$MINT_CONF"
   systemctl enable --quiet --now airlock-envoy-mint.timer
   if [ "$held" = 0 ]; then
-    systemctl start airlock-envoy-mint.service || echo "    note: airlock-envoy-mint did not mint every token (journalctl -u airlock-envoy-mint; airlock-envoy-mint check)"
+    systemctl start airlock-envoy-mint.service || echo "    note: airlock-envoy-mint did not mint every token (journalctl -u airlock-envoy-mint; sudo airlock-envoy-cred status)"
   fi
 elif [ -e "$MINT_CONF" ] || systemctl is-enabled --quiet airlock-envoy-mint.timer 2>/dev/null; then
   echo "==> No line uses a GitHub App: revoking its tokens"

@@ -28,6 +28,12 @@ sed -e "s#^DIR=/etc/airlock-envoy/credentials#DIR=$E/credentials#" -e "s#^CA_DIR
     -e "s#^now() { date +%s; }#now() { cat $work/clock/now 2>/dev/null || date +%s; }#" \
     -e "s#^boot_secs() { cut -d. -f1 /proc/uptime; }#boot_secs() { cat $work/clock/boot 2>/dev/null || cut -d. -f1 /proc/uptime; }#" \
     install/airlock-envoy-cred > "$work/bin/airlock-envoy-cred"
+# Kill points for the ordering tests (in the copy only): inside the rollback, between its two
+# steps; and between moving the record aside and writing the file. Each saves what it sees.
+# shellcheck disable=SC2016  # the tool's own text
+sed -i -e 's#^      \[ ! -f "$PASS_DIR/.$name.set" \] || mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"$#      [ -z "${KILL_AT_SETBACK:-}" ] || { cat "$DIR/$name.yaml" > "$KILL_AT_SETBACK.file" 2>/dev/null; ls -A "$PASS_DIR" > "$KILL_AT_SETBACK.pass"; kill -KILL $$; }\n&#' \
+       -e 's#^    write "$DIR" "$name" "$value" "$fmt"; value="" secret=""$#    [ -z "${KILL_BEFORE_WRITE:-}" ] || { ls -A "$PASS_DIR" > "$KILL_BEFORE_WRITE"; kill -KILL $$; }\n&#' "$work/bin/airlock-envoy-cred"
+[ "$(grep -c 'KILL_AT_SETBACK\|KILL_BEFORE_WRITE' "$work/bin/airlock-envoy-cred")" = 2 ] || { echo "FAIL the kill points didn't take"; exit 1; }
 chmod +x "$work/bin/airlock-envoy-cred"
 # Each rewrite above must have taken: a missed one would test the real paths or owners.
 for pat in "APPLY_LOCK=$R/apply.lock" "DIR=$E/credentials" "PASS_DIR=$E/pass" "RUN=$R" "ENVOY_YAML=$E/envoy.yaml" "cat $work/clock/now" "cat $work/clock/boot"; do
@@ -255,7 +261,8 @@ mv "$E/pass/pc" "$E/pass/.pc.set"; printf 'X\n' | root set pcx >/dev/null; mv "$
 printf '                    sds_config: { path_config_source: { path: "%s/pc.yaml" } }\n' "$E/credentials" > "$E/envoy.yaml"
 out="$(printf 'X\n' | root set pc --file 2>&1)"
 [[ "$out" == *"finished now"* ]] && [ ! -e "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] \
-  && ok "set after a killed set --file whose apply got through: the move finished, the tmpfs copy locked" || fail "killed after apply: $out"
+  && [ "$(secret_of "$E/credentials/pc.yaml")" = "token X" ] \
+  && ok "set after a killed set --file whose apply got through: the move finished, the tmpfs copy locked, the pass format kept" || fail "killed after apply: $out / $(secret_of "$E/credentials/pc.yaml")"
 rm -f "$E/credentials/pc.yaml"; printf 'X\n' | root add pc --pass work/pc --format token >/dev/null; uses gh
 # Killed inside the rollback, after the file was locked: the next set rolls back, never "finishes".
 mv "$E/pass/pc" "$E/pass/.pc.set"; printf 'X\n' | root set pcx >/dev/null; mv "$E/credentials/pcx.yaml" "$E/credentials/pc.yaml"
@@ -265,6 +272,24 @@ out="$(printf 'X\n' | root set pc 2>&1)"
 [[ "$out" == *"pass credential again"* ]] && [ -f "$E/pass/pc" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "airlock-envoy-locked pc" ] \
   && ok "set after a set --file killed inside its rollback: a pass credential again, the file still locked" || fail "killed in rollback: $out"
 rm -f "$E/credentials/pc.yaml"; uses gh
+# Killed inside the rollback, between its steps: the file Envoy reads is already locked, and the
+# record is still aside for the next set, which rolls back.
+out="$(printf 'NEW\n' | APPLY_READS_FILE=pc FAIL_APPLY=1 KILL_AT_SETBACK="$work/k1" FAKE_UID=0 airlock-envoy-cred set pc --file 2>&1)"
+grep -qx .pc.set "$work/k1.pass" && grep -q 'inline_string: "airlock-envoy-locked pc"' "$work/k1.file" \
+  && ok "killed inside the rollback: the file already locked, the record still aside" || fail "inside the rollback: $(cat "$work/k1.pass") / $(cat "$work/k1.file")"
+out="$(printf 'X\n' | root set pc 2>&1)"
+[ -f "$E/pass/pc" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "airlock-envoy-locked pc" ] && ok "...and the next set rolls back" || fail "after the rollback kill: $out"
+rm -f "$E/credentials/pc.yaml"; uses gh
+# Killed between moving the record aside and writing the file: no secret file yet.
+out="$(printf 'NEW\n' | KILL_BEFORE_WRITE="$work/k2" FAKE_UID=0 airlock-envoy-cred set pc --file 2>&1)"
+grep -qx .pc.set "$work/k2" && [ ! -e "$E/credentials/pc.yaml" ] && ok "set --file: the record goes aside before the file is written" || fail "write order: $(cat "$work/k2")"
+printf 'X\n' | root set pc >/dev/null 2>&1; [ -f "$E/pass/pc" ] || fail "no roll back after the write-order kill"
+# A recovery waits for an apply still running (the killed set's, say).
+mv "$E/pass/pc" "$E/pass/.pc.set"
+( exec 6>> "$R/apply.lock"; flock 6; sleep 2 ) & h=$!; sleep 0.3
+out="$(printf 'X\n' | root set pc 2>&1)"; wait "$h"
+[[ "$out" == *"airlock-envoy-apply is running"* ]] && [ -f "$E/pass/.pc.set" ] && ok "recovery refused while an apply runs" || fail "recovery during an apply: $out"
+printf 'X\n' | root set pc >/dev/null 2>&1; [ -f "$E/pass/pc" ] || fail "no roll back after the apply"
 # One set --file at a time.
 ( exec 5> "$R/.set.lock"; flock 5; sleep 2 ) & h=$!; sleep 0.3
 out="$(printf 'X\n' | root set pc --file 2>&1)"; wait "$h"

@@ -578,7 +578,7 @@ case "$cmd" in
       *) die "--key pass:<entry> or --key file" ;;
     esac
     chown "root:$MINT_USER" "$APPS/.$name.new"; chmod 0640 "$APPS/.$name.new"; mv -f "$APPS/.$name.new" "$APPS/$name"
-    echo "==> app $name (app $appid, ${org:+org $org}${inst:+installation $inst}, key ${keyarg%%:*}). Check it: airlock-envoy-mint check (once a line uses it). Use 'credential $name' on GitHub lines (repos named, one owner) and apply; a pass key: then airlock-envoy-cred unlock (as yourself)" ;;
+    echo "==> app $name (app $appid, ${org:+org $org}${inst:+installation $inst}, key ${keyarg%%:*}). Check it: sudo airlock-envoy-cred status (once a line uses it). Use 'credential $name' on GitHub lines (repos named, one owner) and apply; a pass key: then airlock-envoy-cred unlock (as yourself)" ;;
   mint-mark-missing)
     # For airlock-envoy-apply: the token files of a mint.conf about to be installed.
     [ $# = 1 ] && [ -r "$1" ] || die "usage: airlock-envoy-cred mint-mark-missing <mint.conf>"
@@ -650,12 +650,18 @@ case "$cmd" in
       exec 9>&-
     }
     # An earlier set --file killed before it finished: if its apply got through (the config
-    # reads the file), the move is finished; else it is a pass credential again.
+    # reads the file), the move is finished; else it is a pass credential again. Not while its
+    # apply may still run (killed, the set lock went with it; the apply lives on).
+    setfmt=""
     if [ -f "$PASS_DIR/.$name.set" ] && ! is_pass "$name"; then
+      exec 6>> "$APPLY_LOCK"
+      flock -n 6 || die "an airlock-envoy-apply is running (an interrupted set --file's?): try again once it is done (nothing was changed)"
       trap '' INT TERM HUP
+      setfmt=$(sed -n 's/^format //p' "$PASS_DIR/.$name.set")
       if reads_file && [ -f "$DIR/$name.yaml" ] && ! grep -q "inline_string: \"$LOCKED " "$DIR/$name.yaml"; then
         exec 9> "$RUN/.lock"; flock 9
         rm -f "$PASS_DIR/.$name.set"; write "$SEC" "$name" "$LOCKED $name" locked
+        if [ -f "$STATE" ] && grep -q '^unlocked' "$STATE"; then sed -i "/^credential $name pass /d" "$STATE"; else write_state locked; fi
         exec 9>&-
         echo "airlock-envoy-cred: an earlier set --file of $name did not finish: finished now (the applied config reads the file)" >&2
       else
@@ -663,6 +669,7 @@ case "$cmd" in
         echo "airlock-envoy-cred: an earlier set --file of $name did not finish: it is a pass credential again" >&2
       fi
       trap - INT TERM HUP
+      exec 6>&-
     fi
     fmt="" tofile=0
     while [ $# -gt 0 ]; do
@@ -676,6 +683,8 @@ case "$cmd" in
       [ "$tofile" = 1 ] || die "$name is a pass credential: its secret is the pass entry (airlock-envoy-cred unlock). To make it a file credential instead (the secret then on disk, never locked): set $name --file, which applies"
       [ -n "$fmt" ] || fmt=$(pass_field "$name" format)
     fi
+    # Finishing an interrupted set --file: the pass credential's format, as that one had.
+    [ -n "$fmt" ] || [ "$tofile" = 0 ] || fmt=$setfmt
     [ -n "$fmt" ] || fmt=bearer
     if [ -t 0 ]; then read -rs -p "Secret for $name: " secret; echo >&2
     else secret="$(cat)"; secret=${secret%$'\n'}; fi
