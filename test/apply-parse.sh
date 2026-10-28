@@ -534,6 +534,34 @@ grep -q 'a:sub(1, 21) == "airlock-envoy-locked "' <<< "$lb" || cfail+=" check"
 if [ -z "$cfail" ]; then echo "ok   pass credentials: read from the tmpfs, the locked check after the injectors, upstream's marker removed, only where used"
 else echo "FAIL pass credential rendering:$cfail"; fails=$((fails+1)); fi
 
+# Every Lua filter's code starts by turning LuaJIT's compiler off: the units set
+# MemoryDenyWriteExecute, and the first compiled trace panics Envoy (credential-locked lacked
+# it and crashed a host every 15-25 minutes). All five filters rendered at once (a pass
+# credential for the locked check), then apply refusing a filter without it, from a file and
+# from its own inline code.
+mkdir -p "$work/jcopy"
+sed "s#^PASS_DIR=/etc/airlock-envoy/pass#PASS_DIR=$work/pass#" "$apply" > "$work/jcopy/apply"; chmod +x "$work/jcopy/apply"
+cp install/*.lua "$work/jcopy/"
+: > "$work/pass/c-pass"
+printf 'http api.example.com rules github-api credential c-pass\nhttp git.example.com rules git credential c-g protect main\nhttp mcp.example.com rules mcp credential c-m endpoints /a/mcp deny-tools /a/mcp:x\nb http://api.example.com http://git.example.com http://mcp.example.com\nclient b t\n' > "$work/site"
+jfail=""
+r="$("$work/jcopy/apply" --render "$work/site")" || jfail+=" render"
+names="$(grep -B3 'lua\.v3\.Lua' <<< "$r" | sed -n 's/^ *- name: \(.*\)$/\1/p' | sort | tr '\n' ' ')"
+[ "$names" = "credential-locked git-protect github-graphql mcp-nobody mcp-tools " ] || jfail+=" filters($names)"
+firsts="$(awk '/lua\.v3\.Lua/ { w = 1; next } w && /inline_string: \|/ { s = 1; next }
+  w && s { l = $0; sub(/^ +/, "", l); if (l == "" || l ~ /^--/) next; print l; w = s = 0 }' <<< "$r" | sed 's/ *--.*//' | sort -u)"
+[ "$firsts" = "if jit then jit.off() end" ] || jfail+=" first-lines($firsts)"
+sed -i '/^if jit then jit.off() end/d' "$work/jcopy/mcp-tools.lua"
+out="$("$work/jcopy/apply" --render "$work/site" 2>&1)" && jfail+=" file-without-accepted"
+[[ "$out" == *"internal: a Lua filter without jit.off() first"*"starts with:"* ]] || jfail+=" file-message($out)"
+cp install/mcp-tools.lua "$work/jcopy/"
+sed -i '/name: credential-locked/,/function envoy_on_request/{/if jit then jit.off() end/d}' "$work/jcopy/apply"
+out="$("$work/jcopy/apply" --render "$work/site" 2>&1)" && jfail+=" inline-without-accepted"
+[[ "$out" == *"internal: a Lua filter without jit.off() first"* ]] || jfail+=" inline-message($out)"
+"$work/jcopy/apply" --list "$work/site" >/dev/null || jfail+=" list-needs-no-render"
+if [ -z "$jfail" ]; then echo "ok   Lua filters: all five start with jit.off(); apply refuses to render one without it (a file or its own code)"
+else echo "FAIL Lua jit.off:$jfail"; fails=$((fails+1)); fi
+
 # GitHub App credentials: tokens per line (a write token for repos, a read one for repos-read),
 # each route its own, mint.conf what airlock-envoy-mint mints; only named repos of one owner, on
 # GitHub rules. A copy of apply with its Apps directory here.

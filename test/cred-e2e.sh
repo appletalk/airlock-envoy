@@ -72,7 +72,13 @@ grep -q "path: \"$R/secrets/gh.yaml\"" rendered.yaml && grep -q 'name: credentia
 sed -e "s#/run/airlock-envoy-internal/#$work/#" -e "s#/etc/airlock-envoy/ca/test.pem#$work/ca.pem#" \
     -e "s#address: \"api.example.com\", port_value#address: \"127.0.0.1\", port_value#" \
     -e "s#path: /var/log/airlock-envoy/access.jsonl#path: $work/access.jsonl#" rendered.yaml > envoy.yaml
-envoy -c envoy.yaml --disable-hot-restart -l warn --base-id-path "$work/base-id" > envoy.log 2>&1 & pids+=($!)
+# Envoy as the units run it: under MemoryDenyWriteExecute (test/mdwe-exec.py), so a Lua filter
+# that lets LuaJIT compile panics here as on a host; one worker, so a few hundred requests make
+# its code hot.
+mdwe=(python3 -I "$repo/test/mdwe-exec.py")
+"${mdwe[@]}" true 2>/dev/null || { echo "skip MemoryDenyWriteExecute: the kernel lacks PR_SET_MDWE (Linux 6.3+)"; mdwe=(); }
+"${mdwe[@]}" envoy -c envoy.yaml --concurrency 1 --disable-hot-restart -l warn --base-id-path "$work/base-id" > envoy.log 2>&1 & pids+=($!)
+envoy_pid=$!
 for _ in $(seq 50); do [ -S b.sock ] && break; sleep 0.1; done
 [ -S b.sock ] || { echo "FAIL envoy did not start"; cat envoy.log; exit 1; }
 python3 -I - "$PX" "$work/b.sock" <<'PY' & pids+=($!)
@@ -113,8 +119,18 @@ out="$(get)"; n="$(grep -c LIVE-TOKEN upstream.log)"
 
 printf 'gh %s\n' "$(printf LIVE-TOKEN-2 | base64 -w0)" | cred receive >/dev/null; settle
 [[ "$(get)" == *"authorization=Bearer LIVE-TOKEN-2"* ]] && ok "unlocked again: the new token" || fail "second unlock"
+# Every Lua filter hot: credential-locked on 400 requests, the GraphQL check on bodies whose
+# tokenizer loops run thousands of times (one worker, so LuaJIT would compile them by now).
+for _ in $(seq 400); do curl -s -o /dev/null -w '%{http_code}\n' --max-time 5 -x "http://127.0.0.1:$PX" http://api.example.com/repos/o/r; done > hot.codes
+[ "$(grep -c '^200$' hot.codes)" = 400 ] && ok "400 requests through credential-locked" || fail "hot requests: $(sort hot.codes | uniq -c | tr '\n' ' ')"
+q="$(printf 'a%.0s ' $(seq 6000))"
+for _ in $(seq 8); do curl -s -o /dev/null -w '%{http_code}\n' --max-time 5 -x "http://127.0.0.1:$PX" -H 'content-type: application/json' \
+  --data-binary "{\"query\":\"query { viewer { $q } }\"}" http://api.example.com/graphql; done > hot2.codes
+[ "$(grep -c '^501$' hot2.codes)" = 8 ] && ok "8 GraphQL queries of 6000 tokens through the check (upstream's 501: it takes no POST)" || fail "hot GraphQL: $(sort hot2.codes | uniq -c | tr '\n' ' ')"
 python3 -I -c "import json,sys; [print(json.loads(l)['status']) for l in open(sys.argv[1])]" access.jsonl 2>/dev/null | grep -qx 423 \
   && ok "the access log records the 423s" || fail "no 423 in the access log"
 
+kill -0 "$envoy_pid" 2>/dev/null && ! grep -q 'PANIC\|runtime code generation failed' envoy.log \
+  && ok "Envoy still running, no Lua panic (under MemoryDenyWriteExecute)" || fail "Envoy died or panicked: $(grep -m2 'PANIC\|code generation' envoy.log)"
 echo "failures: $fails"
 exit "$fails"

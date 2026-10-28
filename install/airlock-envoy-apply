@@ -1417,6 +1417,7 @@ EOF
               "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
               default_source_code:
                 inline_string: |
+                  if jit then jit.off() end   -- MemoryDenyWriteExecute: see lua_jit_check
                   function envoy_on_request(h)
                     local b = h:body()
                     if b and b:length() > 0 then
@@ -1482,6 +1483,7 @@ EOF
               "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
               default_source_code:
                 inline_string: |
+                  if jit then jit.off() end   -- MemoryDenyWriteExecute: see lua_jit_check
                   function envoy_on_request(h)
                     local a = h:headers():get("authorization")
                     if a and a:sub(1, 21) == "airlock-envoy-locked " then
@@ -1538,7 +1540,32 @@ EOF
   done
 }
 
-render() {  # render <access log path>
+# Every Lua filter's code must start by turning LuaJIT's compiler off. The units set
+# MemoryDenyWriteExecute, so the first trace LuaJIT compiles (a function or loop hot after
+# about a hundred runs on one worker) fails to map executable memory, and Envoy panics
+# ("unprotected error in call to Lua API (runtime code generation failed, restricted
+# kernel?)") and drops every tunnel. The interpreter is plenty for what these filters do.
+# Reads a rendered config on stdin; prints each Lua filter whose code doesn't, and fails.
+lua_jit_check() {
+  awk '
+    /"@type": type\.googleapis\.com\/envoy\.extensions\.filters\.http\.lua\.v3\.Lua/ { n++; want = 1; src = 0; next }
+    want && /^ *inline_string: \|$/ { src = 1; next }
+    want && src {
+      line = $0; sub(/^ +/, "", line)
+      if (line == "" || line ~ /^--/) next
+      if (line !~ /^if jit then jit\.off\(\) end( +--.*)?$/) { print "Lua filter " n " starts with: " line; bad = 1 }
+      want = 0; next
+    }
+    want && /^ *(- name:|typed_config:|"@type":)/ && !src { print "Lua filter " n " has no inline_string"; bad = 1; want = 0 }
+    END { if (want) { print "Lua filter " n " has no code"; bad = 1 } exit bad }'
+}
+render() {  # render <access log path>: the config, refused if a Lua filter would run with LuaJIT's compiler on
+  local out why
+  out="$(render_config "$1")" || exit 1
+  why="$(lua_jit_check <<< "$out")" || die "internal: a Lua filter without jit.off() first (Envoy would panic under MemoryDenyWriteExecute): $why"
+  printf '%s\n' "$out"
+}
+render_config() {  # render_config <access log path>
   local log=$1 l d k de first=1 rt=""
   # Scoped routes (an http line's repos) carry a regex per repo, and a long <owner>/<repo>
   # (every letter a class) is over RE2's default program size, which Envoy refuses.

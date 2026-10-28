@@ -24,6 +24,14 @@ suites, which need no podman.
 | `test/mcp-e2e.sh` | The `mcp` rules in a real Envoy against a stand-in MCP server (`test/mcp-up.py`, TLS): JSON and event-stream answers, the session header, the GET stream and its idle close, DELETE, every refusal with nothing upstream, the tool lists, the rate limit, a locked credential, a POST stream past 120 s (needs envoy, python3, openssl, curl; a little over 2 minutes, `LONG=<seconds>` shortens it) |
 | `test/run-envoy.sh test/site.conf` then `test/site-checks.sh` | Site listeners, each reaching exactly its own list |
 
+The suites that run a real Envoy (`protect-e2e`, `cred-e2e`, `mint-e2e`, `mcp-e2e`) start it as
+the units run it: under MemoryDenyWriteExecute (`test/mdwe-exec.py`: `prctl(PR_SET_MDWE)`, Linux
+6.3+, else a `skip` line) with one worker, and end by checking it is still running with no Lua
+panic. `cred-e2e` and `mcp-e2e` drive a few hundred requests through every Lua filter they
+render, so a filter that lets LuaJIT compile (no `jit.off()` first) panics there as on a host.
+`apply-parse.sh` checks every rendered Lua filter starts with `jit.off()`, and that apply
+refuses to render one that doesn't.
+
 ## All the tests at once
 
 ```

@@ -84,7 +84,13 @@ sed -e "s#/run/airlock-envoy-internal/#$work/#" -e "s#/etc/airlock-envoy/ca/test
     -e "s#/run/airlock-envoy-mint/tokens#$R/mint/tokens#g" \
     -e "s#address: \"api.example.com\", port_value#address: \"127.0.0.1\", port_value#" \
     -e "s#path: /var/log/airlock-envoy/access.jsonl#path: $work/access.jsonl#" rendered.yaml > envoy.yaml
-envoy -c envoy.yaml --disable-hot-restart -l warn --base-id-path "$work/base-id" > envoy.log 2>&1 & pids+=($!)
+# Envoy as the units run it: under MemoryDenyWriteExecute (test/mdwe-exec.py), so a Lua filter
+# that lets LuaJIT compile panics here as on a host; one worker, so a few hundred requests make
+# its code hot.
+mdwe=(python3 -I "$repo/test/mdwe-exec.py")
+"${mdwe[@]}" true 2>/dev/null || { echo "skip MemoryDenyWriteExecute: the kernel lacks PR_SET_MDWE (Linux 6.3+)"; mdwe=(); }
+"${mdwe[@]}" envoy -c envoy.yaml --concurrency 1 --disable-hot-restart -l warn --base-id-path "$work/base-id" > envoy.log 2>&1 & pids+=($!)
+envoy_pid=$!
 for _ in $(seq 50); do [ -S b.sock ] && break; sleep 0.1; done
 [ -S b.sock ] || { echo "FAIL envoy did not start"; cat envoy.log; exit 1; }
 socat TCP-LISTEN:$PX,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:b.sock 2>/dev/null & pids+=($!)
@@ -141,5 +147,7 @@ grep -q 'inline_string: "airlock-envoy-unavailable file-app"' "$R/mint/tokens/to
 rm -f api.log.fail
 grep -q 'airlock-envoy-unavailable' rendered.yaml && ok "Envoy's check answers unavailable with 503" || fail "no unavailable branch in the render"
 
+kill -0 "$envoy_pid" 2>/dev/null && ! grep -q 'PANIC\|runtime code generation failed' envoy.log \
+  && ok "Envoy still running, no Lua panic (under MemoryDenyWriteExecute)" || fail "Envoy died or panicked: $(grep -m2 'PANIC\|code generation' envoy.log)"
 echo "failures: $fails"
 exit "$fails"
