@@ -485,9 +485,16 @@ case "$cmd" in
       # Its tokens are revoked with its definition: a run first sweeps what is still recorded
       # (lines gone), at the network's pace and without this lock, so lock, boot and the
       # expiry never wait on it; then, under both locks, the mint account says whether any is left.
+      # The definition as it is now: an add-app over it meanwhile is not what was asked to go.
+      appdef() { { cat "$APPS/$1" "$APPS/$1.pem" 2>/dev/null || true; } | sha256sum; }   # a pass key has no .pem
+      def=$(appdef "$1")
+      # The mint unit runs only with a mint.conf: after the last App line went, an empty one, so
+      # its sweep still revokes what is left (the next apply removes it again).
+      [ -e "$MINT_CONF" ] || install -m 0640 -o root -g "$MINT_USER" /dev/null "$MINT_CONF"
       exec 9>&-
       systemctl start "$MINT_SVC" 2>/dev/null || true
       exec 9> "$RUN/.lock"; flock 9
+      [ "$(appdef "$1")" = "$def" ] || die "app $1 changed meanwhile (add-app?): nothing was changed"
       mint_dirs
       exec 7< "$MRUN/.lock"
       flock -w 30 7 || die "a mint run holds its lock: try again (nothing was changed)"
@@ -495,7 +502,7 @@ case "$cmd" in
       rc=0; left=$(timeout 10 setpriv --reuid="$MINT_USER" --regid="$MINT_USER" --clear-groups --no-new-privs -- "$(mint_tool)" forget "$1" 6>&- 7<&- 9>&- 2>/dev/null | head -c 32) || rc=$?
       case "$rc:$left" in
         0:0) ;;
-        1:[1-9]*) die "app $1: $left token(s) minted with it not revoked yet (GitHub unreachable? journalctl -u airlock-envoy-mint); the mint timer retries: remove it again later (nothing was changed)" ;;
+        1:[1-9]*) die "app $1: $left token(s) minted with it not revoked yet (GitHub unreachable? journalctl -u airlock-envoy-mint): remove it again later, each try sweeps first (nothing was changed)" ;;
         *) die "app $1: the mint account could not say what is left to revoke (nothing was changed)" ;;
       esac
       k=$(app_field "$1" key)
@@ -620,13 +627,34 @@ case "$cmd" in
     [ $# -ge 1 ] || die "usage: airlock-envoy-cred set <name> [--format bearer|token|raw|basic:<user>] [--file]"
     name=$1; shift; valid_name "$name"
     ! is_app "$name" || die "$name is a GitHub App (airlock-envoy-cred remove $name, once no line uses it)"
-    # An earlier set --file stopped before it finished (killed): it is a pass credential again,
-    # and this set needs --file to finish the move.
-    if [ -f "$PASS_DIR/.$name.set" ] && ! is_pass "$name"; then
-      run_dirs; exec 9> "$RUN/.lock"; flock 9
-      [ ! -f "$PASS_DIR/.$name.set" ] || is_pass "$name" || mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"
+    # One set --file at a time, from the start (a run in flight looks like a killed one). Its
+    # rollback: back to a pass credential, the file locked if the config Envoy runs reads it
+    # (deleting it would leave Envoy the last value it read, out of reach of lock), else gone.
+    if [ -f "$PASS_DIR/.$name.set" ] || [[ " $* " == *" --file "* ]]; then
+      run_dirs; exec 5> "$RUN/.set.lock"
+      flock -n 5 || die "another set --file is running: try again once it is done (nothing was changed)"
+    fi
+    reads_file() { grep -qF "path: \"$DIR/$name.yaml\"" "$ENVOY_YAML" 2>/dev/null; }
+    set_back() {
+      exec 9> "$RUN/.lock"; flock 9
+      mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"
+      if reads_file; then write "$DIR" "$name" "$LOCKED $name" locked; else rm -f "$DIR/$name.yaml"; fi
       exec 9>&-
-      echo "airlock-envoy-cred: an earlier set --file of $name did not finish: it is a pass credential again" >&2
+    }
+    # An earlier set --file killed before it finished: if its apply got through (the config
+    # reads the file), the move is finished; else it is a pass credential again.
+    if [ -f "$PASS_DIR/.$name.set" ] && ! is_pass "$name"; then
+      trap '' INT TERM HUP
+      if reads_file && [ -f "$DIR/$name.yaml" ]; then
+        exec 9> "$RUN/.lock"; flock 9
+        rm -f "$PASS_DIR/.$name.set"; write "$SEC" "$name" "$LOCKED $name" locked
+        exec 9>&-
+        echo "airlock-envoy-cred: an earlier set --file of $name did not finish: finished now (the applied config reads the file)" >&2
+      else
+        set_back
+        echo "airlock-envoy-cred: an earlier set --file of $name did not finish: it is a pass credential again" >&2
+      fi
+      trap - INT TERM HUP
     fi
     fmt="" tofile=0
     while [ $# -gt 0 ]; do
@@ -673,22 +701,17 @@ case "$cmd" in
     write "$DIR" "$name" "$value" "$fmt"; value="" secret=""
     mv -f "$PASS_DIR/$name" "$PASS_DIR/.$name.set"
     exec 9>&-
-    # Back to a pass credential. If the config Envoy runs already reads the file, the file stays,
-    # locked (deleting it would leave Envoy the last value it read, out of reach of lock).
-    set_back() {
-      exec 9> "$RUN/.lock"; flock 9
-      mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"
-      if grep -qF "path: \"$DIR/$name.yaml\"" "$ENVOY_YAML" 2>/dev/null; then write "$DIR" "$name" "$LOCKED $name" locked
-      else rm -f "$DIR/$name.yaml"; fi
-    }
-    trap 'trap - INT TERM HUP; set_back; die "interrupted: $name stays a pass credential (apply again)"' INT TERM HUP
+    # A signal during the apply rolls back; none can cut the rollback itself short.
+    trap 'trap "" INT TERM HUP; set_back; die "interrupted: $name stays a pass credential (apply again)"' INT TERM HUP
     if ! cred_apply; then
-      trap - INT TERM HUP
+      trap '' INT TERM HUP
       set_back
       die "the apply failed: $name stays a pass credential; fix the apply and set it again (if the apply got as far as Envoy, apply again once it works)"
     fi
-    trap - INT TERM HUP
+    trap '' INT TERM HUP
     exec 9> "$RUN/.lock"; flock 9
+    { [ -f "$PASS_DIR/.$name.set" ] && ! is_pass "$name" && [ -f "$DIR/$name.yaml" ]; } \
+      || die "$name changed during the apply: check airlock-envoy-cred status"
     rm -f "$PASS_DIR/.$name.set"
     write "$SEC" "$name" "$LOCKED $name" locked
     { [ -f "$STATE" ] && grep -q '^unlocked' "$STATE"; } || write_state locked

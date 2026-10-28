@@ -210,6 +210,10 @@ printf 'example-app ghs_neverinstalledneverinstalled' > "$R/minted/.tok-q.new"; 
 [ ! -e "$R/minted/.tok-q.new" ] && grep -q '"revoke_unknown": "ghs_neverinstalledneverinstalled"' api.log && ok "a pending record of another token: revoked" || fail "pending revoke"
 sed -i '/tok-q/d' "$E/mint.conf"; mint run >/dev/null 2>&1
 
+# check waits for a run (or root's lock): it mints too.
+( exec 8< "$R/.lock"; flock 8; sleep 2 ) & h=$!; sleep 0.3
+t=$(date +%s%N); mint check >/dev/null 2>&1; t=$(( ($(date +%s%N) - t) / 1000000 )); wait "$h"
+[ "$t" -ge 1400 ] && ok "check waits for the run lock (${t} ms)" || fail "check didn't wait (${t} ms)"
 # check: the installation (id, selection, permissions, installed repos) against the lines.
 out="$(mint check 2>&1)"; rc=$?
 [ "$rc" = 1 ] && [[ "$out" == *"app example-app: installation 678 on example-org, selected repositories, permissions contents=write, issues=write, metadata=read, pull_requests=read"* ]] \

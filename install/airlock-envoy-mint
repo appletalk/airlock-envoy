@@ -352,6 +352,8 @@ case "$cmd" in
     conf=$CONF
     if [ $# -gt 1 ]; then [ "$2" = --conf ] && [ $# = 3 ] || die "usage: airlock-envoy-mint check [--conf <file>]"; conf=$3; fi
     [ -r "$conf" ] || die "no $conf: no line uses an App credential"
+    # Not alongside a run or root's lock (remove asks forget under it): the check mints too.
+    exec 8< "$LOCK"; flock -w 60 8 || die "a mint run holds the lock: check again"
     rc=0
     while read -r app; do
       valid_app "$app" || { echo "app $app: not set up (airlock-envoy-cred add-app)"; rc=1; continue; }
