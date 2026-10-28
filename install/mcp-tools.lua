@@ -162,6 +162,7 @@ end
 -- matches struct fields in any case (and folds some non-ASCII letters, as U+017F to s), so
 -- {"Method": ...} or "paramſ" would reach a Go server as method or params unread here.
 -- Returns the index after the object, or nil and the reason.
+local PROTO = { __proto__ = true, constructor = true, prototype = true }
 local function members(s, i, on, keys)
   local seen = {}
   i = ws(s, i + 1)
@@ -174,6 +175,8 @@ local function members(s, i, on, keys)
       if not key:match("^[\32-\126]*$") then return nil, "a key outside printable ASCII" end
       k = key:lower()
       if keys[k] and key ~= k then return nil, "the key " .. key .. " (not " .. k .. ")" end
+      -- A JS server copying the message (Object.assign, for-in) would take what __proto__ holds.
+      if PROTO[k] then return nil, "the key " .. key end
     end
     if seen[k] then return nil, "the key " .. key .. " twice in one object" end
     seen[k] = true

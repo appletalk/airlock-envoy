@@ -92,8 +92,8 @@ The line's `endpoints` name them, each an exact path.
     streams back unbuffered and uncapped in size.
   - GET: the server's event stream. A server without one answers 405, which passes through.
   - DELETE: the end of a session.
-  - GET and DELETE carry no body (a `Content-Length` of 0 at most, nothing chunked): one would
-    reach the server past the tool check.
+  - GET and DELETE carry no non-empty body (a `Content-Length` of 0 at most; a chunked body
+    must be empty): one would reach the server past the tool check.
 - **Refused** (403, with the reason, nothing upstream):
   - every other path: a prefix or suffix of an endpoint, another case, a trailing slash the
     line doesn't list, `/.well-known/*` (OAuth discovery: the credential comes from Envoy),
@@ -175,7 +175,7 @@ body to that endpoint:
 - Every other method, notifications and responses pass. Which method decides: only
   `tools/call` is checked.
 - A batch with one refused message is refused whole.
-- Also refused: a body that isn't strict JSON, a key twice in one object, a call without a
+- Also refused: a body that isn't strict JSON, a key twice in a message or its `params`, a call without a
   string `params.name`, a tool name outside the MCP character set (1 to 128 of
   `A-Z a-z 0-9 _ - .`), a method name with anything but printable ASCII (no space: a server
   that trimmed `tools/call ` would run it), a batch of over 100 messages, nesting over 64
@@ -183,7 +183,9 @@ body to that endpoint:
 - In a message and its `params`, keys are read as a Go server reads them: in any case. So a
   key twice in another case (`method` and `Method`), a protocol key in another case (`Method`,
   `Params`, `Name`, `ID`) and a key outside printable ASCII (Go folds `ſ` to `s`, so `paramſ`
-  is `params` to it) are refused. Keys inside `arguments` are the tool's, and pass.
+  is `params` to it) are refused, and so are `__proto__`, `constructor` and `prototype` (a
+  JavaScript server copying the message would take what they hold). Keys inside `arguments`
+  are the tool's, and pass.
 - A refusal is a JSON-RPC error, HTTP 200, so the client shows the reason: one error with the
   request's `id` (code -32001), or for a batch an array with an error for each request in it.
   A body it can't read gets one error with a null `id` (code -32700).

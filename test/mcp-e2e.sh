@@ -205,6 +205,8 @@ for ct in 'application/json; charset=utf-8' 'application/json; charset="UTF-8"';
 done
 refused "a body on GET" 403 -X GET -H 'content-type: application/json' -H "mcp-session-id: $SID" --data-binary "$(call 42 write_thing)" "$U/alpha/mcp"
 refused "a chunked body on GET" 403 -X GET -H 'transfer-encoding: chunked' -H "mcp-session-id: $SID" --data-binary "$(call 43 write_thing)" "$U/mcp"
+refused "a chunked body on DELETE" 403 -X DELETE -H 'transfer-encoding: chunked' -H "mcp-session-id: $SID" --data-binary "$(call 45 write_thing)" "$U/mcp"
+rpc_refused "a __proto__ key" /alpha/mcp '{"jsonrpc":"2.0","id":37,"__proto__":{"method":"tools/call","params":{"name":"write_thing"}}}' '"code":-32700'
 refused "a body on DELETE" 403 -X DELETE -H 'content-type: application/json' -H "mcp-session-id: $SID" --data-binary "$(call 44 write_thing)" "$U/mcp"
 out="$(c -X DELETE -H 'content-length: 0' -H "mcp-session-id: $SID" "$U/mcp")"
 [[ "$out" == "HTTP/1.1 200"* ]] && ok "DELETE with Content-Length 0 passes" || fail "DELETE content-length 0: $out"

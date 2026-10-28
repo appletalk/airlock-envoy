@@ -82,6 +82,11 @@ local cases = {
   { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/list","id":2}' },
   { true,  deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_a","arguments":{"Name":"x","name":"y","ſ":1}}}' },
   { true,  deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_a","_meta":{"progressToken":1}}}' },
+  -- from the re-review: a JS server copying the message would take what __proto__ holds
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"__proto__":{"method":"tools/call","params":{"name":"write_thing"}}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_a","__proto__":{"name":"write_thing"}}}' },
+  { false, deny,  '{"jsonrpc":"2.0","id":1,"constructor":{},"method":"tools/list"}' },
+  { true,  deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_a","arguments":{"__proto__":{"x":1}}}}' },
   -- method names a server might trim or cut at a NUL
   { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call ","params":{"name":"write_thing"}}' },
   { false, deny,  '{"jsonrpc":"2.0","id":1,"method":"tools/call\\u0000","params":{"name":"write_thing"}}' },
