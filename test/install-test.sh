@@ -635,12 +635,12 @@ r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(kreq "http://$KIP/repos/example-org
 x sh -c 'for _ in $(seq 50); do grep -q revoked /root/k/api.log && exit 0; sleep 0.2; done; exit 1' || true
 ck "mint: locked again: 423, the key gone, its token revoked at the API" \
    '[ "$(tail -1 <<< "$r")" = 423 ] && ! x test -e /run/airlock-envoy-mint/keys/t-papp.pem && x grep -q "\"revoked\"" /root/k/api.log'
-x systemctl stop t-gh-app 2>/dev/null || true
 site "extra @anthropic example.com:443" "client extra client"
 x airlock-envoy-apply >/dev/null
 ck "plain HTTP dropped: a running socket's manifest is updated by the apply (no hosts)" 'x test -f "$EM" && ! x grep -qv "^#" "$EM"'
-ck "mint: no line uses an App any more: the timer disabled, mint.conf gone" \
-   '[ "$(x systemctl is-enabled airlock-envoy-mint.timer 2>/dev/null)" != enabled ] && ! x test -e /etc/airlock-envoy-mint/mint.conf'
+ck "mint: no line uses an App any more: its tokens revoked, the timer disabled, mint.conf gone" \
+   '[ "$(x systemctl is-enabled airlock-envoy-mint.timer 2>/dev/null)" != enabled ] && ! x test -e /etc/airlock-envoy-mint/mint.conf && [ -z "$(x ls -A /run/airlock-envoy-mint/minted)" ]'
+x systemctl stop t-gh-app 2>/dev/null || true
 
 echo "== $distro: per-user sockets"
 # Two users, each with its own listeners: neither can see or reach the other's sockets, and a
