@@ -35,6 +35,7 @@ sed -i -e 's#^      \[ ! -f "$PASS_DIR/.$name.set" \] || mv -f "$PASS_DIR/.$name
        -e 's#^    write "$DIR" "$name" "$value" "$fmt"; value="" secret=""$#    [ -z "${KILL_BEFORE_WRITE:-}" ] || { ls -A "$PASS_DIR" > "$KILL_BEFORE_WRITE"; kill -KILL $$; }\n&#' \
        -e 's#^ *rm -f "$PASS_DIR/.$name.set"$#    [ -z "${KILL_BEFORE_RM:-}" ] || { cat "$SEC/$name.yaml" > "$KILL_BEFORE_RM"; kill -KILL $$; }\n&#' "$work/bin/airlock-envoy-cred"
 # A pause once a recovery holds the apply lock (to see set_back keep it).
+# shellcheck disable=SC2016  # the tool's own text
 sed -i 's#^      held6=1$#&; [ -z "${PAUSE_HELD6:-}" ] || sleep 1#' "$work/bin/airlock-envoy-cred"
 [ "$(grep -c 'KILL_AT_SETBACK\|KILL_BEFORE_WRITE\|KILL_BEFORE_RM\|PAUSE_HELD6' "$work/bin/airlock-envoy-cred")" = 5 ] || { echo "FAIL the kill points didn't take"; exit 1; }
 chmod +x "$work/bin/airlock-envoy-cred"
