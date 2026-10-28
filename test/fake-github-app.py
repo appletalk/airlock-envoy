@@ -133,7 +133,7 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(port)), H)
+srv = http.server.ThreadingHTTPServer((os.environ.get("FAKE_BIND", "127.0.0.1"), int(port)), H)
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 ctx.load_cert_chain(cert, key)
 srv.socket = ctx.wrap_socket(srv.socket, server_side=True)

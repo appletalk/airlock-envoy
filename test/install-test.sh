@@ -609,7 +609,7 @@ ck "mint: /run/airlock-envoy-mint root's (tmpfiles.d), keys/ root:airlock-envoy-
 x sh -c 'cd /root/k && openssl genrsa -out app.pem 2048 2>/dev/null && openssl rsa -in app.pem -pubout -out app.pub 2>/dev/null \
   && printf "r\np\n" > api.log.repos && printf "{\"contents\": \"read\", \"issues\": \"write\", \"metadata\": \"read\", \"pull_requests\": \"write\"}" > api.log.perms'
 x systemctl stop t-kube-echo 2>/dev/null || true
-x systemd-run -q --collect --unit=t-gh-app python3 -I /repo/test/fake-github-app.py 8443 /root/k/srv.pem /root/k/srv.key /root/k/app.pub 12345 678 /root/k/api.log
+x systemd-run -q --collect --unit=t-gh-app -E FAKE_BIND="$KIP" python3 -I /repo/test/fake-github-app.py 8443 /root/k/srv.pem /root/k/srv.key /root/k/app.pub 12345 678 /root/k/api.log
 x sh -c 'for _ in $(seq 100); do grep -q ":20FB 00000000:0000 0A" /proc/net/tcp && exit 0; sleep 0.05; done; exit 1'
 x install -m 0644 /root/k/ca.pem /etc/airlock-envoy-mint/t-ca.pem
 x sh -c "airlock-envoy-cred add-app t-app --app-id 12345 --installation-id 678 --key file --api https://$KIP:8443 --ca /etc/airlock-envoy-mint/t-ca.pem < /root/k/app.pem" >/dev/null
