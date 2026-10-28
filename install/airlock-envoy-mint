@@ -198,14 +198,53 @@ mint() {
   id=$(inst_id "$1") || return 1
   out=$(api "$1" POST "/app/installations/$id/access_tokens" "Bearer $(jwt "$1")" "$2") || { log "app $1: the API could not be reached"; return 1; }
   [ "$(status_of "$out")" = 201 ] || { log "app $1: GitHub refused the token (HTTP $(status_of "$out")): $(body_of "$out" | head -c 300 | tr -cd '[:print:]')"; return 1; }
-  # A token of GitHub's characters, an expiry in the future within a day.
-  body_of "$out" | python3 -I -c 'import json, sys, re, datetime, time
+  # A token of GitHub's characters, an expiry in the future within a day. GitHub's tokens are
+  # opaque to us: since 2026 an installation token is a stateless "ghs_<app id>_<JWT>" (dots and
+  # dashes, ~520 characters, its length varying), before it 40 letters and digits; any of
+  # [A-Za-z0-9._-], 20 to 4096 long, is taken (no quote, backslash or space: it goes into a
+  # header and a YAML string). One refused is described by its shape (never the token) and, if it
+  # is safe in a header, revoked, so it doesn't stay live at GitHub unused until it expires.
+  local verdict t
+  verdict=$(body_of "$out" | python3 -I -c 'import json, sys, re, datetime, time
 j = json.load(sys.stdin)
 t, e = j.get("token"), j.get("expires_at")
-if not (isinstance(t, str) and re.fullmatch(r"[A-Za-z0-9_]{20,255}", t) and isinstance(e, str)): sys.exit(1)
-x = datetime.datetime.strptime(e, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
-if not (time.time() < x <= time.time() + 86400): sys.exit(1)
-print(t, int(x))' || { log "app $1: no usable token in GitHub's answer"; return 1; }
+def when(e):
+    # 2026-10-28T16:00:00Z, also with fractions of a second or a +00:00 offset
+    if not (isinstance(e, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,9})?(Z|[+-]\d\d:\d\d)", e)):
+        return None
+    try:
+        d = datetime.datetime.fromisoformat(re.sub(r"(\.\d{1,6})\d*", r"\1", e).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d.timestamp() if d.tzinfo else None
+x = when(e)
+good = isinstance(t, str) and re.fullmatch(r"[A-Za-z0-9._-]{20,4096}", t)
+if good and x is not None and time.time() < x <= time.time() + 86400:
+    print("ok", t, int(x)); sys.exit(0)
+# the shape, not the token
+if isinstance(t, str):
+    kinds = [k for k, r in (("letters", "[A-Za-z]"), ("digits", "[0-9]"), ("._-", "[._-]")) if re.search(r, t)]
+    other = sorted(set(re.sub(r"[A-Za-z0-9._-]", "", t)))
+    shape = "%d characters, %s%s" % (len(t), "+".join(kinds) or "none", ", others: " + ascii("".join(other))[:40] if other else "")
+else:
+    shape = "no token string (%s)" % type(t).__name__
+exp = ascii(e)[:60] if e is not None else "none"
+why = "bad token" if not good else "bad expiry"
+print("%s; the token: %s; expires_at %s" % (why, shape, exp))
+# revocable: printable ASCII with no quote, backslash or space, not too long for a header
+if isinstance(t, str) and re.fullmatch(r"[!#-\[\]-~]{1,8192}", t):
+    print("revoke", t)') || { log "app $1: GitHub's answer is not JSON"; return 1; }
+  case "$verdict" in
+    "ok "*) printf '%s' "${verdict#ok }"; return 0 ;;
+  esac
+  log "app $1: GitHub's 201 has no usable token: $(head -n 1 <<< "$verdict" | tr -cd '[:print:]')"
+  t=$(sed -n 's/^revoke //p' <<< "$verdict")
+  if [ -n "$t" ]; then
+    if revoke_token "$1" "$t"; then log "app $1: that token was revoked"; else log "app $1: that token could not be revoked: live at GitHub until it expires"; fi
+  else
+    log "app $1: that token can't be sent to revoke it: live at GitHub until it expires"
+  fi
+  return 1
 }
 body_for() {  # body_for <repos> <perms>: the access_tokens request
   local r p x b='{"repositories":['

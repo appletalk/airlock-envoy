@@ -260,10 +260,31 @@ mv "$E/apps/org-app.pem" "$work/org-app.pem"; mint run >/dev/null 2>&1; sleep 3;
 grep -q "\"revoked\": \"${fk#token }\"" api.log && ok "a file key gone: its line's token retired and revoked" || fail "no key file: not revoked"
 sed -i '/tok-fk/d' "$E/mint.conf"; mint run >/dev/null 2>&1
 
-# GitHub's answer is read strictly: a token of odd characters is no token (the line stays as it was).
+# GitHub's tokens: the stateless one (ghs_<app id>_<JWT>, ~520 characters, dots and dashes) by
+# default here, as GitHub mints them since 2026; the 40-character one before it; both injected.
+printf 'token tok-fmt app example-app owner example-org repos tools perms contents=read format basic\n' >> "$E/mint.conf"
+mint run >/dev/null 2>&1; v="$(val tok-fmt)"; t="$(base64 -d <<< "${v#Basic }" | sed -n 's/^x-access-token://p')"
+[[ "$t" =~ ^ghs_12345_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]] && [ "${#t}" -gt 400 ] && grep -q "\"token\": \"$t\"" api.log \
+  && ok "a stateless token (${#t} characters, two dots) minted and injected as Basic" || fail "stateless: ${#t} $v"
+grep -q "^example-app $t\$" "$R/minted/tok-fmt" && ok "...and recorded whole, to revoke" || fail "record: $(cat "$R/minted/tok-fmt")"
+sed -i '/tok-fmt/d' "$E/mint.conf"; mint run >/dev/null 2>&1
+grep -q "\"revoked\": \"$t\"" api.log && ok "...and revoked once its line goes" || fail "stateless not revoked"
+printf 'token tok-leg app example-app owner example-org repos tools perms contents=read format token\n' >> "$E/mint.conf"
+touch api.log.legacytoken api.log.fracexpiry; mint run >/dev/null 2>&1; rm -f api.log.legacytoken api.log.fracexpiry
+[[ "$(val tok-leg)" =~ ^token\ ghs_[0-9a-f]{36}$ ]] && grep -q '^app example-app, minted, expires [0-9]' <<< "$(sed -n '1s/^# airlock-envoy credential [^,]*, //p' "$R/tokens/tok-leg.yaml")" \
+  && ok "a 40-character token too, and an expires_at with fractions of a second and +00:00" || fail "legacy: $(val tok-leg)"
+sed -i '/tok-leg/d' "$E/mint.conf"; mint run >/dev/null 2>&1
+
+# GitHub's answer is read strictly: a token outside [A-Za-z0-9._-]{20,4096} is no token (the line
+# stays as it was). Its shape is logged, never the token; one safe in a header is revoked at once.
 printf 'token tok-odd app example-app owner example-org repos tools perms contents=read format token\n' >> "$E/mint.conf"
-touch api.log.badtoken; mint run >/dev/null 2>&1; rm -f api.log.badtoken
+touch api.log.badtoken; out="$(mint run 2>&1)"; rm -f api.log.badtoken
 [ "$(val tok-odd)" = "airlock-envoy-unavailable example-app" ] && ! grep -q 'x\\"' "$R/tokens/tok-odd.yaml" && ok "a token of odd characters in GitHub's answer is refused" || fail "odd token: $(val tok-odd)"
+[[ "$out" == *"no usable token: bad token; the token: 31 characters, letters+._-, others: "*"expires_at '20"* && "$out" == *"can't be sent to revoke it: live at GitHub until it expires"* && "$out" != *aaaaaaaaaaaa* ]] \
+  && ok "...its shape logged, not the token; one with a space isn't sent to revoke" || fail "odd log: $out"
+touch api.log.longtoken; out="$(mint run 2>&1)"; rm -f api.log.longtoken
+[ "$(val tok-odd)" = "airlock-envoy-unavailable example-app" ] && [[ "$out" == *"5004 characters, letters"* && "$out" == *"that token was revoked"* && "$out" != *aaaaaaaaaaaa* ]] \
+  && grep -q "\"revoked\": \"ghs_aaaaaaaaaa" api.log && ok "a token too long to take: refused, and revoked at GitHub" || fail "long: $out"
 sed -i '/tok-odd/d' "$E/mint.conf"
 
 # No token in an argv: curl reads headers and body from stdin.

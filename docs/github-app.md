@@ -138,6 +138,12 @@ one at a time (a lock), so two can't revoke each other's fresh tokens.
 ## Minting, renewing, revoking
 
 - The JWT: RS256 with the App's key, `iat` a minute back (clock skew), `exp` nine minutes on.
+- The token is opaque: anything of `[A-Za-z0-9._-]`, 20 to 4096 characters, is taken. That
+  covers GitHub's stateless tokens (since 2026: `ghs_<app id>_<JWT>`, about 520 characters, the
+  length varying) and the 40-character ones before them. `expires_at` may carry fractions of a
+  second or an offset. A 201 whose token or expiry doesn't fit is logged by its shape (length,
+  kinds of character, the expiry as sent; never the token), and the token is revoked at once if
+  it can be sent in a header, so it doesn't stay live and unused for its hour.
 - A token is minted when its line is new or changed, or within 15 minutes (plus up to 2 of
   jitter) of its expiry; tokens last an hour. `airlock-envoy-mint.timer` runs every 5 minutes,
   apply runs it after each apply, unlock runs it, and so does Envoy's start.

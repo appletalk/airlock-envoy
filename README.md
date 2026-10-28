@@ -12,13 +12,10 @@ two modes:
 | Mode | For | What the proxy does |
 |---|---|---|
 | **CONNECT tunnel** | Clients that need TLS end to end, such as Claude Code (`HTTPS_PROXY`), whose login and Remote Control need the real Anthropic API | Allows exact hosts only, checks the TLS server name, sees host, bytes and timing but never content, holds no secret |
-| **Plain HTTP with an injected credential** | Clients you can point at a plain-HTTP URL (`gh`, `git`, `curl`, `kubectl`) | Checks method and path against a preset, adds the credential, opens TLS upstream itself. The box never holds the token |
+| **Plain HTTP with an injected credential** | Clients you can point at a plain-HTTP URL (`gh`, `git`, `tea`, `curl`, `kubectl`) | Checks method and path against a preset, adds the credential, opens TLS upstream itself. The box never holds the token |
 
 Per-repo scoping is the `repos` option of the `http` line, read-only repos its `repos-read`,
 protected branches its `protect`; a GitHub App credential gets each line its own minted token.
-
-Status: **spike**. The install path is tested on Arch, Debian 13 and Ubuntu 26.04 (in
-systemd-booted containers), and runs as a service on an Arch workstation.
 
 ## Contents
 

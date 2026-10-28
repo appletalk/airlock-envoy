@@ -45,6 +45,13 @@ def jwt_ok(auth):
     return None
 
 
+def stateless_token():
+    b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+    head = b64(json.dumps({"alg": "RS256", "typ": "JWT", "kid": secrets.token_hex(8)}).encode())
+    body = b64(json.dumps({"iss": "github", "app": int(app_id), "inst": int(inst_id), "n": secrets.token_hex(secrets.randbelow(16) + 4)}).encode())
+    return "ghs_%s_%s.%s.%s" % (app_id, head, body, b64(secrets.token_bytes(256)))
+
+
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -74,11 +81,19 @@ class H(http.server.BaseHTTPRequestHandler):
                 time.sleep(float(open(log + ".delay").read()))
             if os.path.exists(log + ".fail"):
                 return self.reply(422, {"message": "permission not granted"}, {"request": req})
-            tok = "ghs_" + secrets.token_hex(18)
+            # GitHub's stateless format since 2026 (ghs_<app id>_<JWT>, ~520 characters, its length
+            # varying, dots, dashes and underscores); .legacytoken: the 40-character one before it
+            tok = stateless_token()
+            if os.path.exists(log + ".legacytoken"):
+                tok = "ghs_" + secrets.token_hex(18)
             if os.path.exists(log + ".badtoken"):
                 tok = "ghs_aaaaaaaaaaaaaaaaaaaaaaaa \\x"
+            if os.path.exists(log + ".longtoken"):
+                tok = "ghs_" + "a" * 5000
             issued.add(tok)
             exp = datetime.datetime.fromtimestamp(time.time() + 3600, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if os.path.exists(log + ".fracexpiry"):
+                exp = datetime.datetime.fromtimestamp(time.time() + 3600, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00")
             return self.reply(201, {"token": tok, "expires_at": exp, "permissions": req.get("permissions"),
                                     "repositories": [{"name": r} for r in req.get("repositories", [])]},
                               {"request": req, "token": tok})
