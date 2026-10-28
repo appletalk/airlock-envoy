@@ -211,8 +211,10 @@ printf 'example-app ghs_neverinstalledneverinstalled' > "$R/minted/.tok-q.new"; 
 sed -i '/tok-q/d' "$E/mint.conf"; mint run >/dev/null 2>&1
 
 # Never as root: its directories are the mint account's.
+mkdir -p rootbin
 # shellcheck disable=SC2016  # the stub's own $1
-mkdir -p rootbin; printf '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n' > rootbin/id; chmod +x rootbin/id
+printf '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n' > rootbin/id
+chmod +x rootbin/id
 out="$(PATH="$PWD/rootbin:$PATH" mint check 2>&1)"; rc=$?
 [ "$rc" = 2 ] && [[ "$out" == *"not as root"* ]] && ok "the minter refuses root" || fail "minter as root: rc $rc, $out"
 # check waits for a run (or root's lock): it mints too.
