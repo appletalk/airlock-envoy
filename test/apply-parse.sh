@@ -569,6 +569,14 @@ out="$("$work/jcopy/apply" --render "$work/site" 2>&1)" && jfail+=" block-commen
 [[ "$out" == *"block comment before jit.off()"* ]] || jfail+=" block-comment-message($out)"
 cp install/mcp-tools.lua "$work/jcopy/"
 "$work/jcopy/apply" --render "$work/site" >/dev/null || jfail+=" restored-copy-refused"
+# Only Lua code is searched: a host or tool name with "jit.on" in it renders.
+printf 'http jit.one.example.com rules mcp credential c-j endpoints /a/mcp tools /a/mcp:jit.on\nb http://jit.one.example.com\nclient b t\n' > "$work/site2"
+"$apply" --render "$work/site2" >/dev/null 2>&1 || jfail+=" site-name-jit-on-refused"
+# A render that fails part way prints nothing and leaves no file behind.
+mkdir -p "$work/jtmp"; mv "$work/jcopy/github-graphql.lua" "$work/jcopy/github-graphql.lua.off"
+out="$(TMPDIR="$work/jtmp" "$work/jcopy/apply" --render "$work/site" 2>/dev/null)" && jfail+=" broken-render-accepted"
+[ -z "$out" ] && [ -z "$(ls -A "$work/jtmp")" ] || jfail+=" broken-render-output-or-leftover"
+mv "$work/jcopy/github-graphql.lua.off" "$work/jcopy/github-graphql.lua"
 if [ -z "$jfail" ]; then echo "ok   Lua filters: all five start with jit.off(); apply refuses to render one without it (a file or its own code)"
 else echo "FAIL Lua jit.off:$jfail"; fails=$((fails+1)); fi
 

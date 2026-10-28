@@ -37,7 +37,12 @@ names() {  # no site details in the tracked files (this repo is public; the patt
 # jit.off() panics LuaJIT there (without the kernel feature, plain luajit, said so).
 # shellcheck disable=SC2329  # run via the suites below
 mdwe_luajit() {
-  python3 -I test/mdwe-exec.py true 2>/dev/null || { echo "skip MemoryDenyWriteExecute for $1: the kernel lacks PR_SET_MDWE"; luajit "$1"; return; }
+  local rc=0
+  python3 -I test/mdwe-exec.py true 2>/dev/null || rc=$?
+  if [ "$rc" = 3 ] && [ "${REQUIRE_MDWE:-}" != 1 ]; then
+    echo "skip MemoryDenyWriteExecute for $1: the kernel lacks PR_SET_MDWE"; luajit "$1"; return
+  fi
+  [ "$rc" = 0 ] || { echo "FAIL test/mdwe-exec.py true: exit $rc"; return 1; }
   python3 -I test/mdwe-exec.py luajit "$1"
 }
 # shellcheck disable=SC2329  # run via run()

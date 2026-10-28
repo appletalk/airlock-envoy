@@ -1546,14 +1546,20 @@ EOF
 # ("unprotected error in call to Lua API (runtime code generation failed, restricted
 # kernel?)") and drops every tunnel. The interpreter is plenty for what these filters do.
 # Reads a rendered config on stdin; prints each Lua filter whose code doesn't, and fails. Also
-# refused anywhere: per-route Lua (source_codes: each runs in its own Lua state), jit.on, and a
-# block comment (--[[) before the line, which could hide it.
+# refused: per-route Lua (a source_codes key: each runs in its own Lua state), turning the
+# compiler on again anywhere in a filter's code, and a block comment (--[[) before the line,
+# which could hide it. Only Lua code is searched, so a site name holding "jit.on" is no match.
 lua_jit_check() {
   awk '
-    /source_codes:/ { print "per-route Lua (source_codes)"; bad = 1 }
-    /jit\.on/ { print "jit.on"; bad = 1 }
+    /^ *source_codes:/ { print "per-route Lua (source_codes)"; bad = 1 }
+    code {
+      if ($0 ~ /^ *$/) next
+      match($0, /^ */)
+      if (RLENGTH < ind) code = 0
+      else if ($0 ~ /jit *[.:] *on *[(]|jit *\[ *["\047]on["\047] *\]|require *[(]? *["\047]jit["\047]/) { print "Lua filter " n " turns the compiler on: " $0; bad = 1 }
+    }
     /"@type": type\.googleapis\.com\/envoy\.extensions\.filters\.http\.lua\.v3\.Lua *$/ { n++; want = 1; src = 0; next }
-    want && /^ *inline_string: \|$/ { src = 1; next }
+    want && /^ *inline_string: \|$/ { src = 1; code = 1; match($0, /^ */); ind = RLENGTH + 1; next }
     want && src {
       line = $0; sub(/^ +/, "", line)
       if (line ~ /^--\[=*\[/) { print "Lua filter " n " has a block comment before jit.off()"; bad = 1; want = 0; next }
@@ -1564,17 +1570,14 @@ lua_jit_check() {
     want && /^ *(- name:|typed_config:|"@type":)/ && !src { print "Lua filter " n " has no inline_string"; bad = 1; want = 0 }
     END { if (want) { print "Lua filter " n " has no code"; bad = 1 } exit bad }'
 }
-# A rendered config through the check. Rendered to a file in this shell, not a command
-# substitution, so set -e still stops the render at its first failing command.
+# A rendered config through the check. A command substitution drops set -e, so the render runs
+# with it set again inside; its failure then fails the plain assignment (no || or if around
+# it, where bash would ignore set -e altogether), and the script's own set -e stops there.
 lua_checked() {  # lua_checked <render function> <access log path>
-  local tmp why
-  tmp="$(mktemp)"
-  "$1" "$2" > "$tmp"
-  if ! why="$(lua_jit_check < "$tmp")"; then
-    rm -f "$tmp"
-    die "internal: a Lua filter without jit.off() first (Envoy would panic under MemoryDenyWriteExecute): $why"
-  fi
-  cat "$tmp"; rm -f "$tmp"
+  local out why
+  out="$(set -e; "$1" "$2")"
+  why="$(lua_jit_check <<< "$out")" || die "internal: a Lua filter without jit.off() first (Envoy would panic under MemoryDenyWriteExecute): $why"
+  printf '%s\n' "$out"
 }
 render() { lua_checked render_config "$1"; }   # render <access log path>: the config, its Lua checked
 render_config() {  # render_config <access log path>

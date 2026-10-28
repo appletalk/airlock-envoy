@@ -91,7 +91,7 @@ sed -e "s#/run/airlock-envoy-internal/#$work/#" -e "s#address: \"git.example.com
 # REQUIRE_MDWE=1 (CI) makes a kernel without it a failure, not a skip.
 mdwe=(python3 -I "$repo/test/mdwe-exec.py") under="under MemoryDenyWriteExecute"
 "${mdwe[@]}" true 2>/dev/null; rc=$?
-if [ "$rc" = 3 ] && [ -z "${REQUIRE_MDWE:-}" ]; then
+if [ "$rc" = 3 ] && [ "${REQUIRE_MDWE:-}" != 1 ]; then
   echo "skip MemoryDenyWriteExecute: the kernel lacks PR_SET_MDWE (Linux 6.3+); Envoy runs without it"; mdwe=() under="WITHOUT MemoryDenyWriteExecute"
 elif [ "$rc" != 0 ]; then echo "FAIL test/mdwe-exec.py true: exit $rc"; exit 1; fi
 "${mdwe[@]}" envoy -c envoy.yaml --concurrency 1 --disable-hot-restart -l warn --base-id-path "$work/base-id" > envoy.log 2>&1 & pids+=($!)
