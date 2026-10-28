@@ -24,13 +24,13 @@ sed -e "s#^DIR=/etc/airlock-envoy/credentials#DIR=$E/credentials#" -e "s#^CA_DIR
     -e 's# -o "$MINT_USER" -g "$MINT_USER"##g' -e 's# -o "$MINT_USER" -g "$grp"##g' -e 's# -o root -g "$MINT_USER"##g' \
     -e 's#chown "$MINT_USER:$grp" "$tmp"; ##' -e 's#chown "$MINT_USER:$MINT_USER" "$tmp"; ##' -e 's#chown "root:$MINT_USER" "\([^"]*\)"; ##' \
     -e "s#^APPS=/etc/airlock-envoy-mint/apps#APPS=$E/mint/apps#" -e "s#^MINT_CONF=/etc/airlock-envoy-mint/mint.conf#MINT_CONF=$E/mint/mint.conf#" \
-    -e "s#^MRUN=/run/airlock-envoy-mint#MRUN=$R/mint#" -e "s#^EXPIRE_WAIT=60 #EXPIRE_WAIT=2 #" \
+    -e "s#^MRUN=/run/airlock-envoy-mint#MRUN=$R/mint#" -e "s#^APPLY_LOCK=/run/airlock-envoy-apply.lock #APPLY_LOCK=$R/apply.lock #" -e "s#^EXPIRE_WAIT=60 #EXPIRE_WAIT=2 #" \
     -e "s#^now() { date +%s; }#now() { cat $work/clock/now 2>/dev/null || date +%s; }#" \
     -e "s#^boot_secs() { cut -d. -f1 /proc/uptime; }#boot_secs() { cat $work/clock/boot 2>/dev/null || cut -d. -f1 /proc/uptime; }#" \
     install/airlock-envoy-cred > "$work/bin/airlock-envoy-cred"
 chmod +x "$work/bin/airlock-envoy-cred"
 # Each rewrite above must have taken: a missed one would test the real paths or owners.
-for pat in "DIR=$E/credentials" "PASS_DIR=$E/pass" "RUN=$R" "ENVOY_YAML=$E/envoy.yaml" "cat $work/clock/now" "cat $work/clock/boot"; do
+for pat in "APPLY_LOCK=$R/apply.lock" "DIR=$E/credentials" "PASS_DIR=$E/pass" "RUN=$R" "ENVOY_YAML=$E/envoy.yaml" "cat $work/clock/now" "cat $work/clock/boot"; do
   grep -qF "$pat" "$work/bin/airlock-envoy-cred" || { echo "FAIL the test copy lacks $pat"; exit 1; }
 done
 # shellcheck disable=SC2016  # $MINT_USER is the tool's text
@@ -82,6 +82,8 @@ EOF
 cat > "$work/bin/airlock-envoy-apply" <<EOF
 #!/bin/sh
 echo "apply \$(ls "$E/credentials" | tr '\n' ' ')" >> "$work/apply.log"
+[ -z "\${APPLY_READS_FILE:-}" ] || printf '                    sds_config: { path_config_source: { path: "%s/%s.yaml" } }\n' "$E/credentials" "\$APPLY_READS_FILE" > "$E/envoy.yaml"
+[ -z "\${SLOW_APPLY:-}" ] || sleep "\$SLOW_APPLY"
 [ -z "\${FAIL_APPLY:-}" ] || exit 1
 # Envoy restarted by the apply runs boot first (ExecStartPre): it must not wait on migrate.
 FAKE_UID=0 timeout 5 "$work/bin/airlock-envoy-cred" boot || { echo "boot from apply failed rc=\$?" >> "$work/apply.log"; exit 1; }
@@ -231,6 +233,17 @@ printf 'PASS-VALUE\n' > "$work/store/work/pc"; root add pc --pass work/pc --form
   && ok "set: a pass credential needs --file" || fail "set pc without --file"
 ! printf 'NEW\n' | FAIL_APPLY=1 root set pc --file >/dev/null 2>&1 && [ -f "$E/pass/pc" ] && [ ! -f "$E/credentials/pc.yaml" ] && [ ! -e "$E/pass/.pc.set" ] \
   && ok "set --file: an apply that fails leaves it a pass credential, no file" || fail "set --file with a failing apply"
+! printf 'NEW\n' | APPLY_READS_FILE=pc FAIL_APPLY=1 root set pc --file >/dev/null 2>&1 && [ -f "$E/pass/pc" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "airlock-envoy-locked pc" ] \
+  && ok "set --file: an apply that fails after Envoy reads the file: the file stays, locked (Envoy never keeps the new value)" || fail "set --file failing after load: $(secret_of "$E/credentials/pc.yaml")"
+rm -f "$E/credentials/pc.yaml"; uses gh
+printf 'NEW\n' | SLOW_APPLY=5 FAKE_UID=0 airlock-envoy-cred set pc --file >/dev/null 2>&1 & sp=$!; sleep 1; kill -TERM "$sp"; wait "$sp"; rc=$?
+[ "$rc" != 0 ] && [ -f "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [ ! -e "$E/credentials/pc.yaml" ] \
+  && ok "set --file interrupted during the apply: a pass credential again, no file" || fail "set --file interrupted: rc $rc, $(ls -A "$E/pass")"
+mv "$E/pass/pc" "$E/pass/.pc.set"
+out="$(printf 'X\n' | root set pc 2>&1)"
+[ -f "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [[ "$out" == *"did not finish"*"needs --file"* || "$out" == *"did not finish"*"--file"* ]] \
+  && ok "set after a killed set --file: it is a pass credential again, and needs --file" || fail "killed set --file: $out"
+uses pc; cred unlock >/dev/null; [ "$(secret_of "$R/secrets/pc.yaml")" = "token PASS-VALUE" ] || fail "pc not unlocked for set --file"
 : > "$work/apply.log"
 out="$(printf 'NEW\n' | root set pc --file 2>&1)"
 [ ! -e "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "token NEW" ] \
@@ -382,7 +395,17 @@ out="$(root remove a1 2>&1)"
   && ok "remove: an App with a token still to revoke refused, after a mint run" || fail "remove a1 with a record: $out"
 rm "$R/mint/minted/tok-bbbbbbbbbbbb-rw"; printf 'a1 ghs_check' > "$R/mint/minted/.check.a1"
 ! root remove a1 >/dev/null 2>&1 && [ -f "$E/mint/apps/a1" ] && ok "remove: a check's token still recorded counts too" || fail "remove a1 with a check record"
-rm "$R/mint/minted/.check.a1"; : > "$work/setpriv.log"
+rm "$R/mint/minted/.check.a1"
+( exec 6>> "$R/apply.lock"; flock 6; sleep 2 ) & h=$!; sleep 0.3
+out="$(root remove a1 2>&1)"; wait "$h"
+[[ "$out" == *"airlock-envoy-apply is running"* ]] && [ -f "$E/mint/apps/a1" ] && ok "remove: refused while an apply runs" || fail "remove during an apply: $out"
+SLOW_MINT=3 FAKE_UID=0 airlock-envoy-cred remove a1 >/dev/null 2>&1 & rp=$!; sleep 1
+t=$(date +%s%N); root lock >/dev/null; t=$(( ($(date +%s%N) - t) / 1000000 )); wait "$rp"; rrc=$?
+[ "$t" -lt 1500 ] && [ "$rrc" = 0 ] && [ ! -e "$E/mint/apps/a1" ] && ok "a lock during remove's mint run doesn't wait for it (${t} ms)" || fail "lock waited on remove's mint run (${t} ms, rc $rrc)"
+root add-app a1 --app-id 1 --installation-id 2 --key file < "$work/app.pem" >/dev/null; printf '7 1  https://api.github.com\n' > "$R/mint/installations/a1"
+root add-app a3 --app-id 1 --installation-id 2 --key pass:work/app-key >/dev/null; mkdir -p "$R/mint/keys"; cp "$work/app.pem" "$R/mint/keys/a3.pem"
+root remove a3 >/dev/null && [ ! -e "$R/mint/keys/a3.pem" ] && [ ! -e "$E/mint/apps/a3" ] && ok "remove: an unlocked pass key goes with its App" || fail "remove a3 (unlocked key)"
+: > "$work/setpriv.log"
 out="$(root remove a1 2>&1)"
 [ ! -e "$E/mint/apps/a1" ] && [ ! -e "$E/mint/apps/a1.pem" ] && [ ! -e "$R/mint/installations/a1" ] && [[ "$out" == *"app a1 removed"* ]] \
   && grep -q -- "--reuid=airlock-envoy-mint .*airlock-envoy-mint forget a1" "$work/setpriv.log" \

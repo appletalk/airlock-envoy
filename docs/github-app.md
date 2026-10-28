@@ -30,7 +30,8 @@ On the host, as its operator (not in a box):
    lock` locks it early; `sudo airlock-envoy-cred status` shows each App, its tokens, and the check.
 
 To take an App away: take its lines out of the site file, apply (its tokens are revoked), then
-`sudo airlock-envoy-cred remove <name>`. That refuses an App a line still uses, runs a mint first,
+`sudo airlock-envoy-cred remove <name>`. That refuses an App a line still uses (or while an apply
+runs), runs a mint first (without holding the credential lock, so `lock` never waits on it),
 and removes the App (its definition, a file key, an unlocked key, the cached installation) only if
 no token minted with it is left unrevoked. Otherwise it says how many and changes nothing; the
 timer keeps retrying, so run it again later. A pass key's entry stays in pass.

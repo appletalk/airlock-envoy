@@ -317,6 +317,8 @@ sudo airlock-envoy-cred ca cluster < ca.pem
   git use `basic:x-access-token`. Envoy uses the new value from the next request, no restart.
   `--file` turns a pass credential back into a file one, applied in one step
   ([docs/unlock.md](docs/unlock.md)).
+- `remove <name>`: forgets a pass credential (locked first), or removes a GitHub App no line
+  uses once nothing minted with it is left to revoke ([docs/github-app.md](docs/github-app.md)).
 - `revoke <name>`: writes a value that grants nothing. Deleting the file would not work:
   Envoy keeps the last good value. Revoke it at the issuer too.
 - `list`: file credentials (name, format, date), pass credentials (name, pass entry, format)

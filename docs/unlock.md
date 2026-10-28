@@ -101,8 +101,11 @@ it; take it out of the site file and apply.
 `set <name> --file` (as root) goes the other way, a pass credential back to a file one: it reads
 the secret as `set` does (the pass credential's format unless `--format`), writes the file,
 applies (Envoy reads the file from then on), and only then forgets the pass credential and locks
-its tmpfs copy. If the apply fails, it stays a pass credential and the file goes. Without
-`--file`, `set` refuses a pass credential, since the secret then lives on disk, never locked.
+its tmpfs copy. If the apply fails or is interrupted, it stays a pass credential: the file goes,
+or, if the config Envoy runs already reads it, stays locked (Envoy keeps the last value of a
+deleted file); apply again. A `set --file` killed outright is noticed by the next `set` of that
+name, which makes it a pass credential again. Without `--file`, `set` refuses a pass credential,
+since the secret then lives on disk, never locked.
 
 ## Expiry
 
