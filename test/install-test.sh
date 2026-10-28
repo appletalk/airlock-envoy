@@ -47,7 +47,7 @@ podman run -d --name "$name" --systemd=always -v ./:/repo:ro "${airlock_mount[@]
 # shellcheck disable=SC2329  # run by the trap
 cleanup() {
   local rc=$?
-  [ "$rc" = 0 ] || podman exec "$name" journalctl -u airlock-envoy -u airlock-envoy-logrotate --no-pager -n 40 2>/dev/null || true
+  [ "$rc" = 0 ] || podman exec "$name" journalctl -u airlock-envoy -u airlock-envoy-logrotate -u airlock-envoy-mint --no-pager -n 60 2>/dev/null || true
   podman rm -f "$name" >/dev/null 2>&1 || true
   exit "$rc"
 }
