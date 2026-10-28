@@ -75,12 +75,12 @@ mv -f "$dest/.envoy-$ver.new" "$dest/envoy-$ver"
 ln -sfn "$dest/envoy-$ver" /usr/local/bin/envoy.new
 mv -Tf /usr/local/bin/envoy.new /usr/local/bin/envoy
 echo "==> /usr/local/bin/envoy -> $dest/envoy-$ver"
-# The other versions, and any half-installed one. A running Envoy keeps its binary until it
-# restarts (the file stays open), so this is safe before the restart below.
+# The other versions, and any half-installed one. A running Envoy keeps its binary open until
+# it is restarted, so this is safe before that restart.
 for f in "$dest"/envoy-* "$dest"/.envoy-*.new; do
   [ -e "$f" ] || [ -L "$f" ] || continue
   [ "$f" != "$dest/envoy-$ver" ] || continue
-  rm -f -- "$f" && echo "    removed $f"
+  if rm -f -- "$f"; then echo "    removed $f"; else echo "    could not remove $f: remove it by hand" >&2; fi
 done
 if systemctl is-active --quiet airlock-envoy 2>/dev/null; then
   echo "    running service: systemctl restart airlock-envoy (open tunnels drop; box sockets stay)"
