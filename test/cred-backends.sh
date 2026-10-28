@@ -88,6 +88,8 @@ EOF
 cat > "$work/bin/airlock-envoy-apply" <<EOF
 #!/bin/sh
 echo "apply \$(ls "$E/credentials" | tr '\n' ' ') fds:\$(ls /proc/\$\$/fd | tr '\n' ' ')" >> "$work/apply.log"
+# As the real one: one apply at a time, refused (not waited for) while one runs.
+exec 7>> "$R/apply.lock"; flock -n 7 || { echo "apply refused: another runs" >> "$work/apply.log"; exit 1; }
 [ -z "\${APPLY_READS_FILE:-}" ] || printf '                    sds_config: { path_config_source: { path: "%s/%s.yaml" } }\n' "$E/credentials" "\$APPLY_READS_FILE" > "$E/envoy.yaml"
 [ -z "\${SLOW_APPLY:-}" ] || sleep "\$SLOW_APPLY"
 [ -z "\${FAIL_APPLY:-}" ] || exit 1
@@ -256,6 +258,15 @@ mv "$E/pass/pc" "$E/pass/.pc.set"
 out="$(printf 'X\n' | root set pc 2>&1)"
 [ -f "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [[ "$out" == *"did not finish"*"needs --file"* || "$out" == *"did not finish"*"--file"* ]] \
   && ok "set after a killed set --file: it is a pass credential again, and needs --file" || fail "killed set --file: $out"
+# A plain set finishing one keeps the format too (basic:<user> for git), and the operator's state drops it.
+printf 'X\n' | root add pb --pass work/pc --format basic:x-access-token >/dev/null; mv "$E/pass/pb" "$E/pass/.pb.set"
+printf 'X\n' | root set pbx >/dev/null; mv "$E/credentials/pbx.yaml" "$E/credentials/pb.yaml"
+printf '                    sds_config: { path_config_source: { path: "%s/pb.yaml" } }\n' "$E/credentials" > "$E/envoy.yaml"
+cp "$R/state" "$work/state.keep"; printf 'unlocked until x\ndeadline 9999999999\ncredential pb pass unlocked\n' > "$R/state"
+out="$(printf 'NEWV\n' | root set pb 2>&1)"
+[[ "$out" == *"finished now"* ]] && [ "$(secret_of "$E/credentials/pb.yaml")" = "Basic $(printf 'x-access-token:NEWV' | base64 -w0)" ] && ! grep -q '^credential pb ' "$R/state" \
+  && ok "a plain set finishing a killed set --file: the pass format kept, the state line dropped" || fail "plain set finish: $out / $(secret_of "$E/credentials/pb.yaml") / $(cat "$R/state")"
+cp "$work/state.keep" "$R/state"; uses gh
 # Killed outright after its apply got through (the config reads the file): the next set finishes it.
 mv "$E/pass/pc" "$E/pass/.pc.set"; printf 'X\n' | root set pcx >/dev/null; mv "$E/credentials/pcx.yaml" "$E/credentials/pc.yaml"
 printf '                    sds_config: { path_config_source: { path: "%s/pc.yaml" } }\n' "$E/credentials" > "$E/envoy.yaml"
@@ -283,7 +294,17 @@ rm -f "$E/credentials/pc.yaml"; uses gh
 # Killed between moving the record aside and writing the file: no secret file yet.
 out="$(printf 'NEW\n' | KILL_BEFORE_WRITE="$work/k2" FAKE_UID=0 airlock-envoy-cred set pc --file 2>&1)"
 grep -qx .pc.set "$work/k2" && [ ! -e "$E/credentials/pc.yaml" ] && ok "set --file: the record goes aside before the file is written" || fail "write order: $(cat "$work/k2")"
+# ...and a reboot then (an empty /run): boot makes its tmpfs file locked (Envoy won't start
+# without it) and says what to run; status names it too.
+rm -rf "$R/secrets"; out="$(root boot 2>&1)"
+[ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && [[ "$out" == *"set --file of pc did not finish"* ]] && [[ "$(root status)" == *"pc: a set --file did not finish"* ]] \
+  && ok "boot after a killed set --file: its tmpfs file made locked, the fix named" || fail "boot with a pending set: $out"
 printf 'X\n' | root set pc >/dev/null 2>&1; [ -f "$E/pass/pc" ] || fail "no roll back after the write-order kill"
+# Not while an apply runs: it could render the name from the record moved aside.
+( exec 6>> "$R/apply.lock"; flock 6; sleep 2 ) & h=$!; sleep 0.3
+out="$(printf 'X\n' | root set pc --file 2>&1)"; wait "$h"
+[[ "$out" == *"airlock-envoy-apply is running"* ]] && [ -f "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [ ! -e "$E/credentials/pc.yaml" ] \
+  && ok "set --file: refused while an apply runs, nothing changed" || fail "set --file during an apply: $out"
 # A recovery waits for an apply still running (the killed set's, say).
 mv "$E/pass/pc" "$E/pass/.pc.set"
 ( exec 6>> "$R/apply.lock"; flock 6; sleep 2 ) & h=$!; sleep 0.3
@@ -480,6 +501,7 @@ root remove a3 >/dev/null && [ ! -e "$R/mint/keys/a3.pem" ] && [ ! -e "$E/mint/a
 out="$(root remove a1 2>&1)"
 [ ! -e "$E/mint/apps/a1" ] && [ ! -e "$E/mint/apps/a1.pem" ] && [ ! -e "$R/mint/installations/a1" ] && [[ "$out" == *"app a1 removed"* ]] \
   && grep -q -- "--reuid=airlock-envoy-mint .*airlock-envoy-mint forget a1" "$work/setpriv.log" \
+  && ! grep "forget a1" "$work/setpriv.log" | grep -q 'fds:.* \(5\|6\|7\|9\) ' \
   && ok "remove: an App removed (key, definition, cached installation), asked of the mint account" || fail "remove a1: $out"
 root add-app a1 --app-id 1 --installation-id 2 --key file < "$work/app.pem" >/dev/null && ! printf 'X\n' | root set a1 >/dev/null 2>&1 \
   && ok "add-app again after remove; set over an App refused" || fail "re-add after remove, or set over an App"

@@ -212,6 +212,8 @@ write() {
 # "airlock-envoy-locked <name>", which Envoy answers with 423 and never sends upstream.
 # $STATE (world-readable, nothing secret) says which, and until when.
 is_pass() { [ -f "$PASS_DIR/$1" ]; }
+# A pass credential a set --file moved aside and never finished (killed): its name.
+pending_sets() { local f; shopt -s nullglob dotglob; for f in "$PASS_DIR"/.*.set; do f=${f##*/.}; echo "${f%.set}"; done; shopt -u nullglob dotglob; }
 pass_field() { sed -n "s/^$2 //p" "$PASS_DIR/$1"; }
 pass_names() { local f; shopt -s nullglob; for f in "$PASS_DIR"/*; do basename "$f"; done; shopt -u nullglob; }
 run_dirs() {
@@ -356,7 +358,7 @@ case "$cmd" in
     [ -n "$input" ] || die "nothing on stdin: nothing was changed" ;;
 esac
 case "$cmd" in
-  boot) [ -n "$(pass_names)" ] || [ -d "$SEC" ] || [ -s "$MINT_CONF" ] || exit 0 ;;&
+  boot) [ -n "$(pass_names)$(pending_sets)" ] || [ -d "$SEC" ] || [ -s "$MINT_CONF" ] || exit 0 ;;&
   receive|receive-migrate|add|add-app|add-github-app|remove|lock|boot)
     run_dirs; exec 9> "$RUN/.lock"; flock 9 ;;
   expire)
@@ -597,6 +599,15 @@ case "$cmd" in
     # Before Envoy starts: every pass credential has a file (locked, after a reboot); an unlock
     # still within its deadline keeps its timer running, anything else locks.
     for n in $(pass_names); do [ -f "$SEC/$n.yaml" ] || write "$SEC" "$n" "$LOCKED $n" locked; done
+    # One a killed set --file left aside: the config may still read its tmpfs file (Envoy won't
+    # start without it). Locked, and named, so the operator finishes it.
+    # (A set --file in flight holds the set lock: its own apply restarts Envoy, and runs this.)
+    for n in $(pending_sets); do
+      [[ "$n" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || continue
+      [ -f "$SEC/$n.yaml" ] || write "$SEC" "$n" "$LOCKED $n" locked
+      ( exec 5> "$RUN/.set.lock"; flock -n 5 ) 2>/dev/null || continue
+      echo "airlock-envoy-cred: set --file of $n did not finish: sudo airlock-envoy-cred set $n --file (or set $n, to keep it a pass credential)" >&2
+    done
     # App tokens: each line's file (locked or unavailable until minted), then a mint run.
     if [ -s "$MINT_CONF" ]; then
       mark_missing "$MINT_CONF"
@@ -611,6 +622,7 @@ case "$cmd" in
     if [ -f "$STATE" ]; then state_summary; else echo "no state (no pass credential since boot)"; fi
     shopt -s nullglob
     for f in "$DIR"/*.yaml; do printf 'credential %s file\n' "$(basename "$f" .yaml)"; done
+    for n in $(pending_sets); do printf 'credential %s: a set --file did not finish (set %s --file finishes it)\n' "$n" "$n"; done
     for n in $(pass_names); do
       printf 'credential %s pass %s (%s)%s\n' "$n" "$(pass_field "$n" entry)" \
         "$(grep -q "inline_string: \"$LOCKED " "$SEC/$n.yaml" 2>/dev/null && echo locked || echo unlocked)" \
@@ -684,7 +696,7 @@ case "$cmd" in
       [ -n "$fmt" ] || fmt=$(pass_field "$name" format)
     fi
     # Finishing an interrupted set --file: the pass credential's format, as that one had.
-    [ -n "$fmt" ] || [ "$tofile" = 0 ] || fmt=$setfmt
+    [ -n "$fmt" ] || fmt=$setfmt
     [ -n "$fmt" ] || fmt=bearer
     if [ -t 0 ]; then read -rs -p "Secret for $name: " secret; echo >&2
     else secret="$(cat)"; secret=${secret%$'\n'}; fi
@@ -715,11 +727,14 @@ case "$cmd" in
     # boot, which takes it).
     run_dirs; exec 9> "$RUN/.lock"; flock 9
     is_pass "$name" || die "$name changed meanwhile: nothing was changed"
+    # Not during an apply: it could render this name from the record moved aside below.
+    exec 6>> "$APPLY_LOCK"
+    flock -n 6 || die "an airlock-envoy-apply is running: try again once it is done (nothing was changed)"
     # No signal between here and the trap: the record is moved aside before the file exists.
     trap '' INT TERM HUP
     mv -f "$PASS_DIR/$name" "$PASS_DIR/.$name.set"
     write "$DIR" "$name" "$value" "$fmt"; value="" secret=""
-    exec 9>&-
+    exec 9>&- 6>&-
     # A signal during the apply rolls back; none can cut the rollback itself short.
     trap 'trap "" INT TERM HUP; set_back; die "interrupted: $name stays a pass credential (apply again)"' INT TERM HUP
     if ! cred_apply; then
