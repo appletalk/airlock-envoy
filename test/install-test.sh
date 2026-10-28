@@ -34,6 +34,8 @@ podman build -q -t "$img" -f - . >/dev/null <<EOF
 FROM $base
 RUN $prep && useradd -m client && useradd -m other
 COPY install/install-envoy.sh install/envoy-release-key.asc /tmp/install-envoy/
+# An older version and a half-installed one, which the install must remove.
+RUN install -d /usr/local/libexec/airlock-envoy && touch /usr/local/libexec/airlock-envoy/envoy-1.0.0 /usr/local/libexec/airlock-envoy/.envoy-1.0.1.new
 RUN /tmp/install-envoy/install-envoy.sh $ver && rm -r /tmp/install-envoy
 CMD ["$init"]
 EOF
@@ -69,6 +71,7 @@ done
 echo "== $distro: Envoy $ver installed by install-envoy.sh in the image build: $(x envoy --version | grep -o '/[0-9.]*/' | tr -d /)"
 fails=0
 ck() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fails=$((fails+1)); fi; }
+ck "install-envoy.sh left only the version it installed" '[ "$(x ls -A /usr/local/libexec/airlock-envoy)" = "envoy-$ver" ]'
 # client's Claude-only listener: in every site file below (see site), so it stays put.
 S=/run/airlock-envoy/client/c-anthropic.sock
 site() {  # site <line>...: /etc/airlock-envoy/site.conf: client's c-anthropic, then these lines

@@ -120,8 +120,9 @@ goes through that socket.
 ### Updating Envoy
 
 Run `install-envoy.sh` with the newer version, then `sudo systemctl restart airlock-envoy`.
-Older versions stay in `/usr/local/libexec/airlock-envoy/` for rollback: `ln -sfn` the old one
-back to `/usr/local/bin/envoy`. Restarts drop open connections, never the box sockets.
+It removes every other version from `/usr/local/libexec/airlock-envoy/` (an old Envoy left on
+disk may be a vulnerable one). To roll back, run `install-envoy.sh` with the old version: it is
+downloaded and verified again. Restarts drop open connections, never the box sockets.
 
 ## The site file
 

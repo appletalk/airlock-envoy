@@ -6,7 +6,8 @@
 # Usage, as root:  install/install-envoy.sh <version>          e.g. 1.40.2
 # Run it from a clean clone that no box mounts: as root it trusts this repo's key and code.
 # Each version lands in /usr/local/libexec/airlock-envoy/envoy-<version>, and
-# /usr/local/bin/envoy is switched to it atomically. Older versions stay for rollback.
+# /usr/local/bin/envoy is switched to it atomically. Every other version there is then removed:
+# an old Envoy left on disk may be a vulnerable one. To go back, install that version again.
 set -euo pipefail
 
 # Envoy maintainers <envoy-maintainers@googlegroups.com>: signed every release checked from
@@ -74,6 +75,13 @@ mv -f "$dest/.envoy-$ver.new" "$dest/envoy-$ver"
 ln -sfn "$dest/envoy-$ver" /usr/local/bin/envoy.new
 mv -Tf /usr/local/bin/envoy.new /usr/local/bin/envoy
 echo "==> /usr/local/bin/envoy -> $dest/envoy-$ver"
+# The other versions, and any half-installed one. A running Envoy keeps its binary until it
+# restarts (the file stays open), so this is safe before the restart below.
+for f in "$dest"/envoy-* "$dest"/.envoy-*.new; do
+  [ -e "$f" ] || [ -L "$f" ] || continue
+  [ "$f" != "$dest/envoy-$ver" ] || continue
+  rm -f -- "$f" && echo "    removed $f"
+done
 if systemctl is-active --quiet airlock-envoy 2>/dev/null; then
   echo "    running service: systemctl restart airlock-envoy (open tunnels drop; box sockets stay)"
 fi
