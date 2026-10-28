@@ -28,7 +28,7 @@ permissions:
 env:
   # The version test/install-test.sh installs by default. test/run-envoy.sh pins its own image
   # (by digest): bump both together.
-  ENVOY_VERSION: 1.40.0
+  ENVOY_VERSION: 1.40.2
 
 defaults:
   run:

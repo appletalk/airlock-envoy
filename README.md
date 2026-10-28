@@ -45,7 +45,7 @@ Works on Ubuntu, Debian, Arch and any other systemd + glibc Linux, on x86_64 or 
 Envoy's apt repository is unmaintained, so every distribution gets Envoy's official release
 binary. It is checked against the Envoy maintainers' release key, pinned by fingerprint
 `0AFC E836 BA4D 1D35 763C 8523 D8CD C375 0181 F31F` (the key behind every release from v1.25.0,
-January 2023, to v1.40.0). Nothing comes from the AUR or a third-party repository.
+January 2023, to v1.40.2). Nothing comes from the AUR or a third-party repository.
 
 ### 1. Prerequisites
 
@@ -62,7 +62,7 @@ Run these from a **clean clone that no airlock box mounts**. Both run as root an
 the release key and the built-in allowlist from the clone, so check `git status` first.
 
 ```
-sudo install/install-envoy.sh 1.40.0          # binary -> /usr/local/libexec/airlock-envoy/envoy-1.40.0
+sudo install/install-envoy.sh 1.40.2          # binary -> /usr/local/libexec/airlock-envoy/envoy-1.40.2
 sudo install/install-service.sh               # system account, units, airlock-envoy-apply, config
 ```
 
