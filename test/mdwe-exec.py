@@ -7,6 +7,8 @@
 import ctypes, os, sys
 
 PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN = 65, 1
+if len(sys.argv) < 2:
+    sys.exit("usage: mdwe-exec.py <command> [args...]")
 libc = ctypes.CDLL(None, use_errno=True)
 if libc.prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0) != 0:
     print("mdwe-exec: prctl(PR_SET_MDWE) failed: %s (Linux 6.3+ needed)" % os.strerror(ctypes.get_errno()), file=sys.stderr)

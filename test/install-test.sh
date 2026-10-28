@@ -141,6 +141,14 @@ else
   x airlock-envoy-apply >/dev/null
 fi
 ck "envoy and the box socket active" '[ "$(x systemctl is-active airlock-envoy airlock-envoy-proxy@c-anthropic.socket | tr "\n" " ")" = "active active " ]'
+# A crash dump's credential lines never reach the journal: the unit's own LogFilterPatterns on a
+# throwaway unit that prints lines as Envoy's dump does (only those with a credential go).
+pat="$(x sed -n 's/^LogFilterPatterns=//p' /etc/systemd/system/airlock-envoy.service)"
+x systemd-run --wait --quiet --collect --unit=t-logfilter -p "LogFilterPatterns=$pat" /bin/sh -c \
+  "printf '%s\\n' \"    'authorization', 'Bearer T-LEAK-1'\" \"  'Proxy-Authorization', 'Basic T-LEAK-2'\" \"    ':authority', 't-kept'\"" >/dev/null 2>&1
+x journalctl --sync 2>/dev/null
+lf="$(x journalctl -q -o cat -u t-logfilter 2>/dev/null)"
+ck "LogFilterPatterns keeps a crash dump's credential lines out of the journal, other lines kept" '[ -n "$pat" ] && [[ "$lf" == *t-kept* ]] && [[ "$lf" != *T-LEAK* ]]'
 # With an ACL the group bits show the mask, so check the ACL itself.
 ck "box socket owned by airlock-envoy; ACL: owner rw, client rw, group/other none" \
    '[ "$(x stat -c %U "$S")" = airlock-envoy ] && [ "$(x getfacl -cp "$S" | grep -E "^(user|group|other)" | LC_ALL=C sort | tr "\n" " ")" = "group::--- other::--- user::rw- user:client:rw- " ]'

@@ -88,8 +88,12 @@ sed -e "s#/run/airlock-envoy-internal/#$work/#" -e "s#address: \"git.example.com
 # Envoy as the units run it: under MemoryDenyWriteExecute (test/mdwe-exec.py), so a Lua filter
 # that lets LuaJIT compile panics here as on a host; one worker, so a few hundred requests make
 # its code hot.
-mdwe=(python3 -I "$repo/test/mdwe-exec.py")
-"${mdwe[@]}" true 2>/dev/null || { echo "skip MemoryDenyWriteExecute: the kernel lacks PR_SET_MDWE (Linux 6.3+)"; mdwe=(); }
+# REQUIRE_MDWE=1 (CI) makes a kernel without it a failure, not a skip.
+mdwe=(python3 -I "$repo/test/mdwe-exec.py") under="under MemoryDenyWriteExecute"
+"${mdwe[@]}" true 2>/dev/null; rc=$?
+if [ "$rc" = 3 ] && [ -z "${REQUIRE_MDWE:-}" ]; then
+  echo "skip MemoryDenyWriteExecute: the kernel lacks PR_SET_MDWE (Linux 6.3+); Envoy runs without it"; mdwe=() under="WITHOUT MemoryDenyWriteExecute"
+elif [ "$rc" != 0 ]; then echo "FAIL test/mdwe-exec.py true: exit $rc"; exit 1; fi
 "${mdwe[@]}" envoy -c envoy.yaml --concurrency 1 --disable-hot-restart -l warn --base-id-path "$work/base-id" > envoy.log 2>&1 & pids+=($!)
 envoy_pid=$!
 for _ in $(seq 50); do [ -S b.sock ] && break; sleep 0.1; done
@@ -202,6 +206,6 @@ if ! command -v luajit >/dev/null; then echo "skip ref names against git: no lua
 elif luajit refcmp.lua "$repo/install/git-protect.lua" refnames.git; then ok "ref names: the check is never more permissive than git check-ref-format ($(wc -l < refnames) names)"
 else fail "ref names the check allows and git refuses"; fi
 kill -0 "$envoy_pid" 2>/dev/null && ! grep -q 'PANIC\|runtime code generation failed' envoy.log \
-  && ok "Envoy still running, no Lua panic (under MemoryDenyWriteExecute)" || fail "Envoy died or panicked: $(grep -m2 'PANIC\|code generation' envoy.log)"
+  && ok "Envoy still running, no Lua panic ($under)" || fail "Envoy died or panicked: $(grep -m2 'PANIC\|code generation' envoy.log)"
 echo "failures: $fails"
 exit "$fails"

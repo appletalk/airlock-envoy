@@ -33,20 +33,27 @@ names() {  # no site details in the tracked files (this repo is public; the patt
   [ "$rc" = 0 ] && echo "ok   no site details in the tree"
   return "$rc"
 }
+# The Lua unit checks under MemoryDenyWriteExecute, as Envoy runs the code: a .lua without
+# jit.off() panics LuaJIT there (without the kernel feature, plain luajit, said so).
+# shellcheck disable=SC2329  # run via the suites below
+mdwe_luajit() {
+  python3 -I test/mdwe-exec.py true 2>/dev/null || { echo "skip MemoryDenyWriteExecute for $1: the kernel lacks PR_SET_MDWE"; luajit "$1"; return; }
+  python3 -I test/mdwe-exec.py luajit "$1"
+}
 # shellcheck disable=SC2329  # run via run()
 graphql() {  # the GitHub GraphQL write check, under LuaJIT as in Envoy
   command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
-  luajit test/graphql-check.lua
+  mdwe_luajit test/graphql-check.lua
 }
 # shellcheck disable=SC2329  # run via run()
 mcp() {  # the MCP tool check under LuaJIT, then the mcp rules end to end (a little over 2 min)
   command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
-  luajit test/mcp-tools-check.lua && test/mcp-e2e.sh
+  mdwe_luajit test/mcp-tools-check.lua && test/mcp-e2e.sh
 }
 # shellcheck disable=SC2329  # run via run()
 protect() {  # the push check of protected branches: its parser under LuaJIT, then end to end
   command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
-  luajit test/git-protect-check.lua && test/protect-e2e.sh
+  mdwe_luajit test/git-protect-check.lua && test/protect-e2e.sh
 }
 { run shellcheck test/lint.sh
   run private-names names

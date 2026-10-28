@@ -559,6 +559,16 @@ sed -i '/name: credential-locked/,/function envoy_on_request/{/if jit then jit.o
 out="$("$work/jcopy/apply" --render "$work/site" 2>&1)" && jfail+=" inline-without-accepted"
 [[ "$out" == *"internal: a Lua filter without jit.off() first"* ]] || jfail+=" inline-message($out)"
 "$work/jcopy/apply" --list "$work/site" >/dev/null || jfail+=" list-needs-no-render"
+cp "$apply" "$work/jcopy/apply.orig"; sed "s#^PASS_DIR=/etc/airlock-envoy/pass#PASS_DIR=$work/pass#" "$apply" > "$work/jcopy/apply"
+# jit.on later, a block comment hiding the line, per-route Lua: each refused too.
+printf 'if jit then jit.off() end\nfunction envoy_on_request(h) end\nif jit then jit.on() end\n' > "$work/jcopy/mcp-tools.lua"
+out="$("$work/jcopy/apply" --render "$work/site" 2>&1)" && jfail+=" jit-on-accepted"
+[[ "$out" == *"jit.on"* ]] || jfail+=" jit-on-message"
+printf -- '--[[\nif jit then jit.off() end\n]]\nfunction envoy_on_request(h) end\n' > "$work/jcopy/mcp-tools.lua"
+out="$("$work/jcopy/apply" --render "$work/site" 2>&1)" && jfail+=" block-comment-accepted"
+[[ "$out" == *"block comment before jit.off()"* ]] || jfail+=" block-comment-message($out)"
+cp install/mcp-tools.lua "$work/jcopy/"
+"$work/jcopy/apply" --render "$work/site" >/dev/null || jfail+=" restored-copy-refused"
 if [ -z "$jfail" ]; then echo "ok   Lua filters: all five start with jit.off(); apply refuses to render one without it (a file or its own code)"
 else echo "FAIL Lua jit.off:$jfail"; fails=$((fails+1)); fi
 

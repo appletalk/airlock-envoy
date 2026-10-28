@@ -57,6 +57,9 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The Envoy suites fail rather than skip MemoryDenyWriteExecute (the runner kernel has it).
+    env:
+      REQUIRE_MDWE: "1"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -74,9 +77,11 @@ jobs:
           test/apply-parse.sh | tee "$RUNNER_TEMP/apply-parse.log"
           if grep '^skip' "$RUNNER_TEMP/apply-parse.log"; then exit 1; fi
       - run: test/private-names-check-test.sh
-      - run: luajit test/graphql-check.lua
-      - run: luajit test/git-protect-check.lua
-      - run: luajit test/mcp-tools-check.lua
+      # The Lua checks under MemoryDenyWriteExecute, as Envoy runs the code (a .lua without
+      # jit.off() panics there); the e2e suites refuse to skip it (REQUIRE_MDWE).
+      - run: python3 -I test/mdwe-exec.py luajit test/graphql-check.lua
+      - run: python3 -I test/mdwe-exec.py luajit test/git-protect-check.lua
+      - run: python3 -I test/mdwe-exec.py luajit test/mcp-tools-check.lua
       - run: |
           test/protect-e2e.sh | tee "$RUNNER_TEMP/protect-e2e.log"
           if grep '^skip' "$RUNNER_TEMP/protect-e2e.log"; then exit 1; fi

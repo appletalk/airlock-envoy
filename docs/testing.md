@@ -26,11 +26,14 @@ suites, which need no podman.
 
 The suites that run a real Envoy (`protect-e2e`, `cred-e2e`, `mint-e2e`, `mcp-e2e`) start it as
 the units run it: under MemoryDenyWriteExecute (`test/mdwe-exec.py`: `prctl(PR_SET_MDWE)`, Linux
-6.3+, else a `skip` line) with one worker, and end by checking it is still running with no Lua
-panic. `cred-e2e` and `mcp-e2e` drive a few hundred requests through every Lua filter they
-render, so a filter that lets LuaJIT compile (no `jit.off()` first) panics there as on a host.
-`apply-parse.sh` checks every rendered Lua filter starts with `jit.off()`, and that apply
-refuses to render one that doesn't.
+6.3+; without it a `skip` line, a failure with `REQUIRE_MDWE=1` as in CI) with one worker, and
+end by checking it is still running with no Lua panic. `cred-e2e` and `mcp-e2e` drive a few
+hundred requests through every Lua filter they render (credential-locked, the GraphQL check,
+mcp-nobody, mcp-tools), so a filter that lets LuaJIT compile (no `jit.off()` first) panics there
+as on a host. `protect-e2e` and `mint-e2e` send too little to prove theirs; the push check
+(`git-protect.lua`) is proven by its unit check, which `run-all.sh` and CI run under the same
+restriction, like the other two `.lua` checks. `apply-parse.sh` checks every rendered Lua filter
+starts with `jit.off()`, and that apply refuses to render one that doesn't.
 
 ## All the tests at once
 

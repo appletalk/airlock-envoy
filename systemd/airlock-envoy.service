@@ -41,6 +41,11 @@ LogsDirectory=airlock-envoy
 LogsDirectoryMode=0750
 UMask=0077
 
+# A crash makes Envoy dump the requests in flight to stderr, one header a line, the injected
+# credential included ('authorization', 'Bearer ...'). Such lines never reach the journal
+# (systemd 253 and later; an older one ignores the key, so keep its journal readers few).
+LogFilterPatterns=~(?i)^[[:space:]]*.(proxy-)?authorization.,
+
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
