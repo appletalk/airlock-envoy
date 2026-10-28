@@ -47,7 +47,7 @@ suites besides the install tests run one after another; about two minutes in all
 - **lint:** `test/lint.sh` with the pinned, verified shellcheck that claude-airlock's
   `scripts/bootstrap-tools.sh` vendors. That is the same version a box has.
 - **checks:** every suite that needs no podman, with Envoy installed by `install/install-envoy.sh`.
-- **install:** the install test on Arch, Debian 13 and Ubuntu 22.04, 24.04 and 26.04, with
+- **install:** the install test on Arch, Debian 13 and Ubuntu 26.04 (`run-all.sh`'s defaults), with
   `AIRLOCK_REPO` set to a claude-airlock checkout.
 - **spike:** t2 and the site checks. The test client is built from claude-airlock's dev image.
 

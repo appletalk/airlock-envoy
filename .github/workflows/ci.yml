@@ -90,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: [arch, debian, ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+        distro: [arch, debian, ubuntu-26.04]   # test/run-all.sh's defaults
     steps:
       - uses: actions/checkout@v7
         with:

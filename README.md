@@ -17,8 +17,8 @@ two modes:
 Per-repo scoping is the `repos` option of the `http` line, read-only repos its `repos-read`,
 protected branches its `protect`; a GitHub App credential gets each line its own minted token.
 
-Status: **spike**. The install path is tested on Ubuntu 22.04, 24.04 and 26.04, Debian 13 and
-Arch (in systemd-booted containers), and runs as a service on an Arch workstation.
+Status: **spike**. The install path is tested on Arch, Debian 13 and Ubuntu 26.04 (in
+systemd-booted containers), and runs as a service on an Arch workstation.
 
 ## Contents
 
