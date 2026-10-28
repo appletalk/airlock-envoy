@@ -333,6 +333,10 @@ out="$(printf 'NEW\n' | KILL_BEFORE_RM="$work/k4" FAKE_UID=0 airlock-envoy-cred 
 grep -q 'inline_string: "airlock-envoy-locked pc"' "$work/k4" && ok "finishing a killed set --file: the tmpfs copy locked before the record goes" || fail "finish order: $(cat "$work/k4")"
 printf 'NEW\n' | root set pc --file >/dev/null 2>&1; [ ! -e "$E/pass/.pc.set" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "token NEW" ] || fail "finishing after the finish-order kill"
 rm -f "$E/credentials/pc.yaml"; printf 'X\n' | root add pc --pass work/pc --format token >/dev/null; uses gh
+# --file over what is already a file credential (a re-run after a late kill): its format kept.
+printf 'A\n' | root set fc --format token >/dev/null; printf 'B\n' | root set fc --file >/dev/null
+[ "$(secret_of "$E/credentials/fc.yaml")" = "token B" ] && ok "set --file over a file credential keeps its format" || fail "format over a file: $(secret_of "$E/credentials/fc.yaml")"
+rm -f "$E/credentials/fc.yaml"
 # One set --file at a time.
 ( exec 5> "$R/.set.lock"; flock 5; sleep 2 ) & h=$!; sleep 0.3
 out="$(printf 'X\n' | root set pc --file 2>&1)"; wait "$h"
@@ -487,8 +491,16 @@ printf 'token tok-aaaaaaaaaaaa-rw app a2 repos tools perms contents=write format
 # A pass credential removed and a reboot before the apply: the config still reads its tmpfs
 # file, and boot makes it (locked), so Envoy starts.
 root add gone --pass work/gh >/dev/null; uses gh gone; root remove gone >/dev/null
-rm -rf "$R/secrets"; root boot >/dev/null 2>&1
-[ "$(secret_of "$R/secrets/gone.yaml")" = "airlock-envoy-locked gone" ] && ok "boot: a file the config reads for a removed credential made locked" || fail "boot after remove: $(ls "$R/secrets" 2>&1)"
+rm -rf "$R/secrets"; out="$(root boot 2>&1)"
+[ "$(secret_of "$R/secrets/gone.yaml")" = "airlock-envoy-locked gone" ] && [[ "$out" == *"reads gone's tmpfs file"*"until sudo airlock-envoy-apply"* ]] \
+  && [[ "$(root status)" == *"credential gone: the applied config still reads its tmpfs file"* ]] \
+  && ok "boot: a file the config reads for a removed credential made locked, and named (boot, status)" || fail "boot after remove: $(ls "$R/secrets" 2>&1) / $out"
+# ...with it the only one and no mint.conf: boot's no-op gate counts the config's tmpfs paths
+mkdir -p "$work/pass.aside2"; for f in "$E/pass"/*; do mv "$f" "$work/pass.aside2/"; done
+[ ! -e "$E/mint/mint.conf" ] || mv "$E/mint/mint.conf" "$work/mint.conf.aside2"
+uses gone; rm -rf "$R/secrets"; root boot >/dev/null 2>&1
+[ "$(secret_of "$R/secrets/gone.yaml")" = "airlock-envoy-locked gone" ] && ok "boot with no pass credential left: still makes the file the config reads" || fail "boot gate: $(ls "$R/secrets" 2>&1)"
+mv "$work/pass.aside2"/* "$E/pass/"; [ ! -e "$work/mint.conf.aside2" ] || mv "$work/mint.conf.aside2" "$E/mint/mint.conf"
 uses gh
 # remove: an App no applied line uses, once nothing minted with it is left to revoke.
 ! root remove a2 >/dev/null 2>&1 && [ -f "$E/mint/apps/a2" ] && ok "remove: an App in use refused" || fail "remove of an App in use"
