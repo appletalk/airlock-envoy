@@ -264,7 +264,7 @@ sed -i '/tok-fk/d' "$E/mint.conf"; mint run >/dev/null 2>&1
 # default here, as GitHub mints them since 2026; the 40-character one before it; both injected.
 printf 'token tok-fmt app example-app owner example-org repos tools perms contents=read format basic\n' >> "$E/mint.conf"
 mint run >/dev/null 2>&1; v="$(val tok-fmt)"; t="$(base64 -d <<< "${v#Basic }" | sed -n 's/^x-access-token://p')"
-[[ "$t" =~ ^ghs_12345_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]] && [ "${#t}" -gt 400 ] && grep -q "\"token\": \"$t\"" api.log \
+[[ "$t" =~ ^ghs_12345_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]] && [[ "$t" == *-* ]] && [ "${#t}" -gt 400 ] && grep -q "\"token\": \"$t\"" api.log \
   && ok "a stateless token (${#t} characters, two dots) minted and injected as Basic" || fail "stateless: ${#t} $v"
 grep -q "^example-app $t\$" "$R/minted/tok-fmt" && ok "...and recorded whole, to revoke" || fail "record: $(cat "$R/minted/tok-fmt")"
 sed -i '/tok-fmt/d' "$E/mint.conf"; mint run >/dev/null 2>&1
@@ -274,6 +274,19 @@ touch api.log.legacytoken api.log.fracexpiry; mint run >/dev/null 2>&1; rm -f ap
 [[ "$(val tok-leg)" =~ ^token\ ghs_[0-9a-f]{36}$ ]] && grep -q '^app example-app, minted, expires [0-9]' <<< "$(sed -n '1s/^# airlock-envoy credential [^,]*, //p' "$R/tokens/tok-leg.yaml")" \
   && ok "a 40-character token too, and an expires_at with fractions of a second and +00:00" || fail "legacy: $(val tok-leg)"
 sed -i '/tok-leg/d' "$E/mint.conf"; mint run >/dev/null 2>&1
+# An expiry at another offset is the same instant; one too far, past or without an offset is no
+# expiry: the token is refused, and revoked (it can be sent).
+printf 'token tok-exp app example-app owner example-org repos tools perms contents=read format token\n' >> "$E/mint.conf"
+touch api.log.offsetexpiry; t0=$(date +%s); mint run >/dev/null 2>&1; rm -f api.log.offsetexpiry
+e="$(sed -n '1s/^.*minted, expires \([0-9]*\), line.*$/\1/p' "$R/tokens/tok-exp.yaml")"
+[[ "$e" =~ ^[0-9]+$ ]] && [ $((e - t0)) -ge 3590 ] && [ $((e - t0)) -le 3610 ] && ok "an expires_at at -07:00: the same instant (an hour on)" || fail "offset: $e vs $t0"
+for x in far past naive; do
+  rm -f "$R/tokens/tok-exp.yaml"   # no token in place: the next run mints
+  touch "api.log.${x}expiry"; out="$(mint run 2>&1)"; rm -f "api.log.${x}expiry"
+  [[ "$out" == *"bad expiry; the token: "* && "$out" == *"that token was revoked"* ]] || { fail "$x expiry: $out"; continue; }
+done
+[[ "$out" == *"bad expiry"* ]] && ok "an expiry two days on, past or without an offset: refused, and the token revoked" || true
+sed -i '/tok-exp/d' "$E/mint.conf"; mint run >/dev/null 2>&1
 
 # GitHub's answer is read strictly: a token outside [A-Za-z0-9._-]{20,4096} is no token (the line
 # stays as it was). Its shape is logged, never the token; one safe in a header is revoked at once.

@@ -200,7 +200,7 @@ mint() {
   [ "$(status_of "$out")" = 201 ] || { log "app $1: GitHub refused the token (HTTP $(status_of "$out")): $(body_of "$out" | head -c 300 | tr -cd '[:print:]')"; return 1; }
   # A token of GitHub's characters, an expiry in the future within a day. GitHub's tokens are
   # opaque to us: since 2026 an installation token is a stateless "ghs_<app id>_<JWT>" (dots and
-  # dashes, ~520 characters, its length varying), before it 40 letters and digits; any of
+  # dashes, ~520 characters, its length varying), before it "ghs_" and 36 more; any of
   # [A-Za-z0-9._-], 20 to 4096 long, is taken (no quote, backslash or space: it goes into a
   # header and a YAML string). One refused is described by its shape (never the token) and, if it
   # is safe in a header, revoked, so it doesn't stay live at GitHub unused until it expires.
@@ -213,7 +213,9 @@ def when(e):
     if not (isinstance(e, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,9})?(Z|[+-]\d\d:\d\d)", e)):
         return None
     try:
-        d = datetime.datetime.fromisoformat(re.sub(r"(\.\d{1,6})\d*", r"\1", e).replace("Z", "+00:00"))
+        # fractions to 6 digits (Python before 3.11 takes 3 or 6 only)
+        e2 = re.sub(r"\.(\d{1,9})", lambda m: "." + (m.group(1) + "000000")[:6], e).replace("Z", "+00:00")
+        d = datetime.datetime.fromisoformat(e2)
     except ValueError:
         return None
     return d.timestamp() if d.tzinfo else None

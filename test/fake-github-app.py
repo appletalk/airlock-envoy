@@ -10,6 +10,10 @@ Writes one JSON line per request to <log>. A file <log>.fail makes token minting
 <log>.perms (JSON) replaces the installation's permissions; <log>.repos (a name a line) its
 installed repos. GET /orgs/<org>/installation answers for any org named in <log>.orgs (one a
 line; default "example-org").
+Tokens are GitHub's stateless shape (ghs_<app id>_<JWT>, ~540 characters) unless <log>.legacytoken
+(ghs_ and 36 hex), <log>.badtoken (a space and a backslash) or <log>.longtoken (5004 characters);
+expires_at is an hour on in UTC with Z unless <log>.fracexpiry (.12 and +00:00), .offsetexpiry
+(-07:00), .farexpiry (two days on), .pastexpiry (a minute ago) or .naiveexpiry (no offset).
 """
 import base64, datetime, http.server, json, os, secrets, ssl, subprocess, sys, tempfile, time
 
@@ -49,7 +53,8 @@ def stateless_token():
     b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
     head = b64(json.dumps({"alg": "RS256", "typ": "JWT", "kid": secrets.token_hex(8)}).encode())
     body = b64(json.dumps({"iss": "github", "app": int(app_id), "inst": int(inst_id), "n": secrets.token_hex(secrets.randbelow(16) + 4)}).encode())
-    return "ghs_%s_%s.%s.%s" % (app_id, head, body, b64(secrets.token_bytes(256)))
+    # a dash and an underscore always (base64url gives them only by chance)
+    return "ghs_%s_%s.%s.%s-_" % (app_id, head, body, b64(secrets.token_bytes(256)))
 
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -93,7 +98,15 @@ class H(http.server.BaseHTTPRequestHandler):
             issued.add(tok)
             exp = datetime.datetime.fromtimestamp(time.time() + 3600, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if os.path.exists(log + ".fracexpiry"):
-                exp = datetime.datetime.fromtimestamp(time.time() + 3600, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.123456789+00:00")
+                exp = datetime.datetime.fromtimestamp(time.time() + 3600, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.12+00:00")
+            if os.path.exists(log + ".offsetexpiry"):   # the same instant at -07:00
+                exp = datetime.datetime.fromtimestamp(int(time.time()) + 3600, datetime.timezone(datetime.timedelta(hours=-7))).strftime("%Y-%m-%dT%H:%M:%S-07:00")
+            if os.path.exists(log + ".farexpiry"):
+                exp = datetime.datetime.fromtimestamp(time.time() + 2 * 86400, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if os.path.exists(log + ".pastexpiry"):
+                exp = datetime.datetime.fromtimestamp(time.time() - 60, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if os.path.exists(log + ".naiveexpiry"):
+                exp = datetime.datetime.fromtimestamp(time.time() + 3600, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
             return self.reply(201, {"token": tok, "expires_at": exp, "permissions": req.get("permissions"),
                                     "repositories": [{"name": r} for r in req.get("repositories", [])]},
                               {"request": req, "token": tok})
