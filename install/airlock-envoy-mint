@@ -207,10 +207,12 @@ mint() {
   local verdict t
   verdict=$(body_of "$out" | python3 -I -c 'import json, sys, re, datetime, time
 j = json.load(sys.stdin)
+if not isinstance(j, dict):
+    print("bad answer; not a JSON object"); sys.exit(0)
 t, e = j.get("token"), j.get("expires_at")
 def when(e):
     # 2026-10-28T16:00:00Z, also with fractions of a second or a +00:00 offset
-    if not (isinstance(e, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,9})?(Z|[+-]\d\d:\d\d)", e)):
+    if not (isinstance(e, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,9})?(Z|[+-]\d\d:[0-5]\d)", e)):
         return None
     try:
         # fractions to 6 digits (Python before 3.11 takes 3 or 6 only)
