@@ -560,7 +560,7 @@ path its rules don't allow), so boxed Claude can report the cause instead of gue
 | `airlock-envoy-web.service` | The web Envoy, enabled only while a listener lists `web` |
 | `airlock-envoy-logrotate.timer`, `.service` | Every 15 minutes, logrotate with `/etc/airlock-envoy/logrotate.conf` and its own state (`/var/lib/airlock-envoy/`) |
 | `airlock-envoy-cred-expire.timer`, `.service` | Every 30 s while unlocked: locks at the deadline. Started by `unlock`, stopped by `lock` |
-| `airlock-envoy-mint.timer`, `.service` | Every 5 minutes, as `airlock-envoy-mint`: mints, renews and revokes App tokens. Enabled by apply only while a line uses an App |
+| `airlock-envoy-mint.timer`, `.service` | Every 5 minutes, as `airlock-envoy-mint`: mints, renews and revokes App tokens. Enabled by apply while a line uses an App, and until every token is revoked after the last goes |
 
 ### Limits at a glance
 

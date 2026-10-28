@@ -4,7 +4,8 @@ name: ci
 #
 #   lint     shellcheck, the pinned and verified one claude-airlock vendors.
 #   checks   everything that needs no podman: the parser, the Lua checks, protect, credentials
-#            and App minting, the last four against a real Envoy installed by install-envoy.sh.
+#            and App minting; the parser, protect-e2e, cred-e2e and mint-e2e with a real Envoy
+#            installed by install-envoy.sh.
 #   install  the whole install in a systemd-booted container, per distribution.
 #   spike    t2 and the site checks from a box-shaped client, which builds on claude-airlock's
 #            dev image.
@@ -69,11 +70,15 @@ jobs:
       # A suite that is missing a tool exits 3 (skipped): here that fails the step, as it should.
       # Two skip parts of themselves (no PyYAML, no envoy, a uid under 1000; no luajit) and go
       # on: their skip lines fail the step too.
-      - run: test/apply-parse.sh | tee "$RUNNER_TEMP/apply-parse.log"; ! grep '^skip' "$RUNNER_TEMP/apply-parse.log"
+      - run: |
+          test/apply-parse.sh | tee "$RUNNER_TEMP/apply-parse.log"
+          if grep '^skip' "$RUNNER_TEMP/apply-parse.log"; then exit 1; fi
       - run: test/private-names-check-test.sh
       - run: luajit test/graphql-check.lua
       - run: luajit test/git-protect-check.lua
-      - run: test/protect-e2e.sh | tee "$RUNNER_TEMP/protect-e2e.log"; ! grep '^skip' "$RUNNER_TEMP/protect-e2e.log"
+      - run: |
+          test/protect-e2e.sh | tee "$RUNNER_TEMP/protect-e2e.log"
+          if grep '^skip' "$RUNNER_TEMP/protect-e2e.log"; then exit 1; fi
       - run: test/cred-backends.sh
       - run: test/cred-e2e.sh
       - run: test/mint.sh
@@ -98,14 +103,15 @@ jobs:
           path: claude-airlock
           persist-credentials: false
       - name: Install podman
-        run: sudo apt-get update && sudo apt-get install -y podman uidmap
+        run: sudo apt-get update && sudo apt-get install -y podman uidmap dbus-user-session
       # systemd in a rootless container needs a cgroup it may write, which podman gets only
       # through the user's own systemd manager: the runner user has none until it lingers.
       - name: A systemd user manager for the runner user
         run: |
-          sudo loginctl enable-linger "$USER"
+          sudo loginctl enable-linger "$(id -un)"
           uid=$(id -u)
           for _ in $(seq 100); do [ -S "/run/user/$uid/bus" ] && break; sleep 0.1; done
+          [ -S "/run/user/$uid/bus" ] || { echo "::error::no user bus after enable-linger"; exit 1; }
           echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
       - name: podman uses systemd cgroups

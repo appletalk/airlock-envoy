@@ -54,7 +54,7 @@ The other units:
   bounded capability set (file ownership and access, and `SETUID`/`SETGID`, for what they run
   as other accounts), no network (`PrivateNetwork`, Unix sockets only), and a read-only system
   but for their own paths (the expiry: `/run/airlock-envoy-cred` and `/run/airlock-envoy-mint`;
-  logrotate: `/var/log/airlock-envoy`).
+  logrotate: `/var/log/airlock-envoy` and its state in `/var/lib/airlock-envoy`).
 
 The web Envoy cannot reach the main Envoy's sockets (`InaccessiblePaths`), so a compromised web
 Envoy can't use the main one's listeners to get around its filter.
