@@ -54,13 +54,13 @@ printf '#!/bin/sh\n[ "$1" = -- ] && shift\nFAKE_UID=0 exec "$@"\n' > bin/sudo
 printf '#!/bin/sh\n[ "$1" = show ] && [ "$2" = -- ] || exit 2\ncat "%s/store/$3"\n' "$work" > bin/pass
 # systemctl: a start of the mint service runs it, as systemd would; --no-block only queues it
 # (run_queued below runs it), so what happens before that run can be seen.
-printf '#!/bin/sh\necho "$*" >> %s/systemctl.log\ncase "$*" in *--no-block*airlock-envoy-mint.service*) touch %s/mint.queued ;; *airlock-envoy-mint.service*) %s/bin/airlock-envoy-mint run 2>> %s/mint.log ;; esac\nexit 0\n' "$work" "$work" "$work" "$work" > bin/systemctl
-printf '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done; shift\nexec "$@"\n' > bin/setpriv
+printf '#!/bin/sh\necho "$*" >> %s/systemctl.log\ncase "$*" in *--no-block*airlock-envoy-mint.service*) touch %s/mint.queued ;; *airlock-envoy-mint.service*) FAKE_UID=1001 %s/bin/airlock-envoy-mint run 2>> %s/mint.log ;; esac\nexit 0\n' "$work" "$work" "$work" "$work" > bin/systemctl
+printf '#!/bin/sh\nwhile [ "$1" != -- ]; do shift; done; shift\nFAKE_UID=1001 exec "$@"\n' > bin/setpriv   # the mint account
 }
 chmod +x bin/*
 for f in airlock-envoy-cred airlock-envoy-mint airlock-envoy-apply; do ! grep -q '^\(DIR\|CONF\|APPS\|MINT_APPS\|RUN\|MRUN\)=/etc\|^\(RUN\|MRUN\)=/run' "bin/$f" || { echo "FAIL $f: a path not moved"; exit 1; }; done
 export PATH="$work/bin:$PATH"
-run_queued() { [ ! -e "$work/mint.queued" ] || { rm -f "$work/mint.queued"; airlock-envoy-mint run 2>> "$work/mint.log"; }; }
+run_queued() { [ ! -e "$work/mint.queued" ] || { rm -f "$work/mint.queued"; FAKE_UID=1001 airlock-envoy-mint run 2>> "$work/mint.log"; }; }
 cred() { airlock-envoy-cred "$@"; }
 root() { FAKE_UID=0 airlock-envoy-cred "$@"; }
 

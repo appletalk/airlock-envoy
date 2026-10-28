@@ -360,7 +360,7 @@ sudo airlock-envoy-cred add-app work-app --app-id 123 --org example-org --key pa
 sudo airlock-envoy-cred add-app work-app --app-id 123 --org example-org --key file < app.pem
 http api.github.com@w rules github-api credential work-app repos example-org/app repos-read example-org/docs
 http github.com@w     rules git        credential work-app repos example-org/app protect main
-sudo /usr/local/sbin/airlock-envoy-mint check   # the installation's permissions vs what the lines ask
+sudo -u airlock-envoy-mint /usr/local/sbin/airlock-envoy-mint check   # the installation's permissions vs what the lines ask
 ```
 
 A pass key unlocks with the other pass credentials. Lines name their repos (no `<owner>/*`),

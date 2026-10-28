@@ -31,7 +31,7 @@ On the host, as its operator (not in a box):
 
 To take an App away: take its lines out of the site file, apply (its tokens are revoked), then
 `sudo airlock-envoy-cred remove <name>`. That refuses an App a line still uses (or while an apply
-runs), runs a mint first (without holding the credential lock, so `lock` never waits on it),
+runs), runs a mint first (without holding the credential lock, so `lock` waits at most seconds),
 and removes the App (its definition, a file key, an unlocked key, the cached installation) only if
 no token minted with it is left unrevoked. Otherwise it says how many and changes nothing; run
 it again later (each try sweeps first). An `add-app` over the App during the sweep keeps it. A
@@ -84,7 +84,9 @@ is looked up with the App's own key (`GET /orgs/<org>/installation`) and its id 
 `/run/airlock-envoy-mint/installations/`, so setting up needs no organisation admin rights
 (`--installation-id` names it instead, if known).
 
-`airlock-envoy-mint check` (run by apply, by `airlock-envoy-cred status`, or as root) shows each
+`airlock-envoy-mint check` (run by apply, by `airlock-envoy-cred status`, or as `sudo -u
+airlock-envoy-mint`; it refuses root, whose writes in the mint account's directories could be
+steered) shows each
 App's installation: its id, repository selection, granted permissions, and installed repos (read
 with a token minted for `metadata: read` alone, revoked once used). It checks the lines against
 it:

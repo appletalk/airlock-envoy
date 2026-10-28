@@ -47,7 +47,7 @@ cat > "$work/bin/setpriv" <<EOF
 #!/bin/sh
 echo "\$* fds:\$(ls /proc/\$\$/fd | tr '\n' ' ')" >> "$work/setpriv.log"
 while [ "\$1" != -- ]; do shift; done; shift
-exec "\$@"
+FAKE_UID=1001 exec "\$@"   # the mint account (the minter refuses root)
 EOF
 sed -e "s#^CONF=/etc/airlock-envoy-mint/mint.conf#CONF=$E/mint/mint.conf#" -e "s#^APPS=/etc/airlock-envoy-mint/apps#APPS=$E/mint/apps#" \
     -e "s#^RUN=/run/airlock-envoy-mint#RUN=$R/mint#" install/airlock-envoy-mint > "$work/bin/airlock-envoy-mint"
@@ -81,7 +81,7 @@ exit 0
 EOF
 cat > "$work/bin/airlock-envoy-apply" <<EOF
 #!/bin/sh
-echo "apply \$(ls "$E/credentials" | tr '\n' ' ')" >> "$work/apply.log"
+echo "apply \$(ls "$E/credentials" | tr '\n' ' ') fds:\$(ls /proc/\$\$/fd | tr '\n' ' ')" >> "$work/apply.log"
 [ -z "\${APPLY_READS_FILE:-}" ] || printf '                    sds_config: { path_config_source: { path: "%s/%s.yaml" } }\n' "$E/credentials" "\$APPLY_READS_FILE" > "$E/envoy.yaml"
 [ -z "\${SLOW_APPLY:-}" ] || sleep "\$SLOW_APPLY"
 [ -z "\${FAIL_APPLY:-}" ] || exit 1
@@ -257,6 +257,14 @@ out="$(printf 'X\n' | root set pc --file 2>&1)"
 [[ "$out" == *"finished now"* ]] && [ ! -e "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] \
   && ok "set after a killed set --file whose apply got through: the move finished, the tmpfs copy locked" || fail "killed after apply: $out"
 rm -f "$E/credentials/pc.yaml"; printf 'X\n' | root add pc --pass work/pc --format token >/dev/null; uses gh
+# Killed inside the rollback, after the file was locked: the next set rolls back, never "finishes".
+mv "$E/pass/pc" "$E/pass/.pc.set"; printf 'X\n' | root set pcx >/dev/null; mv "$E/credentials/pcx.yaml" "$E/credentials/pc.yaml"
+printf 'X\n' | root set pcy >/dev/null; sed -i 's/inline_string: "[^"]*"/inline_string: "airlock-envoy-locked pc"/' "$E/credentials/pcy.yaml"; mv "$E/credentials/pcy.yaml" "$E/credentials/pc.yaml"
+printf '                    sds_config: { path_config_source: { path: "%s/pc.yaml" } }\n' "$E/credentials" > "$E/envoy.yaml"
+out="$(printf 'X\n' | root set pc 2>&1)"
+[[ "$out" == *"pass credential again"* ]] && [ -f "$E/pass/pc" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "airlock-envoy-locked pc" ] \
+  && ok "set after a set --file killed inside its rollback: a pass credential again, the file still locked" || fail "killed in rollback: $out"
+rm -f "$E/credentials/pc.yaml"; uses gh
 # One set --file at a time.
 ( exec 5> "$R/.set.lock"; flock 5; sleep 2 ) & h=$!; sleep 0.3
 out="$(printf 'X\n' | root set pc --file 2>&1)"; wait "$h"
@@ -268,6 +276,8 @@ out="$(printf 'NEW\n' | root set pc --file 2>&1)"
 [ ! -e "$E/pass/pc" ] && [ ! -e "$E/pass/.pc.set" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "token NEW" ] \
   && [ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && grep -q "pc.yaml" "$work/apply.log" && [[ "$out" == *"file credential now (token)"* ]] \
   && ok "set --file: applied with the file in place, then the pass credential forgotten and locked; the format kept" || fail "set --file: $out / $(cat "$work/apply.log")"
+! grep -q 'fds:.* 5 \| 6 ' "$work/apply.log" && ok "set --file: the apply gets none of root's lock fds" || fail "lock fds in the apply: $(grep -o 'fds:.*' "$work/apply.log")"
+! grep -q '^credential pc pass' "$R/state" && ok "set --file of an unlocked credential: the operator's state no longer lists it as pass" || fail "stale state: $(cat "$R/state")"
 printf 'X\n' | root add pc2 --pass work/pc >/dev/null; printf 'NEW2\n' | root set pc2 --file --format raw >/dev/null
 [ "$(secret_of "$E/credentials/pc2.yaml")" = "NEW2" ] && ok "set --file --format: the format given wins" || fail "set --file --format"
 
@@ -427,6 +437,12 @@ SLOW_MINT=2 FAKE_UID=0 airlock-envoy-cred remove a1 >"$work/rm.out" 2>&1 & rp=$!
 root add-app a1 --app-id 999 --installation-id 777 --key file < "$work/app.pem" >/dev/null; wait "$rp"; rrc=$?
 [ "$rrc" != 0 ] && grep -q "changed meanwhile" "$work/rm.out" && grep -qx 'app_id 999' "$E/mint/apps/a1" \
   && ok "remove: an App re-added during its mint run is kept" || fail "remove vs add-app: rc $rrc, $(cat "$work/rm.out")"
+# remove never waits for the mint lock while holding the credential lock: boot doesn't wait on it.
+( exec 8< "$R/mint/.lock"; flock 8; sleep 3 ) & h=$!; sleep 0.3
+FAKE_UID=0 airlock-envoy-cred remove a1 >/dev/null 2>&1 & rp=$!; sleep 0.5
+t=$(date +%s%N); root boot >/dev/null 2>&1; t=$(( ($(date +%s%N) - t) / 1000000 )); wait "$h"; wait "$rp"; rrc=$?
+[ "$t" -lt 1500 ] && [ "$rrc" = 0 ] && ok "remove waiting for the mint lock doesn't hold boot (${t} ms), then removes" || fail "boot waited on remove (${t} ms, rc $rrc)"
+root add-app a1 --app-id 1 --installation-id 2 --key file < "$work/app.pem" >/dev/null
 # No mint.conf (the last App line went): an empty one, so the mint unit runs its sweep.
 mv "$E/mint/mint.conf" "$work/mint.conf.keep"; : > "$work/systemctl.log"
 root add-app a4 --app-id 1 --installation-id 2 --key file < "$work/app.pem" >/dev/null; root remove a4 >/dev/null

@@ -369,7 +369,7 @@ cred_apply() {  # airlock-envoy-apply: next to this script in a checkout, else w
   local f
   f="$(dirname "$self")/airlock-envoy-apply"
   [ -x "$f" ] || f=/usr/local/sbin/airlock-envoy-apply
-  "$f"
+  "$f" 5>&- 6>&-   # root's lock fds stay here: apply runs things as other accounts
 }
 
 case "$cmd" in
@@ -493,13 +493,20 @@ case "$cmd" in
       [ -e "$MINT_CONF" ] || install -m 0640 -o root -g "$MINT_USER" /dev/null "$MINT_CONF"
       exec 9>&-
       systemctl start "$MINT_SVC" 2>/dev/null || true
-      exec 9> "$RUN/.lock"; flock 9
-      [ "$(appdef "$1")" = "$def" ] || die "app $1 changed meanwhile (add-app?): nothing was changed"
+      # Both locks, the credential lock first as everywhere, but never waiting for the mint lock
+      # while holding it (lock, boot and the expiry would wait too): tries for 30 s.
       mint_dirs
-      exec 7< "$MRUN/.lock"
-      flock -w 30 7 || die "a mint run holds its lock: try again (nothing was changed)"
+      mlock=0
+      for _ in $(seq 30); do
+        exec 9> "$RUN/.lock"; flock 9
+        exec 7< "$MRUN/.lock"
+        if flock -n 7; then mlock=1; break; fi
+        exec 7<&- 9>&-; sleep 1
+      done
+      [ "$mlock" = 1 ] || die "a mint run holds its lock: try again (nothing was changed)"
+      [ "$(appdef "$1")" = "$def" ] || die "app $1 changed meanwhile (add-app?): nothing was changed"
       ! apps_in_conf | grep -qxF -- "$1" || die "app $1 is in use: take its lines out of the site file and apply first (nothing was changed)"
-      rc=0; left=$(timeout 10 setpriv --reuid="$MINT_USER" --regid="$MINT_USER" --clear-groups --no-new-privs -- "$(mint_tool)" forget "$1" 6>&- 7<&- 9>&- 2>/dev/null | head -c 32) || rc=$?
+      rc=0; left=$(timeout 5 setpriv --reuid="$MINT_USER" --regid="$MINT_USER" --clear-groups --no-new-privs -- "$(mint_tool)" forget "$1" 6>&- 7<&- 9>&- 2>/dev/null | head -c 32) || rc=$?
       case "$rc:$left" in
         0:0) ;;
         1:[1-9]*) die "app $1: $left token(s) minted with it not revoked yet (GitHub unreachable? journalctl -u airlock-envoy-mint): remove it again later, each try sweeps first (nothing was changed)" ;;
@@ -635,17 +642,18 @@ case "$cmd" in
       flock -n 5 || die "another set --file is running: try again once it is done (nothing was changed)"
     fi
     reads_file() { grep -qF "path: \"$DIR/$name.yaml\"" "$ENVOY_YAML" 2>/dev/null; }
+    # The file first: killed half way, the .set record is still there for the next set.
     set_back() {
       exec 9> "$RUN/.lock"; flock 9
-      mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"
       if reads_file; then write "$DIR" "$name" "$LOCKED $name" locked; else rm -f "$DIR/$name.yaml"; fi
+      [ ! -f "$PASS_DIR/.$name.set" ] || mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"
       exec 9>&-
     }
     # An earlier set --file killed before it finished: if its apply got through (the config
     # reads the file), the move is finished; else it is a pass credential again.
     if [ -f "$PASS_DIR/.$name.set" ] && ! is_pass "$name"; then
       trap '' INT TERM HUP
-      if reads_file && [ -f "$DIR/$name.yaml" ]; then
+      if reads_file && [ -f "$DIR/$name.yaml" ] && ! grep -q "inline_string: \"$LOCKED " "$DIR/$name.yaml"; then
         exec 9> "$RUN/.lock"; flock 9
         rm -f "$PASS_DIR/.$name.set"; write "$SEC" "$name" "$LOCKED $name" locked
         exec 9>&-
@@ -698,8 +706,10 @@ case "$cmd" in
     # boot, which takes it).
     run_dirs; exec 9> "$RUN/.lock"; flock 9
     is_pass "$name" || die "$name changed meanwhile: nothing was changed"
-    write "$DIR" "$name" "$value" "$fmt"; value="" secret=""
+    # No signal between here and the trap: the record is moved aside before the file exists.
+    trap '' INT TERM HUP
     mv -f "$PASS_DIR/$name" "$PASS_DIR/.$name.set"
+    write "$DIR" "$name" "$value" "$fmt"; value="" secret=""
     exec 9>&-
     # A signal during the apply rolls back; none can cut the rollback itself short.
     trap 'trap "" INT TERM HUP; set_back; die "interrupted: $name stays a pass credential (apply again)"' INT TERM HUP
@@ -714,7 +724,7 @@ case "$cmd" in
       || die "$name changed during the apply: check airlock-envoy-cred status"
     rm -f "$PASS_DIR/.$name.set"
     write "$SEC" "$name" "$LOCKED $name" locked
-    { [ -f "$STATE" ] && grep -q '^unlocked' "$STATE"; } || write_state locked
+    if [ -f "$STATE" ] && grep -q '^unlocked' "$STATE"; then sed -i "/^credential $name pass /d" "$STATE"; else write_state locked; fi
     echo "==> $name is a file credential now ($fmt), applied: Envoy uses it from the next request (its entry stays in pass)"
     ;;
   revoke)

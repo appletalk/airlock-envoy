@@ -103,7 +103,7 @@ it; take it out of the site file and apply.
 the secret as `set` does (the pass credential's format unless `--format`), writes the file,
 applies (Envoy reads the file from then on), and only then forgets the pass credential and locks
 its tmpfs copy. If the apply fails or is interrupted, it stays a pass credential: the file goes,
-or, if the config Envoy runs already reads it, stays locked (Envoy keeps the last value of a
+or, if the applied config already reads it, stays locked (Envoy keeps the last value of a
 deleted file); apply again. A second signal can't cut that rollback short. A `set --file` killed
 outright is noticed by the next `set` of that name: if its apply got through (the config reads
 the file) the move is finished, else it is a pass credential again. One `set --file` runs at a

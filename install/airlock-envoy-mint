@@ -245,6 +245,9 @@ valid_line() {  # valid_line <w1> <name> <w2> <app> <w3> <owner> <w4> <repos> <w
 line_hash() { { printf '%s\n' "$*"; cat "$APPS/$2" 2>/dev/null; } | sha256sum | cut -c1-16; }
 
 cmd=${1:-run}
+# Never as root: its directories are this account's, and root acting in them could be steered
+# (a link, a FIFO). Root runs it as this account (airlock-envoy-cred, airlock-envoy-apply).
+[ "$(id -u)" != 0 ] || die "not as root: sudo -u airlock-envoy-mint $0 $cmd (or: sudo airlock-envoy-cred status)"
 case "$cmd" in
   state)
     # For root, which never reads this account's files itself: minted, locked, unavailable or
