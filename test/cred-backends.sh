@@ -21,6 +21,10 @@ sed -e "s#^DIR=/etc/airlock-envoy/credentials#DIR=$E/credentials#" -e "s#^CA_DIR
     -e "s#^PASS_DIR=/etc/airlock-envoy/pass#PASS_DIR=$E/pass#" -e "s#^UNLOCK_CONF=/etc/airlock-envoy/unlock.conf#UNLOCK_CONF=$E/unlock.conf#" \
     -e "s#^ENVOY_YAML=/etc/airlock-envoy/envoy.yaml#ENVOY_YAML=$E/envoy.yaml#" -e "s#^RUN=/run/airlock-envoy-cred#RUN=$R#" \
     -e 's#chown "root:$grp" "$tmp"; ##' -e 's# -o root -g root##g' -e 's# -o root -g "$grp"##g' \
+    -e 's# -o "$MINT_USER" -g "$MINT_USER"##g' -e 's# -o "$MINT_USER" -g "$grp"##g' -e 's# -o root -g "$MINT_USER"##g' \
+    -e 's#chown "$MINT_USER:$grp" "$tmp"; ##' -e 's#chown "$MINT_USER:$MINT_USER" "$tmp"; ##' -e 's#chown "root:$MINT_USER" "\([^"]*\)"; ##' \
+    -e "s#^APPS=/etc/airlock-envoy-mint/apps#APPS=$E/mint/apps#" -e "s#^MINT_CONF=/etc/airlock-envoy-mint/mint.conf#MINT_CONF=$E/mint/mint.conf#" \
+    -e "s#^MRUN=/run/airlock-envoy-mint#MRUN=$R/mint#" -e "s#^EXPIRE_WAIT=60 #EXPIRE_WAIT=2 #" \
     -e "s#^now() { date +%s; }#now() { cat $work/clock/now 2>/dev/null || date +%s; }#" \
     -e "s#^boot_secs() { cut -d. -f1 /proc/uptime; }#boot_secs() { cat $work/clock/boot 2>/dev/null || cut -d. -f1 /proc/uptime; }#" \
     install/airlock-envoy-cred > "$work/bin/airlock-envoy-cred"
@@ -29,13 +33,24 @@ chmod +x "$work/bin/airlock-envoy-cred"
 for pat in "DIR=$E/credentials" "PASS_DIR=$E/pass" "RUN=$R" "ENVOY_YAML=$E/envoy.yaml" "cat $work/clock/now" "cat $work/clock/boot"; do
   grep -qF "$pat" "$work/bin/airlock-envoy-cred" || { echo "FAIL the test copy lacks $pat"; exit 1; }
 done
-! grep -q 'chown "root\|-o root' "$work/bin/airlock-envoy-cred" || { echo "FAIL the test copy still changes owners"; exit 1; }
+# shellcheck disable=SC2016  # $MINT_USER is the tool's text
+! grep -q 'chown "root\|chown "\$MINT\|-o root\|-o "\$MINT' "$work/bin/airlock-envoy-cred" || { echo "FAIL the test copy still changes owners: $(grep -n 'chown "root\|chown "\$MINT\|-o root\|-o "\$MINT' "$work/bin/airlock-envoy-cred")"; exit 1; }
 
 cat > "$work/bin/id" <<EOF
 #!/bin/sh
 [ "\$1" = -u ] && { echo "\${FAKE_UID:-1000}"; exit 0; }
+[ "\$1" = airlock-envoy-mint ] && exit 0
 exec /usr/bin/id "\$@"
 EOF
+# setpriv (root running the mint tool as its account): here, just the command.
+cat > "$work/bin/setpriv" <<EOF
+#!/bin/sh
+echo "\$* fds:\$(ls /proc/\$\$/fd | tr '\n' ' ')" >> "$work/setpriv.log"
+while [ "\$1" != -- ]; do shift; done; shift
+exec "\$@"
+EOF
+sed -e "s#^CONF=/etc/airlock-envoy-mint/mint.conf#CONF=$E/mint/mint.conf#" -e "s#^APPS=/etc/airlock-envoy-mint/apps#APPS=$E/mint/apps#" \
+    -e "s#^RUN=/run/airlock-envoy-mint#RUN=$R/mint#" install/airlock-envoy-mint > "$work/bin/airlock-envoy-mint"
 cat > "$work/bin/sudo" <<EOF
 #!/bin/sh
 [ "\$1" = -- ] && shift
@@ -61,6 +76,7 @@ if [ "\$1" = start ]; then
   [ -z "\${RACE_EXPIRE:-}" ] || { FAKE_UID=0 RACE_EXPIRE= "$work/bin/airlock-envoy-cred" expire & echo \$! > "$work/race.pid"; }
   [ -n "\${FAIL_SYSTEMCTL:-}" ] && exit 1
 fi
+case "\$*" in "start airlock-envoy-mint.service") [ -z "\${SLOW_MINT:-}" ] || sleep "\$SLOW_MINT" ;; esac
 exit 0
 EOF
 cat > "$work/bin/airlock-envoy-apply" <<EOF
@@ -76,6 +92,7 @@ export PATH="$work/bin:$PATH"
 mkdir -p "$work/brokenbin"; printf '#!/bin/sh\ncase "$*" in *18:00*|*19:00*) exit 1 ;; esac\nexec /bin/date "$@"\n' > "$work/brokenbin/date"; chmod +x "$work/brokenbin/date"
 cred() { airlock-envoy-cred "$@"; }
 root() { FAKE_UID=0 airlock-envoy-cred "$@"; }
+bl() { printf '%s %s\n' "$1" "$(printf '%s' "$2" | base64 -w0)"; }   # a line unlock sends root
 secret_of() { sed -n 's/^  generic_secret: { secret: { inline_string: "\(.*\)" } }$/\1/p' "$1"; }
 # The applied config uses a credential when it reads it from $R/secrets.
 uses() { for n in "$@"; do printf '                    sds_config: { path_config_source: { path: "%s/secrets/%s.yaml" } }\n' "$R" "$n"; done > "$E/envoy.yaml"; }
@@ -101,7 +118,7 @@ printf 'FILE-SECRET\n' | root set filecred >/dev/null
 
 # entries: only the pass credentials the applied config uses.
 uses gh
-[ "$(root entries)" = "gh work/gh" ] && ok "entries: only those in use" || fail "entries: $(root entries)"
+[ "$(root entries)" = "gh work/gh token" ] && ok "entries: only those in use, with their kind" || fail "entries: $(root entries)"
 ! cred entries >/dev/null 2>&1 && ok "entries: root only" || fail "entries ran as the operator"
 
 # unlock: as the operator; reads only the named entries; installs; starts the expiry timer.
@@ -168,14 +185,14 @@ out="$(cred lock 2>&1)"
 
 # receive (what sudo runs for unlock): all or nothing, only in-use pass credentials.
 uses gh kube
-! printf 'gh A\n' | root receive >/dev/null 2>&1 && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] \
+! bl gh A | root receive >/dev/null 2>&1 && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] \
   && ok "receive: one in-use credential missing, nothing unlocked" || fail "partial unlock"
-! printf 'gh A\nkube B\nfilecred C\n' | root receive >/dev/null 2>&1 && ok "receive: a file credential refused" || fail "receive filecred"
-! printf 'gh A\nkube B\nnope C\n' | root receive >/dev/null 2>&1 && ok "receive: an unknown credential refused" || fail "receive nope"
-! printf 'gh A"x\nkube B\n' | root receive >/dev/null 2>&1 && ! printf 'gh A\\\\x\nkube B\n' | root receive >/dev/null 2>&1 \
-  && ! printf 'gh A B\nkube B\n' | root receive >/dev/null 2>&1 && ok "receive: quotes, backslashes, spaces refused" || fail "receive bad secret"
+! { bl gh A; bl kube B; bl filecred C; } | root receive >/dev/null 2>&1 && ok "receive: a file credential refused" || fail "receive filecred"
+! { bl gh A; bl kube B; bl nope C; } | root receive >/dev/null 2>&1 && ok "receive: an unknown credential refused" || fail "receive nope"
+! { bl gh 'A"x'; bl kube B; } | root receive >/dev/null 2>&1 && ! { bl gh 'A\x'; bl kube B; } | root receive >/dev/null 2>&1 \
+  && ! { bl gh 'A B'; bl kube B; } | root receive >/dev/null 2>&1 && ok "receive: quotes, backslashes, spaces refused" || fail "receive bad secret"
 uses gh
-! printf 'gh A\nkube B\n' | root receive >/dev/null 2>&1 && ok "receive: a credential not in use refused" || fail "receive not in use"
+! { bl gh A; bl kube B; } | root receive >/dev/null 2>&1 && ok "receive: a credential not in use refused" || fail "receive not in use"
 [ "$(cred unlock 2>&1 >/dev/null; secret_of "$R/secrets/kube.yaml")" = "airlock-envoy-locked kube" ] && ok "unlock: kube (token format) untouched while not in use" || fail "kube"
 uses gh kube; cred unlock >/dev/null
 [ "$(secret_of "$R/secrets/kube.yaml")" = "token S3CRET-TWO" ] && ok "unlock: the format (token) applies" || fail "token format"
@@ -220,16 +237,16 @@ root boot
 
 # Root reads what it is sent before taking the lock: a slow sender holds nothing up.
 uses gh; cred unlock >/dev/null; echo $((1000000 + 40000)) > "$work/clock/now"
-( sleep 3; printf 'gh S3CRET-ONE\n' ) | FAKE_UID=0 airlock-envoy-cred receive >/dev/null 2>&1 & slow=$!; sleep 0.5
+( sleep 3; bl gh S3CRET-ONE ) | FAKE_UID=0 airlock-envoy-cred receive >/dev/null 2>&1 & slow=$!; sleep 0.5
 t=$(date +%s%N); root expire; t=$(( ($(date +%s%N) - t) / 1000000 )); wait "$slow" 2>/dev/null
 [ "$t" -lt 1500 ] && ok "a slow sender to receive holds no lock (${t} ms)" || fail "expire waited on a slow receive (${t} ms)"
 echo 1000000 > "$work/clock/now"
 # Input over 60000 bytes is refused, not cut; a NUL is refused; an empty stdin is said.
 root lock >/dev/null; uses gh
 big="$(head -c 70000 /dev/zero | tr '\0' A)"
-! printf 'gh %s\n' "$big" | root receive >/dev/null 2>&1 && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] \
+! bl gh "$big" | root receive >/dev/null 2>&1 && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] \
   && ok "receive: over 60000 bytes refused, nothing unlocked" || fail "a cut secret was installed"
-! printf 'gh AB\000CD\n' | root receive >/dev/null 2>&1 && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] \
+! printf 'gh %s\n' "$(printf 'AB\000CD' | base64 -w0)" | root receive >/dev/null 2>&1 && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] \
   && ok "receive: a NUL refused" || fail "a NUL passed"
 out="$(: | root receive 2>&1)"; [[ "$out" == *"nothing on stdin"* ]] && ok "receive: an empty stdin said so" || fail "empty stdin: $out"
 out="$(printf 'S3CRET-AS-NAME\n' | root receive 2>&1)"; [[ "$out" == *"line 1 on stdin"* && "$out" != *S3CRET* ]] \
@@ -321,8 +338,86 @@ echo 1000000 > "$work/clock/now"
 t=$(date +%s%N); root lock >/dev/null; t=$(( ($(date +%s%N) - t) / 1000000 )); wait "$holder"
 [ "$t" -ge 900 ] && ok "lock waits for another verb's lock (${t} ms)" || fail "lock didn't wait (${t} ms)"
 
+# GitHub Apps: add-app checks what it's given; unlock reads the key whole, root checks it with
+# openssl and hands it to the mint account; if the mint run then gives a line no token, nothing
+# stays unlocked. (Minting itself: test/mint.sh and test/mint-e2e.sh.)
+openssl genrsa -out "$work/app.pem" 2048 2>/dev/null
+cp "$work/app.pem" "$work/store/work/app-key"
+! root add-app a1 --app-id x --installation-id 2 --key file < "$work/app.pem" >/dev/null 2>&1 \
+  && ! root add-app a1 --app-id 1 --installation-id 2 --key file --api http://api.example.com < "$work/app.pem" >/dev/null 2>&1 \
+  && ! root add-app a1 --app-id 1 --installation-id 2 --key file --ca relative.pem < "$work/app.pem" >/dev/null 2>&1 \
+  && ! echo "not a key" | root add-app a1 --app-id 1 --installation-id 2 --key file >/dev/null 2>&1 \
+  && ! root add-app a1 --app-id 1 --installation-id 2 --key pass:../x >/dev/null 2>&1 \
+  && ! root add-app gh --app-id 1 --installation-id 2 --key pass:work/app-key >/dev/null 2>&1 \
+  && ok "add-app: bad ids, a plain-http API, a relative ca, a non-key, a bad entry, a pass credential's name: refused" || fail "add-app validation"
+! root add-app a0 --app-id 1 --key file < "$work/app.pem" >/dev/null 2>&1 && ! root add-app a0 --app-id 1 --org -bad --key file < "$work/app.pem" >/dev/null 2>&1 \
+  && root add-github-app a0 --app-id 1 --org example-org --key file < "$work/app.pem" >/dev/null && grep -qx 'org example-org' "$E/mint/apps/a0" && ! grep -q installation_id "$E/mint/apps/a0" \
+  && ok "add-app: --org or --installation-id needed, a bad org refused; --org alone kept (add-github-app the same verb)" || fail "add-app org"
+root add-app a1 --app-id 1 --installation-id 2 --key file < "$work/app.pem" >/dev/null && [ -f "$E/mint/apps/a1.pem" ] && grep -qx 'key file' "$E/mint/apps/a1" \
+  && ok "add-app with a file key: the key kept with the App" || fail "add-app file"
+root add-app a2 --app-id 1 --installation-id 2 --key pass:work/app-key >/dev/null && grep -qx 'entry work/app-key' "$E/mint/apps/a2" && [ ! -e "$E/mint/apps/a2.pem" ] \
+  && ok "add-app with a pass key: the entry named, no key on disk" || fail "add-app pass"
+! root add a2 --pass work/gh >/dev/null 2>&1 && ok "add: an App's name refused" || fail "add over an App"
+printf 'token tok-aaaaaaaaaaaa-rw app a2 repos tools perms contents=write format basic\n' > "$E/mint/mint.conf"
+uses gh
+[ "$(root entries)" = "gh work/gh token
+a2 work/app-key pem" ] && ok "entries: the App's pass key as a pem" || fail "entries with an App: $(root entries)"
+root lock >/dev/null; : > "$work/pass.log"
+out="$(cred unlock 2>&1)"; rc=$?
+[ "$rc" != 0 ] && [[ "$out" == *"app a2: no token was minted"* ]] && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] \
+  && [ ! -e "$R/mint/keys/a2.pem" ] && grep -qx work/app-key "$work/pass.log" \
+  && ok "unlock with an App whose mint run gives no token: everything locked, the key dropped" || fail "app unlock without a token: $out"
+printf 'not a key\n' > "$work/store/work/app-key"
+out="$(cred unlock 2>&1)"; [[ "$out" == *"not a PEM private key"* ]] && ok "unlock: an App entry that isn't a key stops it" || fail "bad key entry: $out"
+printf -- '-----BEGIN PRIVATE KEY-----\nnot base64 at all\n-----END PRIVATE KEY-----\n' > "$work/store/work/app-key"
+out="$(cred unlock 2>&1)"; [[ "$out" == *"not an unencrypted RSA private key"* ]] && ok "receive: a key openssl can't read refused" || fail "bad pem: $out"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$work/store/work/app-key" 2>/dev/null
+out="$(cred unlock 2>&1)"; [[ "$out" == *"not an unencrypted RSA private key"* ]] && ok "receive: an EC key refused (an App's key is RSA)" || fail "EC key: $out"
+! root add-app a9 --app-id 1 --org example-org --key file < "$work/store/work/app-key" >/dev/null 2>&1 \
+  && ! root add-app a9 --app-id 1 --org example-org --key file --ca /tmp/x.pem < "$work/app.pem" >/dev/null 2>&1 \
+  && ok "add-app: an EC key refused; a --ca outside /etc and /usr refused" || fail "add-app EC/ca"
+cp "$work/app.pem" "$work/store/work/app-key"
+# lock marks an App's tokens as the mint account (setpriv), never writing there itself.
+: > "$work/setpriv.log"; root lock >/dev/null
+grep -q -- "--reuid=airlock-envoy-mint --regid=airlock-envoy-mint --clear-groups --no-new-privs -- .*airlock-envoy-mint mark tok-aaaaaaaaaaaa-rw locked a2" "$work/setpriv.log" \
+  && grep -q 'inline_string: "airlock-envoy-locked a2"' "$R/mint/tokens/tok-aaaaaaaaaaaa-rw.yaml" && ok "lock: App tokens marked locked through setpriv as the mint account" || fail "mark via setpriv: $(cat "$work/setpriv.log")"
+! grep -q "fds:.* 7 \| 9 " "$work/setpriv.log" && ok "root's lock files are closed in what it runs as the mint account" || fail "fds inherited: $(grep -o 'fds:.*' "$work/setpriv.log" | sort -u)"
+# A FIFO planted where a token file would be: root never reads it, so nothing hangs.
+uses gh; mkfifo "$R/mint/tokens/tok-aaaaaaaaaaaa-rw.yaml.fifo" 2>/dev/null; rm -f "$R/mint/tokens/tok-aaaaaaaaaaaa-rw.yaml"; mv "$R/mint/tokens/tok-aaaaaaaaaaaa-rw.yaml.fifo" "$R/mint/tokens/tok-aaaaaaaaaaaa-rw.yaml"
+FAKE_UID=0 timeout 30 airlock-envoy-cred status >/dev/null 2>&1; rs=$?
+timeout 60 airlock-envoy-cred unlock >/dev/null 2>&1; ru=$?
+[ "$rs" != 124 ] && [ "$ru" != 124 ] && [ "$ru" != 0 ] && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] \
+  && ok "a FIFO as a token file: status and unlock don't hang (unlock refuses, all locked)" || fail "FIFO: status rc $rs, unlock rc $ru"
+rm -f "$R/mint/tokens/tok-aaaaaaaaaaaa-rw.yaml"
+# A link where root expects one of the mint's directories: refused.
+mv "$R/mint/minted" "$work/minted.real"; ln -s /etc "$R/mint/minted"
+out="$(root lock 2>&1)"; rm "$R/mint/minted"; mv "$work/minted.real" "$R/mint/minted"
+[[ "$out" == *"is a symlink: refusing"* ]] && ok "a link in the mint's /run: root refuses" || fail "link not refused: $out"
+# lock waits (bounded) for a mint run holding the lock; boot (Envoy's start) doesn't wait.
+( exec 8< "$R/mint/.lock"; flock 8; sleep 2 ) & h=$!; sleep 0.3
+t=$(date +%s%N); root lock >/dev/null; t=$(( ($(date +%s%N) - t) / 1000000 )); wait "$h"
+( exec 8< "$R/mint/.lock"; flock 8; sleep 2 ) & h=$!; sleep 0.3
+t2=$(date +%s%N); root boot >/dev/null; t2=$(( ($(date +%s%N) - t2) / 1000000 )); wait "$h"
+[ "$t" -ge 1400 ] && [ "$t2" -lt 1200 ] && ok "lock waits for a mint run (${t} ms); boot doesn't (${t2} ms)" || fail "waits: lock ${t} ms, boot ${t2} ms"
+# While an unlock's App mints, the lock is free: a lock elsewhere doesn't wait for it.
+cp "$work/app.pem" "$work/store/work/app-key"
+SLOW_MINT=3 timeout 60 airlock-envoy-cred unlock </dev/null >/dev/null 2>&1 & ul=$!; sleep 1
+t=$(date +%s%N); root lock >/dev/null; t=$(( ($(date +%s%N) - t) / 1000000 )); wait "$ul"
+[ "$t" -lt 1500 ] && ok "a lock during an unlock's mint run doesn't wait for it (${t} ms)" || fail "lock waited on the mint (${t} ms)"
+rm -f "$E/mint/mint.conf"
+# The expiry, its lock held elsewhere: after its wait it still locks every secret, and leaves the
+# state and the timer alone (a stale one must not undo a later unlock).
+uses gh; cred unlock >/dev/null
+echo $((1000000 + 40000)) > "$work/clock/now"
+( exec 9> "$R/.lock"; flock 9; sleep 5 ) & h=$!; sleep 0.3; : > "$work/systemctl.log"
+FAKE_UID=0 timeout 20 airlock-envoy-cred expire >/dev/null 2>&1; rc=$?; wait "$h"
+[ "$rc" != 124 ] && [ "$(secret_of "$R/secrets/gh.yaml")" = "airlock-envoy-locked gh" ] && grep -q '^unlocked' "$R/state" && ! grep -q stop "$work/systemctl.log" \
+  && ok "expiry without the lock: secrets locked, the state and timer left to the next one" || fail "lock-less expiry: rc $rc, $(head -1 "$R/state")"
+root expire; grep -q '^locked' "$R/state" && ok "...which, with the lock, finishes it" || fail "the next expiry"
+echo 1000000 > "$work/clock/now"
+
 # The root-only verbs refuse the operator.
-for v in "receive" "receive-migrate x y" "expire" "boot" "add x --pass a/b" "set x" "remove x"; do
+for v in "receive" "receive-migrate x y" "expire" "boot" "add x --pass a/b" "set x" "remove x" "add-app x --app-id 1 --installation-id 1 --key file"; do
   # shellcheck disable=SC2086
   ! echo | cred $v >/dev/null 2>&1 || fail "$v ran as the operator"
 done; ok "receive, expire, boot, add, set: root only"

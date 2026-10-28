@@ -72,7 +72,7 @@ die() { echo "airlock-envoy-apply: $*" >&2; exit 1; }
 mode=apply yes=0 start=0 clients_of=
 while [ $# -gt 0 ]; do
   case "$1" in
-    --check|--list|--render|--render-web|--render-web-dropin|--stop|--status) mode=${1#--} ;;
+    --check|--list|--render|--render-web|--render-web-dropin|--render-mint|--stop|--status) mode=${1#--} ;;
     --clients|--render-socket-dropin)
                [ $# -ge 2 ] || { echo "airlock-envoy-apply: $1 needs a listener name" >&2; exit 1; }
                mode=${1#--} clients_of=$2; shift ;;
@@ -854,11 +854,85 @@ CRED_DIR=/etc/airlock-envoy/credentials
 # root's to read: a render as another user takes every credential as a file one.
 PASS_DIR=/etc/airlock-envoy/pass
 PASS_SEC=/run/airlock-envoy-cred/secrets
-cred_dir() { if [ -f "$PASS_DIR/$1" ]; then printf '%s' "$PASS_SEC"; else printf '%s' "$CRED_DIR"; fi; }
-listener_has_pass() {  # some credential listener $1 uses is a pass one
+# A GitHub App credential (airlock-envoy-cred add-app): each line using it gets its own tokens,
+# minted by airlock-envoy-mint for the line's repos and permissions: tok-<hash>-rw for repos,
+# tok-<hash>-ro for repos-read (read permissions only), read from the mint account's tmpfs.
+MINT_APPS=/etc/airlock-envoy-mint/apps
+MINT_TOK=/run/airlock-envoy-mint/tokens
+MINT_CONF=/etc/airlock-envoy-mint/mint.conf
+is_app_cred() { [ -n "$1" ] && [ -f "$MINT_APPS/$1" ]; }
+tok_of() { printf 'tok-%s-%s' "$(printf '%s' "$1" | sha256sum | cut -c1-12)" "$2"; }   # tok_of <definition> rw|ro
+def_creds() {  # the credentials (or tokens) definition $1's routes inject, one a line
+  local c=${HTTP_CRED[$1]}
+  [ -n "$c" ] || return 0
+  if is_app_cred "$c"; then
+    [ -z "${HTTP_REPOS[$1]}" ] || { tok_of "$1" rw; echo; }
+    [ -z "${HTTP_RREPOS[$1]}" ] || { tok_of "$1" ro; echo; }
+  else echo "$c"; fi
+}
+route_cred() {  # route_cred <definition> <route name>: what that route injects
+  local c=${HTTP_CRED[$1]}
+  if ! is_app_cred "$c"; then printf '%s' "$c"
+  elif [[ "$2" =~ -ro-[0-9]+$ ]] || [ -z "${HTTP_REPOS[$1]}" ]; then tok_of "$1" ro
+  else tok_of "$1" rw; fi
+}
+cred_dir() {
+  if [[ "$1" =~ ^tok-[0-9a-f]{12}-r[wo]$ ]]; then printf '%s' "$MINT_TOK"
+  elif [ -f "$PASS_DIR/$1" ]; then printf '%s' "$PASS_SEC"; else printf '%s' "$CRED_DIR"; fi
+}
+listener_has_pass() {  # some credential listener $1 uses is a pass one or an App (both can lock)
   local d
-  for d in ${HDESTS[$1]:-}; do [ -z "${HTTP_CRED[$d]}" ] || [ ! -f "$PASS_DIR/${HTTP_CRED[$d]}" ] || return 0; done
+  for d in ${HDESTS[$1]:-}; do
+    [ -z "${HTTP_CRED[$d]}" ] || { [ ! -f "$PASS_DIR/${HTTP_CRED[$d]}" ] && ! is_app_cred "${HTTP_CRED[$d]}"; } || return 0
+  done
   return 1
+}
+# An App's lines: GitHub rules, repos named (GitHub mints tokens for named repos only), one owner
+# (the installation's account; the token takes names without it).
+app_checks() {
+  local k c o r owner
+  if [ -d "$MINT_APPS" ] && [ ! -r "$MINT_APPS" ]; then
+    echo "airlock-envoy-apply: note: GitHub App credentials are root's to read: as $(id -un), a line using one is checked as a plain credential" >&2
+  fi
+  for k in "${HTTP_HOSTS[@]}"; do
+    c=${HTTP_CRED[$k]}; is_app_cred "$c" || continue
+    case "${HTTP_RULES[$k]}" in git|git-read|github-api|github-issues) ;;
+      *) die "http $k: credential $c is a GitHub App: only with the git, git-read, github-api or github-issues rules" ;; esac
+    scoped "$k" || die "http $k: credential $c is a GitHub App: name its repos (repos or repos-read)"
+    owner=""
+    for r in ${HTTP_REPOS[$k]} ${HTTP_RREPOS[$k]}; do
+      [[ "$r" != */\* ]] || die "http $k: credential $c is a GitHub App: name each repo ($r: a token is minted for named repos only)"
+      o=${r%%/*}
+      [ -z "$owner" ] || [ "$o" = "$owner" ] || die "http $k: credential $c is a GitHub App: repos of one owner per line ($owner, $o)"
+      owner=$o
+    done
+  done
+}
+# mint.conf: a line per token (airlock-envoy-mint). Permissions by the rules: the write token
+# what the preset may do, the read token reads only. metadata:read GitHub adds by itself.
+mint_conf() {
+  local l d seen=" " rules fmt rw ro owner
+  app_checks
+  for l in "${SOCKETS[@]}"; do
+    for d in ${HDESTS[$l]:-}; do
+      is_app_cred "${HTTP_CRED[$d]}" || continue
+      case "$seen" in *" $d "*) continue ;; esac
+      seen="$seen$d "
+      rules=${HTTP_RULES[$d]}
+      case "$rules" in
+        git)           fmt=basic rw=contents=write ro=contents=read ;;
+        git-read)      fmt=basic rw=contents=read  ro=contents=read ;;
+        github-api)    fmt=token rw=contents=read,issues=write,pull_requests=write ro=contents=read,issues=read,pull_requests=read ;;
+        github-issues) fmt=token rw=contents=read,issues=write ro=contents=read,issues=read ;;
+      esac
+      owner=$(for r in ${HTTP_REPOS[$d]} ${HTTP_RREPOS[$d]}; do echo "${r%%/*}"; done | head -n 1)
+      [ -z "${HTTP_REPOS[$d]}" ] || printf 'token %s app %s owner %s repos %s perms %s format %s\n' "$(tok_of "$d" rw)" "${HTTP_CRED[$d]}" "$owner" \
+        "$(for r in ${HTTP_REPOS[$d]}; do printf '%s,' "${r#*/}"; done | sed 's/,$//')" "$rw" "$fmt"
+      [ -z "${HTTP_RREPOS[$d]}" ] || printf 'token %s app %s owner %s repos %s perms %s format %s\n' "$(tok_of "$d" ro)" "${HTTP_CRED[$d]}" "$owner" \
+        "$(for r in ${HTTP_RREPOS[$d]}; do printf '%s,' "${r#*/}"; done | sed 's/,$//')" "$ro" "$fmt"
+    done
+  done
+  return 0
 }
 CA_DIR=/etc/airlock-envoy/ca
 # git reads a push's reply only from a 200 of type application/x-git-receive-pack-result (a 403
@@ -886,6 +960,12 @@ protect_local_reply() {
 EOF
     return
   done
+}
+mint_tool() {  # airlock-envoy-mint: next to this script in a checkout, else where install put it
+  local f
+  f="$(dirname "$(readlink -f "$0")")/airlock-envoy-mint"
+  [ -x "$f" ] || f=/usr/local/sbin/airlock-envoy-mint
+  printf '%s' "$f"
 }
 cred_tool() {  # airlock-envoy-cred: next to this script in a checkout, else where install put it
   local f
@@ -980,7 +1060,7 @@ creds_used() {  # every credential some listener's http destinations use, once e
 # checked) add only their repos' routes, each with its own credential and upstream: the
 # first one's refusals and its routes outside a repo (/user) stand for all.
 http_vhost() {
-  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} first=$1 k cred projects repos rrepos name methods kind pat flag timeout maxdur routes denies="" d1=""
+  local h=${HTTP_HOST[$1]} id rules=${HTTP_RULES[$1]} first=$1 k cred projects repos rrepos rc name methods kind pat flag timeout maxdur routes denies="" d1=""
   id=$(hid "$1")
   cat <<EOF
             - name: "http-$id"
@@ -1055,11 +1135,12 @@ EOF
     fi
     # The GraphQL check reads the preset's allowlist (and any projects) from the route's metadata.
     [ "${flag:-}" != lua ] || echo "                metadata: { filter_metadata: { github-graphql: { rules: \"$rules\", projects: \"$projects\" } } }"
-    if [ -n "$cred" ] || [ "${flag:-}" = lua ] || [ "${flag:-}" = guard ]; then
+    rc=$(route_cred "$k" "$name")
+    if [ -n "$rc" ] || [ "${flag:-}" = lua ] || [ "${flag:-}" = guard ]; then
       echo "                typed_per_filter_config:"
       if [ "${flag:-}" = lua ]; then graphql_route_filters; fi
       [ "${flag:-}" != guard ] || echo "                  \"$(protect_filter "$k")\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
-      [ -z "$cred" ] || echo "                  \"inject-$cred\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
+      [ -z "$rc" ] || echo "                  \"inject-$rc\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
     fi
   done <<< "$routes"
   done
@@ -1168,9 +1249,7 @@ EOF
 EOF
     sed 's/^/                  /' "$f"
   fi
-  for d in ${HDESTS[$1]:-}; do
-    c=${HTTP_CRED[$d]}
-    [ -n "$c" ] || continue
+  for c in $(for d in ${HDESTS[$1]:-}; do def_creds "$d"; done); do
     case "$seen" in *" $c "*) continue ;; esac
     seen="$seen$c "
     cat <<EOF
@@ -1204,6 +1283,10 @@ EOF
                       h:respond({ [":status"] = "423", ["content-type"] = "text/plain", ["x-airlock-envoy"] = "locked" },
                         "airlock-envoy: credential " .. a:sub(22) .. " is locked on this host: stop, and ask the"
                         .. " operator to unlock it on the host (airlock-envoy-cred unlock); do not retry\n")
+                    elseif a and a:sub(1, 26) == "airlock-envoy-unavailable " then
+                      h:respond({ [":status"] = "503", ["content-type"] = "text/plain", ["x-airlock-envoy"] = "unavailable" },
+                        "airlock-envoy: credential " .. a:sub(27) .. " has no token on this host (GitHub App minting"
+                        .. " failed: journalctl -u airlock-envoy-mint): stop, and tell the operator; do not retry\n")
                     end
                   end
 EOF
@@ -1763,6 +1846,7 @@ case "$mode" in
     resolve_clients || exit 1; render_socket_dropin "$clients_of"; exit 0 ;;
   render-web) render_web "$WEB_LOG"; exit 0 ;;
   render-web-dropin) render_web_dropin; exit 0 ;;
+  render-mint) mint_conf; exit 0 ;;
   render) render "$LOG"; exit 0 ;;
   status)
     echo "==> Listeners in $site_src (and built in): ${LISTENERS[*]}"
@@ -1829,6 +1913,8 @@ if [ "$(id -u)" = 0 ]; then
     if [ -f "$PASS_DIR/$c" ]; then
       # A pass credential: locked until unlocked, its file in the tmpfs made if missing.
       [ -f "$PASS_SEC/$c.yaml" ] || "$(cred_tool)" boot || die "could not prepare pass credential $c (nothing was changed)"
+    elif is_app_cred "$c"; then
+      :   # a GitHub App: its tokens' files below
     else
       [ -f "$CRED_DIR/$c.yaml" ] || die "credential $c is not set: sudo airlock-envoy-cred set $c (nothing was changed)"
     fi
@@ -1837,6 +1923,27 @@ if [ "$(id -u)" = 0 ]; then
     [ -n "$c" ] || continue
     [ -f "$CA_DIR/$c.pem" ] || die "ca $c is not set: sudo airlock-envoy-cred ca $c < <PEM file> (nothing was changed)"
   done < <(cas_used)
+  # GitHub App lines: each token's file exists before Envoy reads the config (locked for a pass
+  # key, unavailable for a file key, until airlock-envoy-mint has minted it).
+  mint_conf > "$work/mint.conf"
+  if [ -s "$work/mint.conf" ]; then
+    id airlock-envoy-mint >/dev/null 2>&1 || die "GitHub App credentials need the airlock-envoy-mint account: run install/install-service.sh from this version (nothing was changed)"
+    "$(cred_tool)" mint-mark-missing "$work/mint.conf" || die "could not prepare the GitHub App tokens (nothing was changed)"
+    # Each App against its installation: a line naming a repo the App isn't installed on, or
+    # asking more than it grants, refuses the apply; a key locked or the API unreachable only
+    # says it wasn't checked.
+    echo "==> GitHub Apps (airlock-envoy-mint check):"
+    # As the mint account (it writes its own files; root never does), the candidate mint.conf
+    # handed over in root's directory, readable to it.
+    cc="$(mktemp /run/airlock-envoy-mint/.check.XXXXXX)"; install -m 0640 -o root -g airlock-envoy-mint "$work/mint.conf" "$cc"
+    mrc=0; timeout -k 5 300 setpriv --reuid=airlock-envoy-mint --regid=airlock-envoy-mint --clear-groups --no-new-privs -- "$(mint_tool)" check --conf "$cc" 9>&- | sed 's/^/    /' || mrc=${PIPESTATUS[0]}
+    rm -f "${cc:?}"
+    case "$mrc" in
+      0) ;;
+      1) die "a line doesn't fit its GitHub App (above): nothing was changed" ;;
+      *) echo "    note: not checked (above); minting will say if GitHub refuses" ;;
+    esac
+  fi
 fi
 # Envoy's validate mode opens the access log, so the copy it checks logs to /dev/null; it is
 # otherwise the config that gets installed. As root it runs as the service account.
@@ -2030,6 +2137,29 @@ if ! any_web && { [ -e "$ETC/envoy-web.yaml" ] || [ -e "$WEB_DROPIN" ] || system
   systemctl daemon-reload
 fi
 inst "$work/allowed" "$ETC/allowed"
+# GitHub App tokens: mint.conf (what airlock-envoy-mint mints), the timer that keeps them fresh,
+# and a run now. Without App lines, the timer stops and mint.conf goes.
+if [ -s "$work/mint.conf" ]; then
+  install -m 0640 -o root -g airlock-envoy-mint "$work/mint.conf" "$MINT_CONF.new" && mv -f "$MINT_CONF.new" "$MINT_CONF"
+  systemctl enable --quiet --now airlock-envoy-mint.timer
+  if [ "$held" = 0 ]; then
+    systemctl start airlock-envoy-mint.service || echo "    note: airlock-envoy-mint did not mint every token (journalctl -u airlock-envoy-mint; airlock-envoy-mint check)"
+  fi
+elif [ -e "$MINT_CONF" ] || systemctl is-enabled --quiet airlock-envoy-mint.timer 2>/dev/null; then
+  echo "==> No line uses a GitHub App: revoking its tokens"
+  # A run with no lines revokes every token still recorded; the timer and the (empty) mint.conf
+  # stay until none is left, so one that failed is retried.
+  install -m 0640 -o root -g airlock-envoy-mint /dev/null "$MINT_CONF.new" && mv -f "$MINT_CONF.new" "$MINT_CONF"
+  [ "$held" = 1 ] || systemctl start airlock-envoy-mint.service || true
+  if [ -n "$(find /run/airlock-envoy-mint/minted -maxdepth 1 -type f 2>/dev/null | head -n 1)" ]; then
+    echo "    note: some tokens are not revoked yet; airlock-envoy-mint keeps trying every 5 minutes (journalctl -u airlock-envoy-mint)"
+    systemctl enable --quiet --now airlock-envoy-mint.timer
+  else
+    echo "==> Stopping airlock-envoy-mint"
+    systemctl disable --quiet --now airlock-envoy-mint.timer 2>/dev/null || true
+    rm -f "${MINT_CONF:?}"
+  fi
+fi
 # Client manifests: kept in /etc, from where each box socket's unit copies its own next to the
 # socket when it starts (at boot too); the running sockets' copies are written below.
 install -d -m 0750 -o root -g "$grp" "$CLIENTS_ETC"

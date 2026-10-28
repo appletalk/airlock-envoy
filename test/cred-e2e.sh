@@ -98,7 +98,7 @@ out="$(get)"
   && [[ "$out" == *"airlock-envoy: credential gh is locked on this host: stop, and ask the operator to unlock it on the host (airlock-envoy-cred unlock); do not retry"* ]] \
   && [ ! -s upstream.log ] && ok "locked: 423 with the marker and the message, nothing upstream" || fail "locked: $out"
 
-printf 'gh LIVE-TOKEN-1\n' | cred receive >/dev/null; settle
+printf 'gh %s\n' "$(printf LIVE-TOKEN-1 | base64 -w0)" | cred receive >/dev/null; settle
 out="$(get)"
 [[ "$out" == "HTTP/1.1 200"* ]] && [[ "$out" == *"authorization=Bearer LIVE-TOKEN-1"* ]] \
   && ok "unlocked: the token reaches upstream, no restart" || fail "unlocked: $out"
@@ -111,7 +111,7 @@ out="$(get)"; n="$(grep -c LIVE-TOKEN upstream.log)"
 [[ "$out" == "HTTP/1.1 423"* ]] && [ "$n" = 2 ] && ok "locked again: 423 from the next request, no restart" || fail "relock: $out ($n)"
 [[ "$out" != *LIVE-TOKEN* ]] && ok "the 423 never carries the credential" || fail "423 leaked the token"
 
-printf 'gh LIVE-TOKEN-2\n' | cred receive >/dev/null; settle
+printf 'gh %s\n' "$(printf LIVE-TOKEN-2 | base64 -w0)" | cred receive >/dev/null; settle
 [[ "$(get)" == *"authorization=Bearer LIVE-TOKEN-2"* ]] && ok "unlocked again: the new token" || fail "second unlock"
 python3 -I -c "import json,sys; [print(json.loads(l)['status']) for l in open(sys.argv[1])]" access.jsonl 2>/dev/null | grep -qx 423 \
   && ok "the access log records the 423s" || fail "no 423 in the access log"

@@ -1,0 +1,9 @@
+# airlock-envoy-mint's runtime directory, made at boot (and by install-service.sh). Root owns the
+# directory, keys/ (the pass keys unlocked for the mint account: it reads, never writes them) and
+# .lock; the mint account owns only the leaves it writes, below a directory it can't change.
+d /run/airlock-envoy-mint                0755 root               root               -
+d /run/airlock-envoy-mint/keys           0750 root               airlock-envoy-mint -
+f /run/airlock-envoy-mint/.lock          0640 root               airlock-envoy-mint -
+d /run/airlock-envoy-mint/tokens         2750 airlock-envoy-mint airlock-envoy      -
+d /run/airlock-envoy-mint/minted         0700 airlock-envoy-mint airlock-envoy-mint -
+d /run/airlock-envoy-mint/installations  0700 airlock-envoy-mint airlock-envoy-mint -

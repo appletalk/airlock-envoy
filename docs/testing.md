@@ -1,7 +1,7 @@
 # Testing
 
 Every suite runs as your own user with rootless podman, except `apply-parse.sh`, shellcheck,
-the GraphQL check, the two `protect` suites and the two credential suites, which need no podman.
+the GraphQL check, the two `protect` suites and the credential and App suites, which need no podman.
 
 | Command | What |
 |---|---|
@@ -14,6 +14,8 @@ the GraphQL check, the two `protect` suites and the two credential suites, which
 | `test/protect-e2e.sh` | `protect` end to end, no podman or root: a rendered config in a real Envoy, a TLS git upstream (git-http-backend), real git pushes (needs envoy, git, python3, openssl, socat) |
 | `test/cred-backends.sh` | Pass credentials, no root or podman: unlock, lock, expiry on both clocks, migrate, all-or-nothing, who may run what |
 | `test/cred-e2e.sh` | Pass credentials in a real Envoy: 423 while locked, the token after unlock and the 423 after lock without a restart (needs envoy, python3, openssl, curl) |
+| `test/mint.sh` | GitHub App minting against a stand-in App API (`test/fake-github-app.py`: TLS, checks each JWT's RS256 signature with the App's key): each line's repos and permissions, renewal, revocation, locked and refused keys (needs python3, openssl, curl) |
+| `test/mint-e2e.sh` | GitHub App credentials in a real Envoy: locked, unlocked through `unlock`, each route its own live token, the read route's token read-only, lock revoking (needs envoy, python3, openssl, curl) |
 | `test/run-envoy.sh test/site.conf` then `test/site-checks.sh` | Site listeners, each reaching exactly its own list |
 
 ## All the tests at once

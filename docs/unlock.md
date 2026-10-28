@@ -56,7 +56,9 @@ is given.
   unlocked.
 - **One verb at a time.** receive, lock, the expiry, boot, add, remove and migrate take a lock
   (`/run/airlock-envoy-cred/.lock`), so a lock or an expiry can't interleave with an unlock and
-  leave secrets without their timer. Secrets are read before it is taken (pass may be waiting
+  leave secrets without their timer. (The expiry waits a minute for it; if it can't have it, it
+  still locks every secret, and leaves the state and the timer to the next expiry. Unlock releases
+  it while a GitHub App mints.) Secrets are read before it is taken (pass may be waiting
   at its prompt), and migrate releases it before its apply (Envoy's restart runs boot, which
   takes it).
 - **Unreadable means locked.** The expiry locks on a state it can't read (missing, damaged, a

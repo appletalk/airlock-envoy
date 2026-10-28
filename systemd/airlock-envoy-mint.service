@@ -1,0 +1,45 @@
+[Unit]
+Description=Mint the GitHub App tokens of the airlock Envoy credentials
+Documentation=https://github.com/appletalk/airlock-envoy
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/airlock-envoy-mint/mint.conf
+
+[Service]
+Type=oneshot
+User=airlock-envoy-mint
+Group=airlock-envoy-mint
+# The tokens it writes are Envoy's to read: the tokens directory is setgid airlock-envoy.
+ExecStart=/usr/local/sbin/airlock-envoy-mint run
+TimeoutStartSec=120
+UMask=0027
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# Only the leaves it writes (tmpfiles.d makes them at boot); keys/ and .lock are root's, read here.
+ReadWritePaths=/run/airlock-envoy-mint/tokens /run/airlock-envoy-mint/minted /run/airlock-envoy-mint/installations
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+LimitCORE=0
+MemorySwapMax=0

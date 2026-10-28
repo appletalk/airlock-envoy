@@ -45,6 +45,8 @@ systemd-sysusers airlock-envoy.conf
 uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
 [ "$(id -u airlock-envoy)" -lt "${uid_min:-1000}" ] \
   || { echo "airlock-envoy exists as a login account (uid $(id -u airlock-envoy)); remove it or rename it" >&2; exit 1; }
+[ "$(id -u airlock-envoy-mint)" -lt "${uid_min:-1000}" ] \
+  || { echo "airlock-envoy-mint exists as a login account (uid $(id -u airlock-envoy-mint)); remove it or rename it" >&2; exit 1; }
 
 # Check the site file, if there is one, with this repo's airlock-envoy-apply before anything
 # else is installed: a file it rejects then leaves the running install as it was. A --site
@@ -88,6 +90,13 @@ install -m 0644 -o root -g root "$repo/install/logrotate.conf" /etc/airlock-envo
 mv -f /etc/airlock-envoy/logrotate.conf.new /etc/airlock-envoy/logrotate.conf
 # The GitHub GraphQL write check the github-api rules inline into the config.
 install -D -m 0644 -o root -g root "$repo/install/github-graphql.lua" /usr/local/share/airlock-envoy/github-graphql.lua
+# GitHub App token minting (enabled by airlock-envoy-apply only while a line uses an App): the
+# tool, run as its own account, and its config directory, which that account alone may read.
+install -m 0755 -o root -g root "$repo/install/airlock-envoy-mint" /usr/local/sbin/airlock-envoy-mint.new
+mv -f /usr/local/sbin/airlock-envoy-mint.new /usr/local/sbin/airlock-envoy-mint
+install -d -m 0750 -o root -g airlock-envoy-mint /etc/airlock-envoy-mint /etc/airlock-envoy-mint/apps
+install -D -m 0644 "$repo/systemd/airlock-envoy-mint.tmpfiles" /etc/tmpfiles.d/airlock-envoy-mint.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/airlock-envoy-mint.conf
 # The push check of protected branches (protect), inlined likewise.
 install -D -m 0644 -o root -g root "$repo/install/git-protect.lua" /usr/local/share/airlock-envoy/git-protect.lua
 # Credentials for plain-HTTP destinations (airlock-envoy-cred): root writes, Envoy reads.
@@ -99,7 +108,8 @@ install -d -m 0750 -o root -g airlock-envoy /etc/airlock-envoy/ca
 # airlock-envoy-cred-expire.timer is started by airlock-envoy-cred unlock, and stopped when it locks.
 for u in airlock-envoy.service airlock-envoy-web.service airlock-envoy-proxy@.socket airlock-envoy-proxy@.service \
          airlock-envoy-logrotate.service airlock-envoy-logrotate.timer \
-         airlock-envoy-cred-expire.service airlock-envoy-cred-expire.timer; do
+         airlock-envoy-cred-expire.service airlock-envoy-cred-expire.timer \
+         airlock-envoy-mint.service airlock-envoy-mint.timer; do
   install -m 0644 "$repo/systemd/$u" "/etc/systemd/system/$u"
 done
 # Earlier versions' one global client: each listener's own drop-in (airlock-envoy-apply) has

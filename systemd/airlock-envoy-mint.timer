@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep the airlock Envoy GitHub App tokens fresh (every 5 minutes)
+Documentation=https://github.com/appletalk/airlock-envoy
+
+# Enabled by airlock-envoy-apply while a site-file line uses a GitHub App, disabled when none
+# does. Tokens last an hour; each is minted again 15 minutes before it ends.
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -14,9 +14,8 @@ two modes:
 | **CONNECT tunnel** | Clients that need TLS end to end, such as Claude Code (`HTTPS_PROXY`), whose login and Remote Control need the real Anthropic API | Allows exact hosts only, checks the TLS server name, sees host, bytes and timing but never content, holds no secret |
 | **Plain HTTP with an injected credential** | Clients you can point at a plain-HTTP URL (`gh`, `git`, `curl`, `kubectl`) | Checks method and path against a preset, adds the credential, opens TLS upstream itself. The box never holds the token |
 
-Not yet built: minted per-repo tokens (an `ext_authz` decision service). Per-repo scoping is
-the `repos` option of the `http` line, read-only repos its `repos-read`, and protected branches
-its `protect`.
+Per-repo scoping is the `repos` option of the `http` line, read-only repos its `repos-read`,
+protected branches its `protect`; a GitHub App credential gets each line its own minted token.
 
 Status: **spike**. The install path is tested on Ubuntu 22.04, 24.04 and 26.04, Debian 13 and
 Arch (in systemd-booted containers), and runs as a service on an Arch workstation.
@@ -337,6 +336,23 @@ Locked, a request using one gets **423 Locked** from Envoy itself (`x-airlock-en
 "credential <name> is locked on this host: ... do not retry"); nothing goes upstream. A box can
 never unlock: see [docs/unlock.md](docs/unlock.md) for the boundary, the expiry and the limits.
 File credentials work as before; the backend is per credential.
+
+**GitHub App credentials (minted per line).** A credential can be a GitHub App installation:
+each site-file line that uses it gets its own short-lived installation token, minted for that
+line's repos with that line's permissions (and a read-only one for its `repos-read`), renewed
+before it expires, revoked when replaced or locked. A separate service account
+(`airlock-envoy-mint`) holds the App's key; Envoy only ever reads the tokens.
+
+```
+sudo airlock-envoy-cred add-app work-app --app-id 123 --org example-org --key pass:work/app.pem
+sudo airlock-envoy-cred add-app work-app --app-id 123 --org example-org --key file < app.pem
+http api.github.com@w rules github-api credential work-app repos example-org/app repos-read example-org/docs
+http github.com@w     rules git        credential work-app repos example-org/app protect main
+sudo /usr/local/sbin/airlock-envoy-mint check   # the installation's permissions vs what the lines ask
+```
+
+A pass key unlocks with the other pass credentials. Lines name their repos (no `<owner>/*`),
+one owner each. See [docs/github-app.md](docs/github-app.md).
 
 **Credentials are never logged.** Envoy's access log sees request headers *after* the credential
 is added, so no rendered log format names a request header (a test checks this), and Envoy runs

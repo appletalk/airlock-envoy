@@ -1,0 +1,383 @@
+#!/bin/bash
+# airlock-envoy-mint: GitHub App installation tokens for Envoy's credentials, minted per
+# site-file line. Run by airlock-envoy-mint.service as its own account (airlock-envoy-mint),
+# which alone reads the App's private key; Envoy only ever reads the tokens.
+#
+#   airlock-envoy-mint run     mint each token in /etc/airlock-envoy-mint/mint.conf that is
+#                              missing, changed, or within 15 minutes (and up to 2 more) of its
+#                              expiry; revoke the one it replaces; with no key (a pass key locked)
+#                              lock its tokens and revoke them. The timer runs it every 5 minutes.
+#   airlock-envoy-mint check [--conf <file>]
+#                              each App in mint.conf (or <file>): its installation (id, repository
+#                              selection, granted permissions, installed repos), and whether the
+#                              lines fit it: a repo it isn't installed on, or more than it grants,
+#                              is an error; a risky grant (workflows, administration, secrets,
+#                              actions:write, environments, members, organization_*) a warning.
+#                              Exit 0 fine, 1 a line doesn't fit, 3 not checked (key locked, the
+#                              API unreachable). As the mint account (apply and
+#                              airlock-envoy-cred status run it so).
+#
+#   airlock-envoy-mint state <name>   minted, locked, unavailable or missing (what root asks)
+#   airlock-envoy-mint mark <name> locked|unavailable <app>
+#                              (root runs this as the mint account, never writing here itself)
+#                              set a token's file to the locked or unavailable value
+#
+# mint.conf (written by airlock-envoy-apply from the site file), a line per token:
+#   token <name> app <app> owner <owner> repos <repo>[,<repo>...] perms <permission>=<read|write>[,...] format basic|token
+# An App (airlock-envoy-cred add-app): /etc/airlock-envoy-mint/apps/<app> holds kind github-app, app_id, org or
+# installation_id (with org alone, the installation is looked up and its id cached in /run), api
+# (https://api.github.com by default), key pass|file, and optionally ca (a CA file for the API's
+# certificate); key file: apps/<app>.pem; key pass: while unlocked, /run/airlock-envoy-mint/keys/<app>.pem.
+# /run/airlock-envoy-mint is root's, as are its keys/ (root:airlock-envoy-mint 0750, keys 0440)
+# and .lock; tokens/ (setgid airlock-envoy), minted/ and installations/ are this account's, and
+# root never writes in them (it runs "mark" as this account instead), so nothing this account
+# plants there can steer root.
+# Tokens: /run/airlock-envoy-mint/tokens/<name>.yaml (SDS files, group airlock-envoy, 0640).
+# Each holds the token as the Authorization value its format gives, or, locked (a pass key not
+# unlocked) "airlock-envoy-locked <app>", or, never minted and failing, "airlock-envoy-unavailable
+# <app>": Envoy answers either itself. Tokens and JWTs never appear in an argv: curl reads its
+# headers and body from stdin, and GitHub's JSON is read by python3 from stdin.
+set -euo pipefail
+umask 027
+export LC_ALL=C
+
+CONF=/etc/airlock-envoy-mint/mint.conf
+APPS=/etc/airlock-envoy-mint/apps
+RUN=/run/airlock-envoy-mint
+TOK=$RUN/tokens
+KEYS=$RUN/keys
+MINTED=$RUN/minted        # tokens to revoke one day (0700), each "<app> <token>": <name> the current one,
+                          # <name>.prev.<n> replaced ones (revoked after GRACE), .<name>.new one being installed
+INST=$RUN/installations   # installation ids looked up by org
+LOCK=$RUN/.lock           # root's; runs and root's lock take it (opened read-only)
+GRACE=60                  # a replaced token is revoked this long after, so requests in flight finish
+RENEW=900                 # renew this many seconds before expiry (plus up to 120 s of jitter)
+RISKY="workflows administration secrets environments members"   # and actions=write, organization_*
+die() { echo "airlock-envoy-mint: $*" >&2; exit 2; }   # 2: not run (1 is check's "a line doesn't fit")
+log() { echo "airlock-envoy-mint: $*" >&2; }
+now() { date +%s; }
+jitter() { echo $(( $(od -An -N2 -tu2 /dev/urandom) % 121 )); }
+command -v python3 >/dev/null || die "needs python3 (to read GitHub's JSON)"
+
+b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
+field() { sed -n "s/^$2 //p" "$APPS/$1"; }   # field <app> <key>
+# The kinds it mints for: github-app (an App installation's tokens) so far; another issuer would be
+# another kind here, with its own lines in mint.conf.
+valid_app() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}$ ]] && [ -f "$APPS/$1" ] && [ "$(field "$1" kind)" = github-app ]; }
+key_of() {  # the App's key file, if it has one now
+  if [ "$(field "$1" key)" = pass ]; then printf '%s' "$KEYS/$1.pem"; else printf '%s' "$APPS/$1.pem"; fi
+}
+# GitHub's JSON, read by python3 from stdin, each value checked; any surprise fails.
+json_id() { python3 -I -c 'import json, sys
+j = json.load(sys.stdin); v = j.get("id")
+sys.exit(1) if not (type(v) is int and 0 < v < 10**20) else print(v)'; }
+json_login() { python3 -I -c 'import json, sys, re
+a = json.load(sys.stdin).get("account")
+v = a.get("login") if isinstance(a, dict) else None
+sys.exit(1) if not (isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9-]{1,39}", v)) else print(v)'; }
+json_selection() { python3 -I -c 'import json, sys
+v = json.load(sys.stdin).get("repository_selection")
+sys.exit(1) if v not in ("all", "selected") else print(v)'; }
+json_perms() { python3 -I -c 'import json, sys, re   # name=access,... (names and access checked)
+p = json.load(sys.stdin).get("permissions")
+if not isinstance(p, dict): sys.exit(1)
+print(",".join(k + "=" + v for k, v in sorted(p.items()) if re.fullmatch(r"[a-z_]{1,40}", k) and v in ("read", "write", "admin")))'; }
+json_repos() { python3 -I -c 'import json, sys, re   # a repo name a line
+r = json.load(sys.stdin).get("repositories")
+if not isinstance(r, list): sys.exit(1)
+for x in r:
+    n = x.get("name") if isinstance(x, dict) else None
+    if isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,100}", n): print(n.lower())'; }
+
+# A JWT for the App (RS256; iat a minute back for clock skew, exp 9 minutes on).
+jwt() {  # jwt <app>
+  local h p n
+  n=$(now)
+  h=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+  p=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((n - 60)) $((n + 540)) "$(field "$1" app_id)" | b64url)
+  printf '%s.%s.%s' "$h" "$p" "$(printf '%s.%s' "$h" "$p" | openssl dgst -sha256 -sign "$(key_of "$1")" -binary | b64url)"
+}
+# api <app> <method> <path> <authorization> [<json body>]: the body, then the HTTP status on the
+# last line. Headers and body go to curl on stdin (-K -), so no secret is in an argv. The api URL
+# and ca path are root's (add-app checks them); paths and bodies are ours.
+api() {
+  local ca
+  ca=$(field "$1" ca)
+  {
+    printf 'url = "%s%s"\nrequest = "%s"\n' "$(field "$1" api)" "$3" "$2"
+    printf 'header = "Authorization: %s"\n' "$4"
+    printf 'header = "Accept: application/vnd.github+json"\nheader = "X-GitHub-Api-Version: 2022-11-28"\n'
+    printf 'header = "User-Agent: airlock-envoy-mint"\n'
+    if [ -n "${5:-}" ]; then printf 'header = "Content-Type: application/json"\ndata = "%s"\n' "${5//\"/\\\"}"; fi
+  } | curl -q -sS --proto =https --max-time 20 --max-filesize 1048576 ${ca:+--cacert "$ca"} -w '\n%{http_code}' -K -
+}
+status_of() { tail -n 1 <<< "$1"; }
+body_of() { sed '$d' <<< "$1"; }
+
+# The App's installation id: from its file, or (an org alone) looked up with the App's JWT and
+# kept in /run.
+inst_id() {  # inst_id <app>
+  local id org out
+  id=$(field "$1" installation_id)
+  if [ -n "$id" ]; then printf '%s' "$id"; return; fi
+  if [ -f "$INST/$1" ]; then id=$(cat "$INST/$1"); [[ "$id" =~ ^[1-9][0-9]{0,19}$ ]] && { printf '%s' "$id"; return; }; fi
+  org=$(field "$1" org)
+  [[ "$org" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,38})$ ]] || { log "app $1: no installation_id and no org"; return 1; }
+  out=$(api "$1" GET "/orgs/$org/installation" "Bearer $(jwt "$1")") || { log "app $1: the API could not be reached"; return 1; }
+  [ "$(status_of "$out")" = 200 ] || { log "app $1: no installation on $org (HTTP $(status_of "$out"))"; return 1; }
+  id=$(body_of "$out" | json_id) || { log "app $1: no id in GitHub's answer"; return 1; }
+  { printf '%s' "$id" > "$INST/.$1.new" && mv -f "$INST/.$1.new" "$INST/$1"; } || log "app $1: the installation id was not kept"
+  printf '%s' "$id"
+}
+
+# write <name> <value> <label>: the SDS file, swapped in atomically.
+write() {   # each step checked: it may run where set -e is off (a function under "if !")
+  local tmp
+  tmp="$(mktemp "$TOK/.new.XXXXXX")" || return 1
+  {
+    printf '# airlock-envoy credential %s, %s\n' "$1" "$3"
+    printf 'resources:\n- "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret\n'
+    printf '  name: "%s"\n  generic_secret: { secret: { inline_string: "%s" } }\n' "$1" "$2"
+  } > "$tmp" || { rm -f "${tmp:?}"; return 1; }
+  { chmod 0640 "$tmp" && mv -f "$tmp" "$TOK/$1.yaml"; } || { rm -f "${tmp:?}"; return 1; }
+}
+header_of() { sed -n '1s/^# airlock-envoy credential [^,]*, //p' "$TOK/$1.yaml" 2>/dev/null || true; }
+
+revoke_token() {  # revoke_token <app> <token>: at GitHub; 0 if gone (revoked, or already invalid)
+  local out
+  out=$(api "$1" DELETE /installation/token "token $2" 2>/dev/null) || return 1
+  case "$(status_of "$out")" in 204|401) return 0 ;; *) return 1 ;; esac
+}
+# A record: "<app> <token>". Revoked with its own App; kept (to retry) if that fails.
+revoke_rec() {  # revoke_rec <record file>
+  local a t
+  [ -f "$1" ] || return 0
+  read -r a t < "$1" || true
+  if ! valid_app "${a:-}"; then log "${1##*/}: its App ${a:-?} is gone: not revoked (kept)"; return 0; fi
+  if revoke_token "$a" "${t:-}"; then rm -f "${1:?}"; else log "${1##*/}: not revoked (kept to retry)"; fi
+}
+# The current token of <name> joins the replaced ones (revoked after GRACE). No network here.
+retire() {  # stamped now: its grace counts from its retirement, not its minting
+  local p
+  [ -f "$MINTED/$1" ] || return 0
+  p="$MINTED/$1.prev.$(date +%s%N)"
+  mv -f "$MINTED/$1" "$p" && touch "$p"
+}
+revoke_all() {  # revoke_all <name>: its current and replaced tokens, now
+  local f
+  revoke_rec "$MINTED/$1"
+  for f in "$MINTED/$1".prev.*; do [ ! -e "$f" ] || revoke_rec "$f"; done
+}
+installed_token() {  # the token in <name>'s file, if it holds one
+  local v
+  v=$(sed -n 's/^  generic_secret: { secret: { inline_string: "\(.*\)" } }$/\1/p' "$TOK/$1.yaml" 2>/dev/null || true)
+  case "$v" in
+    "token "*) printf '%s' "${v#token }" ;;
+    "Basic "*) printf '%s' "${v#Basic }" | base64 -d 2>/dev/null | sed -n 's/^x-access-token://p' ;;
+  esac
+}
+
+value_of() {  # value_of <format> <token>
+  case "$1" in
+    basic) printf 'Basic %s' "$(printf 'x-access-token:%s' "$2" | base64 -w0)" ;;
+    token) printf 'token %s' "$2" ;;
+  esac
+}
+
+# mint <app> <body>: a token, as "<token> <expiry epoch>"; GitHub's answer checked strictly.
+mint() {
+  local out id
+  id=$(inst_id "$1") || return 1
+  out=$(api "$1" POST "/app/installations/$id/access_tokens" "Bearer $(jwt "$1")" "$2") || { log "app $1: the API could not be reached"; return 1; }
+  [ "$(status_of "$out")" = 201 ] || { log "app $1: GitHub refused the token (HTTP $(status_of "$out")): $(body_of "$out" | head -c 300 | tr -cd '[:print:]')"; return 1; }
+  # A token of GitHub's characters, an expiry in the future within a day.
+  body_of "$out" | python3 -I -c 'import json, sys, re, datetime, time
+j = json.load(sys.stdin)
+t, e = j.get("token"), j.get("expires_at")
+if not (isinstance(t, str) and re.fullmatch(r"[A-Za-z0-9_]{20,255}", t) and isinstance(e, str)): sys.exit(1)
+x = datetime.datetime.strptime(e, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
+if not (time.time() < x <= time.time() + 86400): sys.exit(1)
+print(t, int(x))' || { log "app $1: no usable token in GitHub's answer"; return 1; }
+}
+body_for() {  # body_for <repos> <perms>: the access_tokens request
+  local r p x b='{"repositories":['
+  IFS=, read -ra r <<< "$1"
+  b+=$(printf '"%s",' "${r[@]}"); b=${b%,}
+  b+='],"permissions":{'
+  IFS=, read -ra p <<< "$2"
+  for x in "${p[@]}"; do b+=$(printf '"%s":"%s",' "${x%=*}" "${x#*=}"); done
+  printf '%s' "${b%,}}}"
+}
+
+mint_one() {  # mint_one <name> <app> <repos> <perms> <format> <line hash>
+  local got tok exp
+  got=$(mint "$2" "$(body_for "$3" "$4")") || return 1
+  tok=${got% *} exp=${got#* }
+  # Locked while it was minting (the key gone): the new token goes back at once, unused.
+  if [ ! -r "$(key_of "$2")" ]; then revoke_token "$2" "$tok" || log "$1: a token minted as the key was locked was not revoked"; return 1; fi
+  # Recorded first (a run stopped from here on leaves .<name>.new, settled by the next run),
+  # then in place; then the one it replaces is retired (revoked after GRACE, so requests
+  # already sent with it finish). Nothing in between waits on the network.
+  printf '%s %s' "$2" "$tok" > "$MINTED/.$1.new" || { revoke_token "$2" "$tok" || true; log "$1: could not record the new token"; return 1; }
+  if ! write "$1" "$(value_of "$5" "$tok")" "app $2, minted, expires $exp, line $6"; then
+    revoke_token "$2" "$tok" || true; rm -f "${MINTED:?}/.${1:?}.new"; log "$1: could not install the new token"; return 1
+  fi
+  retire "$1"
+  mv -f "$MINTED/.$1.new" "$MINTED/$1" || log "$1: the new token's record was not kept"
+  log "$1: minted for app $2, repos $3, $4; expires $(date -u -d "@$exp" +%FT%TZ)"
+}
+
+valid_line() {  # valid_line <w1> <name> <w2> <app> <w3> <owner> <w4> <repos> <w5> <perms> <w6> <fmt>
+  [ "$1 $3 $5 $7 $9 ${11}" = "token app owner repos perms format" ] && [[ "$2" =~ ^[a-z][a-z0-9-]{0,62}$ ]] \
+    && [[ "$6" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,38})$ ]] \
+    && [[ "$8" =~ ^[A-Za-z0-9._-]{1,100}(,[A-Za-z0-9._-]{1,100}){0,99}$ ]] \
+    && [[ "${10}" =~ ^[a-z_]{1,40}=(read|write)(,[a-z_]{1,40}=(read|write)){0,19}$ ]] && [[ "${12}" =~ ^(basic|token)$ ]]
+}
+# A line's hash: the line and its App's definition (another installation or API mints anew).
+line_hash() { { printf '%s\n' "$*"; cat "$APPS/$2" 2>/dev/null; } | sha256sum | cut -c1-16; }
+
+cmd=${1:-run}
+case "$cmd" in
+  state)
+    # For root, which never reads this account's files itself: minted, locked, unavailable or
+    # missing, for a token name.
+    [ $# = 2 ] && [[ "$2" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "usage: airlock-envoy-mint state <name>"
+    [ -f "$TOK/$2.yaml" ] && [ ! -L "$TOK/$2.yaml" ] || { echo missing; exit 0; }
+    h=$(header_of "$2")
+    case "$h" in locked|unavailable) echo "$h" ;; "app "*", minted, "*) echo minted ;; *) echo missing ;; esac ;;
+  mark)
+    [ $# = 4 ] && [[ "$2" =~ ^[a-z][a-z0-9-]{0,62}$ ]] && [[ "$3" =~ ^(locked|unavailable)$ ]] && [[ "$4" =~ ^[a-z][a-z0-9-]{0,62}$ ]] \
+      || die "usage: airlock-envoy-mint mark <name> locked|unavailable <app>"
+    write "$2" "airlock-envoy-$3 $4" "$3" || die "could not mark $2" ;;
+  run)
+    # One run at a time (the timer, an apply, an unlock and Envoy's start may each start one, and
+    # root's lock waits for a run): two would each mint, and revoke the other's fresh token.
+    exec 8< "$LOCK"; flock 8
+    rc=0
+    declare -A seen=()
+    shopt -s nullglob
+    # A run stopped between recording and keeping a token: the recorded one is current if it is
+    # the installed one; otherwise it was never used, and goes.
+    for f in "$MINTED"/.*.new; do
+      n=${f##*/.}; n=${n%.new}
+      [[ "$n" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || continue
+      read -r _ t < "$f" || true
+      if [ -n "${t:-}" ] && [ "$(installed_token "$n")" = "$t" ]; then retire "$n"; mv -f "$f" "$MINTED/$n"; else revoke_rec "$f"; fi
+    done
+    if [ -r "$CONF" ]; then
+      while read -r w1 name w2 app w3 owner w4 repos w5 perms w6 fmt; do
+        [ -n "${w1:-}" ] && [ "${w1:0:1}" != "#" ] || continue
+        valid_line "$w1" "${name:-}" "${w2:-}" "${app:-}" "${w3:-}" "${owner:-}" "${w4:-}" "${repos:-}" "${w5:-}" "${perms:-}" "${w6:-}" "${fmt:-}" \
+          || { log "a bad line in $CONF: $w1 ${name:-}"; rc=1; continue; }
+        seen[$name]=1
+        # Replaced tokens, once their grace is over (each revoked with its own App).
+        for f in "$MINTED/$name".prev.*; do
+          [ $(( $(now) - $(stat -c %Y "$f") )) -lt "$GRACE" ] || revoke_rec "$f"
+        done
+        valid_app "$app" || { log "$name: no app $app"; write "$name" "airlock-envoy-unavailable $app" unavailable || true; retire "$name"; rc=1; continue; }
+        h=$(line_hash "$name" "$app" "$owner" "$repos" "$perms" "$fmt")
+        o=$(field "$app" org)
+        if [ ! -r "$(key_of "$app")" ]; then
+          # No key: a pass key locked (or never unlocked). Lock its tokens and revoke them.
+          if [ "$(field "$app" key)" = pass ]; then
+            [ "$(header_of "$name")" = locked ] || write "$name" "airlock-envoy-locked $app" locked || rc=1
+            revoke_all "$name"
+          else
+            log "$name: app $app has no key file"; write "$name" "airlock-envoy-unavailable $app" unavailable || true; retire "$name"; rc=1
+          fi
+          continue
+        fi
+        if [ -n "$o" ] && [ "${o,,}" != "${owner,,}" ]; then
+          log "$name: its repos are $owner's, app $app is installed on $o"; write "$name" "airlock-envoy-unavailable $app" unavailable || true
+          retire "$name"; rc=1; continue
+        fi
+        hdr=$(header_of "$name")
+        exp=$(sed -n 's/^app [^,]*, minted, expires \([0-9]\{1,12\}\), line [0-9a-f]*$/\1/p' <<< "$hdr")
+        same=0; [[ "$hdr" == *", line $h" ]] && same=1
+        if [ -n "$exp" ] && [ "$same" = 1 ] && [ $((exp - $(now))) -gt $((RENEW + $(jitter))) ]; then continue; fi
+        if ! mint_one "$name" "$app" "$repos" "$perms" "$fmt" "$h"; then
+          # Locked meanwhile (a pass key gone): locked, as at the top.
+          if [ ! -r "$(key_of "$app")" ] && [ "$(field "$app" key)" = pass ]; then
+            write "$name" "airlock-envoy-locked $app" locked || rc=1
+            revoke_all "$name"
+            continue
+          fi
+          rc=1
+          # Keep a token that still works for this very line; else say so rather than send it.
+          if [ "$same" = 0 ] || [ -z "$exp" ] || [ "$exp" -le "$(now)" ]; then
+            write "$name" "airlock-envoy-unavailable $app" unavailable || true
+            retire "$name"
+          fi
+        fi
+      done < "$CONF"
+    fi
+    # A check stopped half way: its token (a reserved record name, no line can have it).
+    for f in "$MINTED"/.check.*; do revoke_rec "$f"; done
+    # Lines gone from mint.conf: their tokens revoked; once none is left, their files removed.
+    for f in "$MINTED"/*; do
+      n=${f##*/}; [[ "$n" =~ ^([a-z][a-z0-9-]{0,62})(\.prev\.[0-9]{1,20})?$ ]] || continue
+      n=${BASH_REMATCH[1]}
+      [ -z "${seen[$n]:-}" ] || continue
+      revoke_rec "$f"
+      left=0; for g in "$MINTED/$n" "$MINTED/$n".prev.*; do [ ! -e "$g" ] || left=1; done
+      [ "$left" = 1 ] || rm -f "${TOK:?}/${n:?}.yaml"
+    done
+    shopt -u nullglob
+    exit "$rc" ;;
+  check)
+    conf=$CONF
+    if [ $# -gt 1 ]; then [ "$2" = --conf ] && [ $# = 3 ] || die "usage: airlock-envoy-mint check [--conf <file>]"; conf=$3; fi
+    [ -r "$conf" ] || die "no $conf: no line uses an App credential"
+    rc=0
+    while read -r app; do
+      valid_app "$app" || { echo "app $app: not set up (airlock-envoy-cred add-app)"; rc=1; continue; }
+      [ -r "$(key_of "$app")" ] || { echo "app $app: key locked (unlock to check)"; [ "$rc" = 1 ] || rc=3; continue; }
+      id=$(inst_id "$app") || { echo "app $app: no installation found (see above)"; [ "$rc" = 1 ] || rc=3; continue; }
+      out=$(api "$app" GET "/app/installations/$id" "Bearer $(jwt "$app")") || { echo "app $app: the API could not be reached"; [ "$rc" = 1 ] || rc=3; continue; }
+      [ "$(status_of "$out")" = 200 ] || { echo "app $app: installation $id: HTTP $(status_of "$out")"; [ "$rc" = 1 ] || rc=3; continue; }
+      inst="$(body_of "$out")"
+      login=$(json_login <<< "$inst") || login="?"
+      sel=$(json_selection <<< "$inst") || sel="?"
+      perms=$(json_perms <<< "$inst") || perms=""
+      # Its installed repos: a token for metadata alone (all its repos), used once and revoked.
+      repos="" listed=0
+      if got=$(mint "$app" '{"permissions":{"metadata":"read"}}'); then
+        t=${got% *}
+        # Recorded, so a check stopped half way leaves it for the next run's sweep to revoke.
+        printf '%s %s' "$app" "$t" > "$MINTED/.check.$app" 2>/dev/null || true
+        for page in 1 2 3 4 5 6 7 8 9 10; do
+          out=$(api "$app" GET "/installation/repositories?per_page=100&page=$page" "token $t") || break
+          [ "$(status_of "$out")" = 200 ] || break
+          more=$(body_of "$out" | json_repos) || break
+          repos+="${more:+$more$'\n'}"
+          [ "$(grep -c . <<< "$more")" = 100 ] || { listed=1; break; }   # a short page: the last
+        done
+        if revoke_token "$app" "$t"; then rm -f "${MINTED:?}/.check.${app:?}"; else echo "app $app: the checking token was not revoked (the next run retries)"; fi
+      fi
+      echo "app $app: installation $id on $login, $sel repositories, permissions ${perms//,/, }"
+      echo "  installed repos: $(sort -u <<< "$repos" | sed '/^$/d' | paste -sd ' ')"
+      for x in ${perms//,/ }; do
+        k=${x%=*} v=${x#*=}
+        case " $RISKY " in *" $k "*) echo "  warning: the App has $k=$v" ;; esac
+        [[ "$k" != organization_* ]] || echo "  warning: the App has $k=$v"
+        [ "$k=$v" != actions=write ] || echo "  warning: the App has actions=write"
+      done
+      while read -r _ name _ _ _ lowner _ lrepos _ lperms _; do
+        if [ "$login" = "?" ]; then echo "  note: the installation's account is unknown: owners not checked"; [ "$rc" = 1 ] || rc=3
+        elif [ "${lowner,,}" != "${login,,}" ]; then echo "  error: line $name names repos of $lowner, the App is installed on $login"; rc=1; fi
+        for x in ${lperms//,/ }; do
+          g=$(tr ',' '\n' <<< "$perms" | sed -n "s/^${x%=*}=//p")
+          if [ "$g" != write ] && [ "$g" != "${x#*=}" ]; then echo "  error: line $name asks for ${x%=*}=${x#*=}, the App grants ${g:-none}"; rc=1; fi
+        done
+        if [ "$listed" = 1 ]; then
+          for r in ${lrepos//,/ }; do
+            grep -qFx "${r,,}" <<< "$repos" || { echo "  error: line $name names $r, which the App isn't installed on"; rc=1; }
+          done
+        else
+          echo "  note: the installed repos could not all be listed (a page failed, or over 1000): not checked"; [ "$rc" = 1 ] || rc=3
+        fi
+      done < <(awk -v a="$app" '$1 == "token" && $4 == a' "$conf")
+    done < <(awk '$1 == "token" { print $4 }' "$conf" | sort -u)
+    exit "$rc" ;;
+  *) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2 ;;
+esac

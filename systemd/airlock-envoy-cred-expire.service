@@ -8,9 +8,11 @@ ExecStart=/usr/local/sbin/airlock-envoy-cred expire
 UMask=0077
 
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
+# SETUID/SETGID: to mark GitHub App tokens locked as the mint account (setpriv); the mint's /run:
+# to drop unlocked App keys and mark their tokens (absent when no App is set up).
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 ProtectSystem=strict
-ReadWritePaths=/run/airlock-envoy-cred
+ReadWritePaths=/run/airlock-envoy-cred -/run/airlock-envoy-mint
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

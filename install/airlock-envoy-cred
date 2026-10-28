@@ -19,6 +19,13 @@
 #       the same value: the config is applied (Envoy reads it from the tmpfs, locked) and then
 #       the file is removed. Then unlock
 #   airlock-envoy-cred remove <name>   as root: lock a pass credential and forget it
+#   airlock-envoy-cred add-app <name> --app-id <n> --org <org>|--installation-id <n>
+#                    --key pass:<entry>|file [--api <https url>] [--ca <file>]   (or add-github-app)
+#       as root: a GitHub App, installed on <org> (its installation is looked up with the App's
+#       own key, so setting it up needs no org admin; or name the installation). Its lines get tokens minted by
+#       airlock-envoy-mint for their own repos and permissions. --key file reads the PEM key from
+#       stdin (kept root:airlock-envoy-mint 0640); --key pass:<entry> unlocks it like any pass
+#       credential (the whole entry is the key), held for the mint account only while unlocked
 #   airlock-envoy-cred unlock [--for <n>h|<n>m]
 #       as the operator, on the host (never in a box: it needs your pass store and sudo): read
 #       the pass entries of the pass credentials the applied config uses, and hand them to
@@ -51,7 +58,15 @@ RUN=/run/airlock-envoy-cred
 SEC=$RUN/secrets
 STATE=$RUN/state
 TIMER=airlock-envoy-cred-expire.timer
+APPS=/etc/airlock-envoy-mint/apps
+MINT_CONF=/etc/airlock-envoy-mint/mint.conf
+MRUN=/run/airlock-envoy-mint
+MTOK=$MRUN/tokens
+MKEYS=$MRUN/keys
+MINT_USER=airlock-envoy-mint
+MINT_SVC=airlock-envoy-mint.service
 LOCKED=airlock-envoy-locked
+EXPIRE_WAIT=60   # seconds the expiry waits for the lock before locking without it
 die() { echo "airlock-envoy-cred: $*" >&2; exit 1; }
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 self="$(readlink -f "$0")"
@@ -114,6 +129,13 @@ read_entry() {  # read_entry <entry>: its first line, checked
   valid_secret "$v" || die "pass entry $1: the first line must be printable ASCII, without spaces, quotes or backslashes"
   printf '%s' "$v"
 }
+read_pem() {  # read_pem <entry>: the whole entry, a PEM private key, as base64 on one line
+  local v
+  valid_entry "$1" || die "bad pass entry '$1'"
+  v="$(pass show -- "$1")" || die "pass show $1 failed"
+  [[ "$v" == "-----BEGIN "*"PRIVATE KEY-----"* ]] || die "pass entry $1 is not a PEM private key"
+  printf '%s\n' "$v" | base64 -w0
+}
 case "$cmd" in
   unlock)
     [ "$(id -u)" != 0 ] || die "run unlock as yourself (it reads your pass store), not as root"
@@ -124,10 +146,15 @@ case "$cmd" in
     fi
     list="$(sudo -- "$self" entries)" || die "could not ask which entries to read"
     [ -n "$list" ] || die "no pass credential is in use (add one, and apply the site file)"
+    # A line each: <name> <the secret as base64> (a key is several lines).
     payload=""
-    while read -r name entry; do
+    while read -r name entry kind; do
       valid_name "$name"
-      payload+="$name $(read_entry "$entry")"$'\n'
+      case "$kind" in
+        token) payload+="$name $(read_entry "$entry" | base64 -w0)"$'\n' ;;
+        pem)   payload+="$name $(read_pem "$entry")"$'\n' ;;
+        *) die "root named an entry of an unknown kind '$kind'" ;;
+      esac
     done <<< "$list"
     printf '%s' "$payload" | sudo -- "$self" receive "${for_arg[@]}"
     payload=""
@@ -185,6 +212,46 @@ run_dirs() {
   install -d -m 0755 -o root -g root "$RUN"
   install -d -m 0750 -o root -g "$grp" "$SEC"
 }
+# GitHub Apps: $APPS/<name> (app_id, installation_id, api, key pass|file, entry, ca). Their
+# tokens are airlock-envoy-mint's; a pass key, unlocked, is $MKEYS/<name>.pem (the mint account's
+# only). The Apps in use are those the installed mint.conf names.
+is_app() { [ -f "$APPS/$1" ]; }
+app_field() { sed -n "s/^$2 //p" "$APPS/$1"; }
+apps_in_conf() { [ -r "$MINT_CONF" ] && awk '$1 == "token" { print $4 }' "$MINT_CONF" | sort -u; return 0; }
+app_pass_in_use() { local a; for a in $(apps_in_conf); do is_app "$a" && [ "$(app_field "$a" key)" = pass ] && echo "$a"; done; return 0; }
+# The mint's /run (tmpfiles.d makes it at boot): root's directory, root's keys/ and .lock; the
+# mint account's tokens/, minted/, installations/. Root never writes in the mint account's: a
+# link it planted there could steer root. Root's own parts are checked to be real directories.
+mint_dirs() {
+  local p
+  for p in "$MRUN" "$MKEYS" "$MRUN/.lock" "$MTOK" "$MRUN/minted" "$MRUN/installations"; do
+    [ ! -L "$p" ] || die "$p is a symlink: refusing (systemd-tmpfiles --create /etc/tmpfiles.d/airlock-envoy-mint.conf lays it out)"
+  done
+  install -d -m 0755 -o root -g root "$MRUN"
+  install -d -m 0750 -o root -g "$MINT_USER" "$MKEYS"
+  [ -f "$MRUN/.lock" ] || install -m 0640 -o root -g "$MINT_USER" /dev/null "$MRUN/.lock"
+  # Below a root-owned directory: the mint account can't swap these for links.
+  install -d -m 2750 -o "$MINT_USER" -g "$grp" "$MTOK"
+  install -d -m 0700 -o "$MINT_USER" -g "$MINT_USER" "$MRUN/minted" "$MRUN/installations"
+}
+# The tokens of the lines in use, as "<token> <app>".
+app_tokens() { [ -r "$MINT_CONF" ] && awk '$1 == "token" { print $2, $4 }' "$MINT_CONF"; return 0; }
+mark_missing() {  # mark_missing <mint.conf>: each line's token file, locked or unavailable until minted
+  local t a
+  mint_dirs
+  while read -r t a; do
+    [ -f "$MTOK/$t.yaml" ] && continue
+    if [ "$(app_field "$a" key 2>/dev/null)" = pass ]; then mark "$t" locked "$a"; else mark "$t" unavailable "$a"; fi
+  done < <(awk '$1 == "token" { print $2, $4 }' "$1")
+}
+mint_tool() { local m; m="$(dirname "$self")/airlock-envoy-mint"; [ -x "$m" ] || m=/usr/local/sbin/airlock-envoy-mint; printf '%s' "$m"; }
+# mark <token> locked|unavailable <app>: as the mint account (its directory, its files).
+# Root's lock files are closed first: a copy held by a process of that account would hold them.
+# A token's state (minted, locked, unavailable, missing), asked of the mint account: root never
+# reads its files (a FIFO there would hang root holding the lock). Bounded by a timeout.
+mint_state() { timeout 10 setpriv --reuid="$MINT_USER" --regid="$MINT_USER" --clear-groups --no-new-privs -- "$(mint_tool)" state "$1" 7<&- 9>&- 2>/dev/null | head -c 32 || echo unknown; }
+mark() { timeout -k 2 10 setpriv --reuid="$MINT_USER" --regid="$MINT_USER" --clear-groups --no-new-privs -- "$(mint_tool)" mark "$@" 7<&- 9>&-; }
+
 # The pass credentials the applied config uses: their files in $SEC are what it reads.
 pass_in_use() {
   local n
@@ -208,7 +275,7 @@ write_state() {  # write_state locked | unlocked <unlocked at> <deadline> <boot 
   } > "$tmp"
   chmod 0644 "$tmp"; mv -f "$tmp" "$STATE"
 }
-lock_all() {
+lock_all() {  # lock_all [nowait]: nowait from boot (Envoy's start must not wait on a mint run)
   local n f
   run_dirs
   for n in $(pass_names); do write "$SEC" "$n" "$LOCKED $n" locked; done
@@ -219,6 +286,20 @@ lock_all() {
     grep -q "inline_string: \"$LOCKED " "$f" || write "$SEC" "$n" "$LOCKED $n" locked
   done
   shopt -u nullglob
+  # Apps with a pass key: the key goes; a mint run in flight is waited for (it would put a
+  # token back); their tokens lock now; a fresh run revokes them.
+  [ -L "$MKEYS" ] || rm -f "${MKEYS:?}"/*.pem 2>/dev/null || true
+  if [ -n "$(app_pass_in_use)" ]; then
+    mint_dirs
+    exec 7< "$MRUN/.lock"
+    if [ "${1:-}" = nowait ]; then flock -n 7 || true; else flock -w 30 7 || true; fi
+    while read -r t a; do
+      [ "$(app_field "$a" key 2>/dev/null)" != pass ] || mark "$t" locked "$a" || true
+    done < <(app_tokens)
+    exec 7<&-
+    systemctl start --no-block "$MINT_SVC" 2>/dev/null || true
+  fi
+  [ -z "${NOLOCK:-}" ] || return 0
   write_state locked
   systemctl stop "$TIMER" 2>/dev/null || true
 }
@@ -261,15 +342,22 @@ at_on() {
 # pipe, never a temp file). A NUL becomes \001, which no check accepts.
 input=""
 case "$cmd" in
+  add-app|add-github-app)   # --key file: the key on stdin, read before the lock
+    case " $* " in *" --key file "*) [ -t 0 ] || input="$(head -c 20001)" ;; esac ;;
   receive|receive-migrate)
     input="$(head -c 60001 | tr '\000' '\001')"
     [ "${#input}" -le 60000 ] || die "over 60000 bytes on stdin: nothing was changed"
     [ -n "$input" ] || die "nothing on stdin: nothing was changed" ;;
 esac
 case "$cmd" in
-  boot) [ -n "$(pass_names)" ] || [ -d "$SEC" ] || exit 0 ;;&
-  receive|receive-migrate|add|remove|lock|expire|boot)
+  boot) [ -n "$(pass_names)" ] || [ -d "$SEC" ] || [ -s "$MINT_CONF" ] || exit 0 ;;&
+  receive|receive-migrate|add|add-app|add-github-app|remove|lock|boot)
     run_dirs; exec 9> "$RUN/.lock"; flock 9 ;;
+  expire)
+    # The expiry must lock even if another verb holds the lock (fail closed): it waits a minute.
+    # Without it, only the fail-closed steps (lock_all sees NOLOCK): the state and the timer are
+    # left to the next expiry that gets the lock, so a stale one can't undo a later unlock.
+    run_dirs; exec 9> "$RUN/.lock"; flock -w "$EXPIRE_WAIT" 9 || { NOLOCK=1; echo "airlock-envoy-cred: the lock is held; locking without it" >&2; } ;;
 esac
 cred_apply() {  # airlock-envoy-apply: next to this script in a checkout, else where install put it
   local f
@@ -281,28 +369,37 @@ cred_apply() {  # airlock-envoy-apply: next to this script in a checkout, else w
 case "$cmd" in
   entries)
     [ $# = 0 ] || die "usage: airlock-envoy-cred entries"
-    for n in $(pass_in_use); do printf '%s %s\n' "$n" "$(pass_field "$n" entry)"; done ;;
+    for n in $(pass_in_use); do printf '%s %s token\n' "$n" "$(pass_field "$n" entry)"; done
+    for a in $(app_pass_in_use); do printf '%s %s pem\n' "$a" "$(app_field "$a" entry)"; done ;;
   receive)
     forsec=""
     if [ $# -gt 0 ]; then
       [ "$1" = --for ] && [ $# = 2 ] || die "usage: airlock-envoy-cred receive [--for <n>h|<n>m] < <name secret lines>"
       forsec=$(duration "$2")
     fi
-    used=" $(pass_in_use | tr '\n' ' ')"
-    declare -A got=()
+    used=" $(pass_in_use | tr '\n' ' ')$(app_pass_in_use | tr '\n' ' ')"
+    declare -A got=() key=()
     n=0
-    while IFS=' ' read -r name secret; do
+    while IFS=' ' read -r name b64 extra; do
       n=$((n + 1)); [ "$n" -le 64 ] || die "over 64 credentials"
       # A bad line is named by its number, never its text (it could hold a secret).
-      [[ "$name" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "line $n on stdin is not '<name> <secret>': nothing was unlocked"
-      is_pass "$name" || die "$name is not a pass credential"
-      [[ "$used" == *" $name "* ]] || die "$name is not in use by the applied config"
-      valid_secret "$secret" || die "the secret for $name must be printable ASCII, without spaces, quotes or backslashes"
-      got[$name]=$secret
+      { [[ "$name" =~ ^[a-z][a-z0-9-]{0,62}$ ]] && [[ "$b64" =~ ^[A-Za-z0-9+/]+=*$ ]] && [ -z "${extra:-}" ]; } \
+        || die "line $n on stdin is not '<name> <base64>': nothing was unlocked"
+      [[ "$used" == *" $name "* ]] || die "$name is not a pass credential or App key in use by the applied config"
+      secret="$(printf '%s' "$b64" | base64 -d 2>/dev/null | tr '\000' '\001')" || die "line $n on stdin: not base64: nothing was unlocked"
+      if is_app "$name"; then
+        # A key openssl reads (from stdin: never a file of its own).
+        printf '%s\n' "$secret" | openssl rsa -check -noout -passin pass: >/dev/null 2>&1 || die "the key for $name is not an unencrypted RSA private key: nothing was unlocked"
+        key[$name]=$secret
+      else
+        valid_secret "$secret" || die "the secret for $name must be printable ASCII, without spaces, quotes or backslashes"
+        got[$name]=$secret
+      fi
+      secret=""
     done <<< "$input"
     input=""
-    for name in $used; do [ -n "${got[$name]+x}" ] || die "no secret for $name: nothing was unlocked"; done
-    [ "${#got[@]}" -gt 0 ] || die "nothing to unlock"
+    for name in $used; do [ -n "${got[$name]+x}" ] || [ -n "${key[$name]+x}" ] || die "no secret for $name: nothing was unlocked"; done
+    [ $(( ${#got[@]} + ${#key[@]} )) -gt 0 ] || die "nothing to unlock"
     # The deadline and the timer that enforces it come first: no secret is installed without them.
     t0=$(now); dl=$(deadline "$forsec") || dl=""
     bdl=$(( $(boot_secs) + ${dl:-0} - t0 ))
@@ -312,7 +409,35 @@ case "$cmd" in
     for name in "${!got[@]}"; do
       write "$SEC" "$name" "$(header_value "$(pass_field "$name" format)" "${got[$name]}")" "pass $(pass_field "$name" format)"
     done
-    names="${!got[*]}"; got=()
+    # App keys: for the mint account alone; then a mint run, which must give each of their lines
+    # a token (a key GitHub refuses locks everything back).
+    if [ "${#key[@]}" -gt 0 ]; then
+      mint_dirs
+      for name in "${!key[@]}"; do
+        # In root's keys/ (the mint account can read, not write, there).
+        tmp="$(mktemp "$MKEYS/.new.XXXXXX")"
+        printf '%s\n' "${key[$name]}" > "$tmp"; chown "root:$MINT_USER" "$tmp"; chmod 0440 "$tmp"; mv -f "$tmp" "$MKEYS/$name.pem"
+      done
+      # A run already going when the key landed may merge with this start: a second start then.
+      # Minting is the network's pace: the lock is released meanwhile (the deadline and its timer
+      # are in place), so Envoy's start, lock and the expiry never wait on it.
+      minted_all() {
+        local t a
+        while read -r t a; do
+          [ -n "${key[$a]+x}" ] || continue
+          [ "$(mint_state "$t")" = minted ] || { bad_app=$a bad_tok=$t; return 1; }
+        done < <(app_tokens)
+      }
+      exec 9>&-
+      systemctl start "$MINT_SVC" 7<&- || true
+      minted_all || { systemctl start "$MINT_SVC" 7<&- || true; }
+      if ! minted_all; then
+        exec 9> "$RUN/.lock"; flock 9
+        key=(); got=(); lock_all
+        die "app $bad_app: no token was minted for its line $bad_tok (journalctl -u $MINT_SVC): everything is locked"
+      fi
+    fi
+    names="${!got[*]} ${!key[*]}"; got=(); key=()
     echo "==> unlocked $names until $(date -d "@$dl" '+%Y-%m-%dT%H:%M:%S%z') ($(( (dl - t0) / 60 )) minutes): Envoy uses them from the next request"
     [ $((dl - t0)) -ge 1800 ] || echo "    note: under 30 minutes" ;;
   receive-migrate)
@@ -320,6 +445,7 @@ case "$cmd" in
     name=$1 entry=$2
     valid_name "$name"; valid_entry "$entry" || die "bad pass entry '$entry'"
     is_pass "$name" && die "$name is a pass credential already"
+    is_app "$name" && die "$name is a GitHub App"
     [ -f "$DIR/$name.yaml" ] || die "no file credential $name"
     IFS=' ' read -r got_name secret <<< "$input" || true
     input=""
@@ -356,11 +482,58 @@ case "$cmd" in
     if [ $# -gt 0 ]; then [ "$1" = --format ] && [ $# = 2 ] || die "unknown arguments: $*"; fmt=$2; fi
     valid_format "$fmt"
     [ ! -f "$DIR/$name.yaml" ] || die "$name is a file credential: airlock-envoy-cred migrate $name --pass $entry (as yourself)"
+    ! is_app "$name" || die "$name is a GitHub App"
     install -d -m 0700 -o root -g root "$PASS_DIR"
     printf 'entry %s\nformat %s\n' "$entry" "$fmt" > "$PASS_DIR/.$name.new"; mv -f "$PASS_DIR/.$name.new" "$PASS_DIR/$name"
     run_dirs; write "$SEC" "$name" "$LOCKED $name" locked
     { [ -f "$STATE" ] && grep -q '^unlocked' "$STATE"; } || write_state locked
     echo "==> $name: pass entry $entry ($fmt), locked. Use it in the site file and apply, then airlock-envoy-cred unlock (as yourself)" ;;
+  add-app|add-github-app)
+    [ $# -ge 1 ] || die "usage: airlock-envoy-cred add-app <name> --app-id <n> --org <org>|--installation-id <n> --key pass:<entry>|file [--api <url>] [--ca <file>]"
+    name=$1; shift; valid_name "$name"
+    appid="" inst="" org="" keyarg="" api=https://api.github.com ca=""
+    while [ $# -gt 0 ]; do
+      [ $# -ge 2 ] || die "$1 needs a value"
+      case "$1" in
+        --app-id) appid=$2 ;; --installation-id) inst=$2 ;; --org) org=$2 ;; --key) keyarg=$2 ;; --api) api=$2 ;; --ca) ca=$2 ;;
+        *) die "unknown option $1" ;;
+      esac
+      shift 2
+    done
+    [[ "$appid" =~ ^[1-9][0-9]{0,19}$ ]] || die "bad --app-id '$appid'"
+    [ -n "$inst$org" ] || die "--org <org> (the installation is looked up) or --installation-id <n>"
+    [ -z "$inst" ] || [[ "$inst" =~ ^[1-9][0-9]{0,19}$ ]] || die "bad --installation-id '$inst'"
+    [ -z "$org" ] || [[ "$org" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,38})$ ]] || die "bad --org '$org'"
+    [[ "$api" =~ ^https://[a-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._/-]*)?$ ]] || die "bad --api '$api' (an https:// URL)"
+    api=${api%/}
+    # Where the mint unit's sandbox can read it (no /home, /root, /tmp), and world-readable.
+    [ -z "$ca" ] || { [[ "$ca" =~ ^/(etc|usr)/[A-Za-z0-9._/-]+$ && "$ca" != *..* && -f "$ca" ]] && [ "$(( 8#$(stat -c %a "$ca") & 4 ))" = 4 ]; } \
+      || die "bad --ca '$ca' (a world-readable file under /etc or /usr)"
+    { ! is_pass "$name" && [ ! -f "$DIR/$name.yaml" ]; } || die "$name is a credential already (file or pass)"
+    id "$MINT_USER" >/dev/null 2>&1 || die "no $MINT_USER account: run install/install-service.sh from this version"
+    install -d -m 0750 -o root -g "$MINT_USER" "${APPS%/*}" "$APPS"
+    case "$keyarg" in
+      pass:*)
+        entry=${keyarg#pass:}; valid_entry "$entry" || die "bad pass entry '$entry'"
+        printf 'kind github-app\napp_id %s\n%s%sapi %s\nkey pass\nentry %s\n%s' "$appid" "${org:+org $org$'\n'}" "${inst:+installation_id $inst$'\n'}" "$api" "$entry" "${ca:+ca $ca$'\n'}" > "$APPS/.$name.new"
+        rm -f "${APPS:?}/${name:?}.pem" ;;
+      file)
+        [ ! -t 0 ] || die "give the PEM key on stdin: airlock-envoy-cred add-app $name ... --key file < key.pem"
+        tmp="$(mktemp "$APPS/.key.XXXXXX")"
+        printf '%s\n' "$input" > "$tmp"; input=""
+        if ! { [ "$(stat -c %s "$tmp")" -le 20000 ] && openssl rsa -check -noout -passin pass: -in "$tmp" >/dev/null 2>&1; }; then
+          rm -f "${tmp:?}"; die "stdin is not an unencrypted RSA private key (a GitHub App's key is one)"
+        fi
+        chown "root:$MINT_USER" "$tmp"; chmod 0640 "$tmp"; mv -f "$tmp" "$APPS/$name.pem"
+        printf 'kind github-app\napp_id %s\n%s%sapi %s\nkey file\n%s' "$appid" "${org:+org $org$'\n'}" "${inst:+installation_id $inst$'\n'}" "$api" "${ca:+ca $ca$'\n'}" > "$APPS/.$name.new" ;;
+      *) die "--key pass:<entry> or --key file" ;;
+    esac
+    chown "root:$MINT_USER" "$APPS/.$name.new"; chmod 0640 "$APPS/.$name.new"; mv -f "$APPS/.$name.new" "$APPS/$name"
+    echo "==> app $name (app $appid, ${org:+org $org}${inst:+installation $inst}, key ${keyarg%%:*}). Check it: airlock-envoy-mint check (once a line uses it). Use 'credential $name' on GitHub lines (repos named, one owner) and apply; a pass key: then airlock-envoy-cred unlock (as yourself)" ;;
+  mint-mark-missing)
+    # For airlock-envoy-apply: the token files of a mint.conf about to be installed.
+    [ $# = 1 ] && [ -r "$1" ] || die "usage: airlock-envoy-cred mint-mark-missing <mint.conf>"
+    mark_missing "$1" ;;
   lock)
     [ $# = 0 ] || die "usage: airlock-envoy-cred lock"
     lock_all
@@ -375,10 +548,16 @@ case "$cmd" in
     # Before Envoy starts: every pass credential has a file (locked, after a reboot); an unlock
     # still within its deadline keeps its timer running, anything else locks.
     for n in $(pass_names); do [ -f "$SEC/$n.yaml" ] || write "$SEC" "$n" "$LOCKED $n" locked; done
+    # App tokens: each line's file (locked or unavailable until minted), then a mint run.
+    if [ -s "$MINT_CONF" ]; then
+      mark_missing "$MINT_CONF"
+      systemctl start --no-block "$MINT_SVC" 2>/dev/null || true
+    fi
+    [ -n "$(pass_names)$(app_pass_in_use)" ] || exit 0
     dl=$(sed -n 's/^deadline //p' "$STATE" 2>/dev/null || true); bdl=$(sed -n 's/^boot_deadline //p' "$STATE" 2>/dev/null || true)
     if grep -q '^unlocked' "$STATE" 2>/dev/null && [[ "$dl" =~ ^[0-9]+$ && "$bdl" =~ ^-?[0-9]+$ ]] \
        && [ "$(now)" -lt "$dl" ] && [ "$(boot_secs)" -lt "$bdl" ] && systemctl start "$TIMER"; then :
-    else lock_all; fi ;;
+    else lock_all nowait; fi ;;
   status)
     if [ -f "$STATE" ]; then state_summary; else echo "no state (no pass credential since boot)"; fi
     shopt -s nullglob
@@ -387,11 +566,26 @@ case "$cmd" in
       printf 'credential %s pass %s (%s)%s\n' "$n" "$(pass_field "$n" entry)" \
         "$(grep -q "inline_string: \"$LOCKED " "$SEC/$n.yaml" 2>/dev/null && echo locked || echo unlocked)" \
         "$(! grep -qF "path: \"$DIR/$n.yaml\"" "$ENVOY_YAML" 2>/dev/null || echo "; the applied config still reads the file: run airlock-envoy-apply")"
-    done ;;
+    done
+    for f in "$APPS"/*; do
+      a=$(basename "$f"); [[ "$a" != *.pem ]] || continue
+      k=$(app_field "$a" key)
+      printf 'app %s key %s%s\n' "$a" "$k" "$([ "$k" != pass ] || { [ -f "$MKEYS/$a.pem" ] && echo " (unlocked)" || echo " (locked)"; })"
+      while read -r t ta; do
+        [ "$ta" = "$a" ] || continue
+        printf '  token %s: %s\n' "$t" "$(mint_state "$t")"
+      done < <(app_tokens)
+    done
+    # Each App against its installation (needs the key: a locked one says so).
+    if [ -s "$MINT_CONF" ]; then
+      echo "==> airlock-envoy-mint check:"
+      timeout 120 setpriv --reuid="$MINT_USER" --regid="$MINT_USER" --clear-groups --no-new-privs -- "$(mint_tool)" check 2>&1 7<&- 9>&- | sed 's/^/    /' || true
+    fi ;;
   set)
     [ $# -ge 1 ] || die "usage: airlock-envoy-cred set <name> [--format bearer|token|raw|basic:<user>]"
     name=$1; shift; valid_name "$name"
     ! is_pass "$name" || die "$name is a pass credential: its secret is the pass entry (airlock-envoy-cred unlock)"
+    ! is_app "$name" || die "$name is a GitHub App"
     fmt=bearer
     if [ $# -gt 0 ]; then
       [ "$1" = --format ] && [ $# = 2 ] || die "unknown arguments: $* (want --format <format>)"

@@ -15,14 +15,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 distro="${1:?ubuntu[-VERSION], debian or arch}"
 ver="${2:-1.40.0}"
-apt_prep='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd systemd-sysv curl gpg acl socat jq ca-certificates openssl logrotate >/dev/null'
+apt_prep='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd systemd-sysv curl gpg acl socat jq ca-certificates openssl logrotate python3 >/dev/null'
 case "$distro" in
   ubuntu|ubuntu-24.04) base=docker.io/library/ubuntu:24.04; prep="$apt_prep"; init=/sbin/init ;;
   ubuntu-22.04) base=docker.io/library/ubuntu:22.04; prep="$apt_prep"; init=/sbin/init ;;
   ubuntu-26.04) base=docker.io/library/ubuntu:26.04; prep="$apt_prep"; init=/sbin/init ;;
   debian) base=docker.io/library/debian:13; prep="$apt_prep"; init=/sbin/init ;;
   arch)   base=docker.io/library/archlinux:latest
-          prep='pacman -Syu --noconfirm --quiet curl gnupg acl socat jq openssl logrotate >/dev/null'
+          prep='pacman -Syu --noconfirm --quiet curl gnupg acl socat jq openssl logrotate python >/dev/null'
           init=/usr/lib/systemd/systemd ;;
   *) echo "ubuntu[-22.04|-24.04|-26.04], debian or arch" >&2; exit 2 ;;
 esac
@@ -492,7 +492,7 @@ site "http httpbin.org rules any credential t-pass" "extra @anthropic example.co
 x airlock-envoy-apply >/dev/null
 r="$(httpget "$E" http://httpbin.org/anything/p)"
 ck "pass: locked, Envoy answers 423 itself: got ${r:0:70}" '[[ "$r" == *"credential t-pass is locked on this host"* ]]'
-x sh -c 'printf "t-pass PASS-SECRET-1\n" | airlock-envoy-cred receive' >/dev/null
+x sh -c 'printf "t-pass %s\n" "$(printf PASS-SECRET-1 | base64 -w0)" | airlock-envoy-cred receive' >/dev/null
 r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(httpget "$E" http://httpbin.org/anything/q | sed -n 's/.*"Authorization": "\([^"]*\)".*/\1/p')"; [ "$r" = "Bearer PASS-SECRET-1" ] && break; sleep 0.3; done
 ck "pass: unlocked, the token used without a restart, the expiry timer running: got $r" \
    '[ "$r" = "Bearer PASS-SECRET-1" ] && [ "$(x systemctl is-active airlock-envoy-cred-expire.timer)" = active ]'
@@ -505,7 +505,7 @@ x sh -c 'for _ in $(seq 50); do grep -q "^locked" /run/airlock-envoy-cred/state 
 r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(httpget "$E" http://httpbin.org/anything/s)"; [[ "$r" == *"is locked"* ]] && break; sleep 0.3; done
 ck "pass: the timer fires by itself, the expiry service locks at the deadline (its sandbox lets it) and stops the timer: got ${r:0:50}" \
    '[[ "$r" == *"credential t-pass is locked"* ]] && [ "$(x systemctl is-active airlock-envoy-cred-expire.timer)" != active ] && x grep -q "^locked" /run/airlock-envoy-cred/state'
-x sh -c 'printf "t-pass PASS-SECRET-2\n" | airlock-envoy-cred receive' >/dev/null
+x sh -c 'printf "t-pass %s\n" "$(printf PASS-SECRET-2 | base64 -w0)" | airlock-envoy-cred receive' >/dev/null
 x rm -rf /run/airlock-envoy-cred
 x systemctl restart airlock-envoy
 r="$(httpget "$E" http://httpbin.org/anything/t)"
@@ -596,9 +596,51 @@ alog="$(x cat /var/log/airlock-envoy/access.jsonl)"
 dump="$(x curl -s --unix-socket /run/airlock-envoy-internal/admin.sock "http://localhost/config_dump")"
 ck "kubernetes-read: the token is in neither the access log (which has the requests) nor the config dump" \
    '[[ "$alog" == *"/api/v1/namespaces/a/pods"* && "$alog" != *KUBE-SECRET* && "$dump" == *credential_injector* && "$dump" != *KUBE-SECRET* ]]'
+# GitHub App credentials under the real units: airlock-envoy-mint minting under its sandbox against
+# a stand-in App API (test/fake-github-app.py, TLS on the container's address, the test's own CA;
+# it also answers as the upstream, echoing the Authorization and whether the token is live); a pass
+# key locked (423), unlocked (receive), locked again with its token revoked; the timer enabled
+# while a line uses an App and disabled when none does.
+ck "mint: airlock-envoy-mint a system account, its config dir root:airlock-envoy-mint 0750, the timer not enabled" \
+   '[ "$(x id -u airlock-envoy-mint)" -lt 1000 ] && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy-mint)" = root:airlock-envoy-mint:750 ] && x test -x /usr/local/sbin/airlock-envoy-mint && [ "$(x systemctl is-enabled airlock-envoy-mint.timer 2>/dev/null)" != enabled ]'
+ck "mint: /run/airlock-envoy-mint root's (tmpfiles.d), keys/ root:airlock-envoy-mint 0750, only tokens/ minted/ installations/ the mint account's" \
+   '[ "$(x stat -c %U:%G:%a /run/airlock-envoy-mint)" = root:root:755 ] && [ "$(x stat -c %U:%G:%a /run/airlock-envoy-mint/keys)" = root:airlock-envoy-mint:750 ] \
+    && [ "$(x stat -c %U:%G:%a /run/airlock-envoy-mint/tokens)" = airlock-envoy-mint:airlock-envoy:2750 ] && [ "$(x stat -c %U:%G:%a /run/airlock-envoy-mint/.lock)" = root:airlock-envoy-mint:640 ]'
+x sh -c 'cd /root/k && openssl genrsa -out app.pem 2048 2>/dev/null && openssl rsa -in app.pem -pubout -out app.pub 2>/dev/null \
+  && printf "r\np\n" > api.log.repos && printf "{\"contents\": \"read\", \"issues\": \"write\", \"metadata\": \"read\", \"pull_requests\": \"write\"}" > api.log.perms'
+x systemctl stop t-kube-echo 2>/dev/null || true
+x systemd-run -q --collect --unit=t-gh-app python3 -I /repo/test/fake-github-app.py 8443 /root/k/srv.pem /root/k/srv.key /root/k/app.pub 12345 678 /root/k/api.log
+x sh -c 'for _ in $(seq 100); do grep -q ":20FB 00000000:0000 0A" /proc/net/tcp && exit 0; sleep 0.05; done; exit 1'
+x install -m 0644 /root/k/ca.pem /etc/airlock-envoy-mint/t-ca.pem
+x sh -c "airlock-envoy-cred add-app t-app --app-id 12345 --installation-id 678 --key file --api https://$KIP:8443 --ca /etc/airlock-envoy-mint/t-ca.pem < /root/k/app.pem" >/dev/null
+x airlock-envoy-cred add-app t-papp --app-id 12345 --org example-org --key pass:work/app --api "https://$KIP:8443" --ca /etc/airlock-envoy-mint/t-ca.pem >/dev/null
+site "http $KIP:8443@a rules github-api ca t-k3s credential t-app repos example-org/r" "http $KIP:8443@p rules github-api ca t-k3s credential t-papp repos example-org/p" \
+     "extra @anthropic example.com:443 http://$KIP@a http://$KIP@p" "client extra client"
+x airlock-envoy-apply >/dev/null
+r="$(kreq "http://$KIP/repos/example-org/r")"
+ck "mint: the timer enabled, a token minted under the unit's sandbox, live in the upstream's request: got $(head -c 120 <<< "$r")" \
+   '[ "$(x systemctl is-enabled airlock-envoy-mint.timer)" = enabled ] && [ "$(tail -1 <<< "$r")" = 200 ] && [[ "$r" == *"\"authorization\": \"token ghs_"*"\"live\": true"* ]]'
+ck "mint: the token files the mint account's, group airlock-envoy 0640; no token under /etc" \
+   '[ -z "$(x find /run/airlock-envoy-mint/tokens -name "*.yaml" ! -user airlock-envoy-mint)" ] && [ -z "$(x find /run/airlock-envoy-mint/tokens -name "*.yaml" ! -group airlock-envoy)" ] \
+    && [ -z "$(x find /run/airlock-envoy-mint/tokens -name "*.yaml" ! -perm 0640)" ] && ! x grep -rq ghs_ /etc'
+r="$(kreq "http://$KIP/repos/example-org/p")"
+ck "mint: a pass-key App not unlocked: 423 from Envoy: got $(tail -1 <<< "$r")" '[ "$(tail -1 <<< "$r")" = 423 ] && [[ "$r" == *"credential t-papp is locked"* ]]'
+x sh -c 'printf "t-papp %s\n" "$(base64 -w0 < /root/k/app.pem)" | airlock-envoy-cred receive' >/dev/null
+r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(kreq "http://$KIP/repos/example-org/p")"; [ "$(tail -1 <<< "$r")" = 200 ] && break; sleep 0.3; done
+ck "mint: unlocked: the key root's, readable by the mint account only (0440), the installation found by org, minted under the sandbox, live: got $(tail -1 <<< "$r")" \
+   '[ "$(tail -1 <<< "$r")" = 200 ] && [[ "$r" == *"\"live\": true"* ]] && [ "$(x stat -c %U:%G:%a /run/airlock-envoy-mint/keys/t-papp.pem)" = root:airlock-envoy-mint:440 ] \
+    && [ "$(x cat /run/airlock-envoy-mint/installations/t-papp)" = 678 ]'
+x airlock-envoy-cred lock >/dev/null
+r=""; for _ in 1 2 3 4 5 6 7 8 9 10; do r="$(kreq "http://$KIP/repos/example-org/p")"; [ "$(tail -1 <<< "$r")" = 423 ] && break; sleep 0.3; done
+x sh -c 'for _ in $(seq 50); do grep -q revoked /root/k/api.log && exit 0; sleep 0.2; done; exit 1' || true
+ck "mint: locked again: 423, the key gone, its token revoked at the API" \
+   '[ "$(tail -1 <<< "$r")" = 423 ] && ! x test -e /run/airlock-envoy-mint/keys/t-papp.pem && x grep -q "\"revoked\"" /root/k/api.log'
+x systemctl stop t-gh-app 2>/dev/null || true
 site "extra @anthropic example.com:443" "client extra client"
 x airlock-envoy-apply >/dev/null
 ck "plain HTTP dropped: a running socket's manifest is updated by the apply (no hosts)" 'x test -f "$EM" && ! x grep -qv "^#" "$EM"'
+ck "mint: no line uses an App any more: the timer disabled, mint.conf gone" \
+   '[ "$(x systemctl is-enabled airlock-envoy-mint.timer 2>/dev/null)" != enabled ] && ! x test -e /etc/airlock-envoy-mint/mint.conf'
 
 echo "== $distro: per-user sockets"
 # Two users, each with its own listeners: neither can see or reach the other's sockets, and a

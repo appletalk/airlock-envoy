@@ -489,6 +489,52 @@ grep -q 'a:sub(1, 21) == "airlock-envoy-locked "' <<< "$lb" || cfail+=" check"
 if [ -z "$cfail" ]; then echo "ok   pass credentials: read from the tmpfs, the locked check after the injectors, upstream's marker removed, only where used"
 else echo "FAIL pass credential rendering:$cfail"; fails=$((fails+1)); fi
 
+# GitHub App credentials: tokens per line (a write token for repos, a read one for repos-read),
+# each route its own, mint.conf what airlock-envoy-mint mints; only named repos of one owner, on
+# GitHub rules. A copy of apply with its Apps directory here.
+mkdir -p "$work/apps" "$work/acopy"
+sed "s#^MINT_APPS=/etc/airlock-envoy-mint/apps#MINT_APPS=$work/apps#" "$apply" > "$work/acopy/apply"; chmod +x "$work/acopy/apply"
+cp install/github-graphql.lua install/git-protect.lua "$work/acopy/"
+printf 'key pass\n' > "$work/apps/gh-app"
+arefuses() {  # arefuses <name> <expected message part> <site text>: as refuses, with the Apps copy
+  printf '%b' "$3" > "$work/site"
+  if out="$("$work/acopy/apply" --render-mint "$work/site" 2>&1)"; then echo "FAIL $1: accepted"; fails=$((fails+1))
+  elif [[ "$out" == *"$2"* ]]; then echo "ok   $1"
+  else echo "FAIL $1: wrong message: $out"; fails=$((fails+1)); fi
+}
+arefuses "app: owner/*"                 "name each repo"        'http api.example.com rules github-api credential gh-app repos o/*\nb http://api.example.com\nclient b t\n'
+arefuses "app: owner/* in repos-read"   "name each repo"        'http api.example.com rules github-api credential gh-app repos o/a repos-read q/*\nb http://api.example.com\nclient b t\n'
+arefuses "app: two owners"              "one owner per line"    'http api.example.com rules github-api credential gh-app repos o/a,p/b\nb http://api.example.com\nclient b t\n'
+arefuses "...across repos and repos-read" "one owner per line"  'http api.example.com rules github-api credential gh-app repos o/a repos-read p/b\nb http://api.example.com\nclient b t\n'
+arefuses "app: no repos"                "name its repos"        'http api.example.com rules github-api credential gh-app\nb http://api.example.com\nclient b t\n'
+arefuses "app: forgejo rules"           "only with the git"     'http fj.example.com rules forgejo credential gh-app repos o/a\nb http://fj.example.com\nclient b t\n'
+arefuses "app: any rules"               "only with the git"     'http x.example.com rules any credential gh-app\nb http://x.example.com\nclient b t\n'
+printf 'http api.example.com@w rules github-api credential gh-app repos o/Tools,o/site repos-read o/docs\nhttp api.example.com@i rules github-issues credential gh-app repos o/issues repos-read o/notes\nhttp github.com@w rules git credential gh-app repos o/tools repos-read o/lib protect main\nhttp mirror.example.com rules git-read credential gh-app repos o/mirror\nhttp g.example.com rules git credential plain-cred\nb http://api.example.com@w http://api.example.com@i http://github.com@w http://mirror.example.com http://g.example.com\nclient b t\n' > "$work/site"
+m="$("$work/acopy/apply" --render-mint "$work/site")"; r="$("$work/acopy/apply" --render "$work/site")"
+afail=""
+tok() { printf 'tok-%s-%s' "$(printf '%s' "$1" | sha256sum | cut -c1-12)" "$2"; }
+want="token $(tok api.example.com@w rw) app gh-app owner o repos tools,site perms contents=read,issues=write,pull_requests=write format token
+token $(tok api.example.com@w ro) app gh-app owner o repos docs perms contents=read,issues=read,pull_requests=read format token
+token $(tok api.example.com@i rw) app gh-app owner o repos issues perms contents=read,issues=write format token
+token $(tok api.example.com@i ro) app gh-app owner o repos notes perms contents=read,issues=read format token
+token $(tok github.com@w rw) app gh-app owner o repos tools perms contents=write format basic
+token $(tok github.com@w ro) app gh-app owner o repos lib perms contents=read format basic
+token $(tok mirror.example.com rw) app gh-app owner o repos mirror perms contents=read format basic"
+[ "$m" = "$want" ] || afail+=" mint.conf($m)"
+inj() { grep -A7 "name: \"$1\"" <<< "$r" | grep -o 'inject-[a-z0-9-]*' | head -1; }
+[ "$(inj api.example.com_w-read-1)" = "inject-$(tok api.example.com@w rw)" ] || afail+=" read-rw"
+[ "$(inj api.example.com_w-read-ro-1)" = "inject-$(tok api.example.com@w ro)" ] || afail+=" read-ro"
+[ "$(inj api.example.com_w-create-1)" = "inject-$(tok api.example.com@w rw)" ] || afail+=" create-rw"
+[ "$(inj api.example.com_w-user)" = "inject-$(tok api.example.com@w rw)" ] || afail+=" user-rw"
+[ "$(inj github.com_w-push-guard-1)" = "inject-$(tok github.com@w rw)" ] || afail+=" push-guard"
+[ "$(inj g.example.com-pack)" = "inject-plain-cred" ] || afail+=" plain-cred"
+grep -q "path: \"/run/airlock-envoy-mint/tokens/$(tok api.example.com@w ro).yaml\", watched_directory: { path: \"/run/airlock-envoy-mint/tokens\" }" <<< "$r" || afail+=" token-path"
+! grep -q 'inject-gh-app' <<< "$r" || afail+=" app-name-injected"
+grep -q 'airlock-envoy-unavailable ' <<< "$r" && grep -q 'name: credential-locked' <<< "$r" || afail+=" locked-check"
+[ -z "$("$apply" --render-mint "$work/site")" ] || afail+=" mint-conf-without-app-dir"
+if [ -z "$afail" ]; then echo "ok   app credentials: a token per line and access, each route its own, mint.conf with each line's repos and permissions"
+else echo "FAIL app credential rendering:$afail"; fails=$((fails+1)); fi
+
 # The render stops if a further definition would refuse other paths than the first (it couldn't
 # stand for it): a copy whose parser lets git and github-api share a host.
 # shellcheck disable=SC2016  # $1 and $2 are the script's text, not this shell's
