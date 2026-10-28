@@ -101,7 +101,8 @@ and forgets it; take it out of the site file and apply. (A reboot before that ap
 makes a locked file for every tmpfs path the applied config reads.)
 
 `set <name> --file` (as root) goes the other way, a pass credential back to a file one: it reads
-the secret as `set` does (the pass credential's format unless `--format`), writes the file,
+the secret as `set` does (the pass credential's format unless `--format`; over what is already a
+file credential, that one's format, where plain `set` defaults to bearer), writes the file,
 applies (Envoy reads the file from then on), and only then forgets the pass credential and locks
 its tmpfs copy. If the apply fails or is interrupted, it stays a pass credential: the file goes,
 or, if the applied config already reads it, stays locked (Envoy keeps the last value of a

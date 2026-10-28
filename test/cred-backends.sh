@@ -34,7 +34,9 @@ sed -e "s#^DIR=/etc/airlock-envoy/credentials#DIR=$E/credentials#" -e "s#^CA_DIR
 sed -i -e 's#^      \[ ! -f "$PASS_DIR/.$name.set" \] || mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"$#      [ -z "${KILL_AT_SETBACK:-}" ] || { cat "$DIR/$name.yaml" > "$KILL_AT_SETBACK.file" 2>/dev/null; ls -A "$PASS_DIR" > "$KILL_AT_SETBACK.pass"; kill -KILL $$; }\n&#' \
        -e 's#^    write "$DIR" "$name" "$value" "$fmt"; value="" secret=""$#    [ -z "${KILL_BEFORE_WRITE:-}" ] || { ls -A "$PASS_DIR" > "$KILL_BEFORE_WRITE"; kill -KILL $$; }\n&#' \
        -e 's#^ *rm -f "$PASS_DIR/.$name.set"$#    [ -z "${KILL_BEFORE_RM:-}" ] || { cat "$SEC/$name.yaml" > "$KILL_BEFORE_RM"; kill -KILL $$; }\n&#' "$work/bin/airlock-envoy-cred"
-[ "$(grep -c 'KILL_AT_SETBACK\|KILL_BEFORE_WRITE\|KILL_BEFORE_RM' "$work/bin/airlock-envoy-cred")" = 4 ] || { echo "FAIL the kill points didn't take"; exit 1; }
+# A pause once a recovery holds the apply lock (to see set_back keep it).
+sed -i 's#^      held6=1$#&; [ -z "${PAUSE_HELD6:-}" ] || sleep 1#' "$work/bin/airlock-envoy-cred"
+[ "$(grep -c 'KILL_AT_SETBACK\|KILL_BEFORE_WRITE\|KILL_BEFORE_RM\|PAUSE_HELD6' "$work/bin/airlock-envoy-cred")" = 5 ] || { echo "FAIL the kill points didn't take"; exit 1; }
 chmod +x "$work/bin/airlock-envoy-cred"
 # Each rewrite above must have taken: a missed one would test the real paths or owners.
 for pat in "APPLY_LOCK=$R/apply.lock" "DIR=$E/credentials" "PASS_DIR=$E/pass" "RUN=$R" "ENVOY_YAML=$E/envoy.yaml" "cat $work/clock/now" "cat $work/clock/boot"; do
@@ -337,6 +339,13 @@ rm -f "$E/credentials/pc.yaml"; printf 'X\n' | root add pc --pass work/pc --form
 printf 'A\n' | root set fc --format token >/dev/null; printf 'B\n' | root set fc --file >/dev/null
 [ "$(secret_of "$E/credentials/fc.yaml")" = "token B" ] && ok "set --file over a file credential keeps its format" || fail "format over a file: $(secret_of "$E/credentials/fc.yaml")"
 rm -f "$E/credentials/fc.yaml"
+# A recovery holds the apply lock throughout, its rollback included (set_back must not reopen
+# fd 6 and drop it): an apply waiting meanwhile gets it only once the recovery is done.
+mv "$E/pass/pc" "$E/pass/.pc.set"; uses gh
+printf 'X\n' | PAUSE_HELD6=1 FAKE_UID=0 airlock-envoy-cred set pc >/dev/null 2>&1 & sp=$!; sleep 0.3
+( exec 6>> "$R/apply.lock"; flock 6; [ -e "$E/pass/.pc.set" ] && echo mid > "$work/w6" || echo after > "$work/w6" ) & wp=$!
+wait "$sp"; wait "$wp"
+[ "$(cat "$work/w6")" = after ] && [ -f "$E/pass/pc" ] && ok "a recovery keeps the apply lock through its rollback" || fail "apply lock dropped mid-recovery: $(cat "$work/w6")"
 # One set --file at a time.
 ( exec 5> "$R/.set.lock"; flock 5; sleep 2 ) & h=$!; sleep 0.3
 out="$(printf 'X\n' | root set pc --file 2>&1)"; wait "$h"
