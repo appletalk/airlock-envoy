@@ -5,6 +5,34 @@ someone revokes it. A GitHub App installation can mint short-lived tokens narrow
 repos and some of its permissions. airlock-envoy uses that: each site-file line that names an App
 credential gets its own token, for exactly that line's repos and what that line's rules may do.
 
+## Setting it up
+
+On the host, as its operator (not in a box):
+
+1. Install or update airlock-envoy (`sudo install/install-service.sh`): it adds the
+   `airlock-envoy-mint` account, its units and `/etc/tmpfiles.d/airlock-envoy-mint.conf`. Hosts using
+   an App need `python3`.
+2. Register the App, installed on your organisation (no organisation admin rights needed):
+   ```
+   sudo airlock-envoy-cred add-app work-app --app-id 123456 --org example-org --key pass:work/app.pem
+   # or, a key file:  ... --key file < app.pem       (an unencrypted RSA key, as GitHub issues)
+   # a private GitHub (GHES):  --api https://github.example.org/api/v3 --ca /etc/ssl/example-ca.pem
+   ```
+3. Use it on the site file's GitHub lines, repos named, one owner per line:
+   ```
+   http api.github.com@w rules github-api credential work-app repos example-org/app repos-read example-org/docs
+   http github.com@w     rules git        credential work-app repos example-org/app protect main
+   ```
+4. `sudo airlock-envoy-apply`. It prints the installation's check (its permissions and installed
+   repos against your lines) and refuses a line that asks for more than the App grants or names a
+   repo it isn't installed on. `airlock-envoy-apply --render-mint` shows the tokens it will mint.
+5. A pass key: `airlock-envoy-cred unlock` (as yourself, in a host shell), daily. `airlock-envoy-cred
+   lock` locks it early; `sudo airlock-envoy-cred status` shows each App, its tokens, and the check.
+
+In a box, a request on such a line just works (Envoy adds the token). **423 Locked** means the key
+is locked: stop and ask the operator to unlock. **503** naming the App means minting failed: tell the
+operator (`journalctl -u airlock-envoy-mint`). Neither clears by retrying.
+
 ## Three layers, each narrower
 
 1. **The App installation** (set by the organisation's admins): the repos and permissions the
