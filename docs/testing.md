@@ -51,8 +51,12 @@ suites besides the install tests run one after another; about two minutes in all
   `AIRLOCK_REPO` set to a claude-airlock checkout.
 - **spike:** t2 and the site checks. The test client is built from claude-airlock's dev image.
 
-In CI, a suite that skips because a tool is missing (exit 3) fails its step. The site-details
-check is not run there, because its pattern list is private. Its own tests are.
+In CI, a suite that skips because a tool is missing (exit 3) fails its step, and so does a skip
+line from the two suites that skip a part and go on (`apply-parse.sh`, `protect-e2e.sh`). The
+site-details check is not run there, because its pattern list is private. Its own tests are.
+claude-airlock is checked out at its `main`, not pinned, so a change there can turn a run red.
+The install job first gives the runner user its own systemd manager (`loginctl enable-linger`),
+which a rootless systemd container needs.
 
 ## The install test
 

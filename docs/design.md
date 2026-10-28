@@ -50,9 +50,11 @@ The other units:
 - `airlock-envoy-mint.service` runs as its own account (`airlock-envoy-mint`), no capabilities,
   a read-only system but for its three directories under `/run/airlock-envoy-mint`
   ([github-app.md](github-app.md#the-key-and-who-holds-it)).
-- `airlock-envoy-cred-expire.service` and `airlock-envoy-logrotate.service` run as root with only
-  the file capabilities they need, no network (`PrivateNetwork`, Unix sockets only), and write
-  only their own paths.
+- `airlock-envoy-cred-expire.service` and `airlock-envoy-logrotate.service` run as root with a
+  bounded capability set (file ownership and access, and `SETUID`/`SETGID`, for what they run
+  as other accounts), no network (`PrivateNetwork`, Unix sockets only), and a read-only system
+  but for their own paths (the expiry: `/run/airlock-envoy-cred` and `/run/airlock-envoy-mint`;
+  logrotate: `/var/log/airlock-envoy`).
 
 The web Envoy cannot reach the main Envoy's sockets (`InaccessiblePaths`), so a compromised web
 Envoy can't use the main one's listeners to get around its filter.

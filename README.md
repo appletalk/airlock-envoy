@@ -318,7 +318,7 @@ sudo airlock-envoy-cred ca cluster < ca.pem
 - `revoke <name>`: writes a value that grants nothing. Deleting the file would not work:
   Envoy keeps the last good value. Revoke it at the issuer too.
 - `list`: file credentials (name, format, date), pass credentials (name, pass entry, format)
-  and the CAs, never values. GitHub Apps are in `airlock-envoy-cred status`.
+  and the CAs, never values. GitHub Apps are in `sudo airlock-envoy-cred status`.
 - `ca <name>`: CA certificates only. It prints each one's SHA-256 fingerprint to compare with
   the source. Envoy reads CA files when it starts, so changing a ca already in use needs
   `sudo systemctl restart airlock-envoy`.

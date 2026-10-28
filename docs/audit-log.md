@@ -36,7 +36,8 @@ upstream address.
   `deny-connect-http-<host>` (a CONNECT to a host served by plain HTTP), `deny-web-internal-<name>`
   and `deny-web-internal-sub-<name>` (an internal name asked of web).
 - One line per plain-HTTP request, allowed or refused, with the route of the host's rules:
-  `<host>-<route>`, as `api.github.com-read` or `github.com-refused`.
+  `<host>-<route>`, as `api.github.com-read` or `github.com-refused` (a named definition
+  `<host>_<name>-<route>`, and a repo-scoped route ends in `-<n>`, as `github.com_work-read-1`).
 - A credential locked or with no token is answered by Envoy itself, nothing upstream: status 423
   or 503 (`x-airlock-envoy: locked` or `unavailable`).
 - Two lines per allowed tunnel: `DownstreamTunnelSuccessfullyEstablished`, then `DownstreamEnd`
