@@ -20,6 +20,8 @@ suites, which need no podman.
 | `test/cred-e2e.sh` | Pass credentials in a real Envoy: 423 while locked, the token after unlock and the 423 after lock without a restart (needs envoy, python3, openssl, curl) |
 | `test/mint.sh` | GitHub App minting against a stand-in App API (`test/fake-github-app.py`: TLS, checks each JWT's RS256 signature with the App's key): each line's repos and permissions, renewal, revocation, locked and refused keys (needs python3, openssl, curl) |
 | `test/mint-e2e.sh` | GitHub App credentials in a real Envoy: locked, unlocked through `unlock`, each route its own live token, the read route's token read-only, lock revoking (needs envoy, python3, openssl, curl) |
+| `luajit test/mcp-tools-check.lua` | The MCP tool check of `tools` and `deny-tools`: bodies, replies, worst-case time |
+| `test/mcp-e2e.sh` | The `mcp` rules in a real Envoy against a stand-in MCP server (`test/mcp-up.py`, TLS): JSON and event-stream answers, the session header, the GET stream and its idle close, DELETE, every refusal with nothing upstream, the tool lists, the rate limit, a locked credential, a POST stream past 120 s (needs envoy, python3, openssl, curl; a little over 2 minutes, `LONG=<seconds>` shortens it) |
 | `test/run-envoy.sh test/site.conf` then `test/site-checks.sh` | Site listeners, each reaching exactly its own list |
 
 ## All the tests at once
@@ -32,9 +34,10 @@ Runs the install test on Arch, Debian 13 and Ubuntu 26.04 (the default; name oth
 it) in parallel. Alongside them it runs shellcheck, the site-details checks
 (`scripts/private-names-check --tree HEAD`, skipped without a private pattern list, and the
 checker's own tests, `test/private-names-check-test.sh`), the parser, the GraphQL check, the
-`protect` checks, the pass credential suites (`cred-backends`, `cred-e2e`), the App suites
+`protect` checks, the MCP checks (`mcp-tools-check.lua`, `mcp-e2e.sh`), the pass credential suites (`cred-backends`, `cred-e2e`), the App suites
 (`mint`, `mint-e2e`), t2 and the site checks, then prints each suite's result and time. The
-suites besides the install tests run one after another; about two minutes in all on a
+suites besides the install tests run one after another; about four minutes in all (the MCP
+end-to-end test streams for over two) on a
 20-thread workstation.
 
 - `OLD_REPO` and `AIRLOCK_REPO` pass through to the install test.

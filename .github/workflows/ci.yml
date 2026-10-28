@@ -4,7 +4,7 @@ name: ci
 #
 #   lint     shellcheck, the pinned and verified one claude-airlock vendors.
 #   checks   everything that needs no podman: the parser, the Lua checks, protect, credentials
-#            and App minting; the parser, protect-e2e, cred-e2e and mint-e2e with a real Envoy
+#            and App minting; the parser, protect-e2e, cred-e2e, mint-e2e and mcp-e2e with a real Envoy
 #            installed by install-envoy.sh.
 #   install  the whole install in a systemd-booted container, per distribution.
 #   spike    t2 and the site checks from a box-shaped client, which builds on claude-airlock's
@@ -76,6 +76,7 @@ jobs:
       - run: test/private-names-check-test.sh
       - run: luajit test/graphql-check.lua
       - run: luajit test/git-protect-check.lua
+      - run: luajit test/mcp-tools-check.lua
       - run: |
           test/protect-e2e.sh | tee "$RUNNER_TEMP/protect-e2e.log"
           if grep '^skip' "$RUNNER_TEMP/protect-e2e.log"; then exit 1; fi
@@ -83,6 +84,7 @@ jobs:
       - run: test/cred-e2e.sh
       - run: test/mint.sh
       - run: test/mint-e2e.sh
+      - run: test/mcp-e2e.sh
 
   install:
     runs-on: ubuntu-latest

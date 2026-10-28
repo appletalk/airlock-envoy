@@ -1,7 +1,7 @@
 #!/bin/bash
 # Every test, as fast as this machine allows: the install test on each distribution at once,
 # and alongside them, one after another, shellcheck, the site-details checks, the parser, the
-# GraphQL and protect checks, the credential and App suites, t2 and the site checks (these two
+# GraphQL, protect and MCP checks, the credential and App suites, t2 and the site checks (these two
 # share one test Envoy).
 # Prints each suite's result and time; exits non-zero if any failed. Logs stay in a temp dir.
 # Usage: test/run-all.sh [distro...]     default: arch debian ubuntu-26.04
@@ -39,6 +39,11 @@ graphql() {  # the GitHub GraphQL write check, under LuaJIT as in Envoy
   luajit test/graphql-check.lua
 }
 # shellcheck disable=SC2329  # run via run()
+mcp() {  # the MCP tool check under LuaJIT, then the mcp rules end to end (a little over 2 min)
+  command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
+  luajit test/mcp-tools-check.lua && test/mcp-e2e.sh
+}
+# shellcheck disable=SC2329  # run via run()
 protect() {  # the push check of protected branches: its parser under LuaJIT, then end to end
   command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
   luajit test/git-protect-check.lua && test/protect-e2e.sh
@@ -49,6 +54,7 @@ protect() {  # the push check of protected branches: its parser under LuaJIT, th
   run apply-parse test/apply-parse.sh
   run graphql graphql
   run protect protect
+  run mcp mcp
   run cred-backends test/cred-backends.sh
   run cred-e2e test/cred-e2e.sh
   run mint test/mint.sh
@@ -56,7 +62,7 @@ protect() {  # the push check of protected branches: its parser under LuaJIT, th
   with_envoy t2 test/t2.conf test/t2-checks.sh
   with_envoy site-checks test/site.conf test/site-checks.sh
 } &
-order=(shellcheck private-names private-names-check apply-parse graphql protect cred-backends cred-e2e mint mint-e2e t2 site-checks "${order[@]}")
+order=(shellcheck private-names private-names-check apply-parse graphql protect mcp cred-backends cred-e2e mint mint-e2e t2 site-checks "${order[@]}")
 wait
 failed=0
 for name in "${order[@]}"; do

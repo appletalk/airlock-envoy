@@ -33,7 +33,11 @@ http  github.com      rules git         credential github-git
 # cluster's own CA (airlock-envoy-cred set kube-agent; airlock-envoy-cred ca cluster < ca.pem).
 # A listener reaches an address one way, so alice's own kubeconfig gets the CONNECT entry.
 http  10.0.0.10:6443  rules kubernetes-read  credential kube-agent  ca cluster
+# MCP servers behind one gateway that checks a bearer token: each server's endpoint exactly,
+# nothing else on the host; on /tracker/mcp only the two read tools, on /docs/mcp any tool but
+# delete_page.
+http  mcp.example.com  rules mcp  credential mcp-agent  endpoints /tracker/mcp,/docs/mcp  tools /tracker/mcp:search,/tracker/mcp:get_issue  deny-tools /docs/mcp:delete_page
 alice-infra  @infra web 10.0.0.10:6443
 client alice-infra alice
-agent-dev  @infra http://api.github.com http://github.com http://10.0.0.10
+agent-dev  @infra http://api.github.com http://github.com http://10.0.0.10 http://mcp.example.com
 client agent-dev agent

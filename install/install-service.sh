@@ -90,6 +90,8 @@ install -m 0644 -o root -g root "$repo/install/logrotate.conf" /etc/airlock-envo
 mv -f /etc/airlock-envoy/logrotate.conf.new /etc/airlock-envoy/logrotate.conf
 # The GitHub GraphQL write check the github-api rules inline into the config.
 install -D -m 0644 -o root -g root "$repo/install/github-graphql.lua" /usr/local/share/airlock-envoy/github-graphql.lua
+# The MCP tool check (the mcp rules' tools and deny-tools), inlined likewise.
+install -D -m 0644 -o root -g root "$repo/install/mcp-tools.lua" /usr/local/share/airlock-envoy/mcp-tools.lua
 # GitHub App token minting (enabled by airlock-envoy-apply only while a line uses an App): the
 # tool, run as its own account, and its config directory, which that account alone may read.
 install -m 0755 -o root -g root "$repo/install/airlock-envoy-mint" /usr/local/sbin/airlock-envoy-mint.new

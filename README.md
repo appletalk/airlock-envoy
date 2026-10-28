@@ -230,6 +230,7 @@ client dev alice
 http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
      [repos <owner>/<repo>[,<owner>/<repo>...]] [repos-read <owner>/<repo>[,<owner>/<repo>...]]
      [protect <branch>[,<branch>...]]
+     [endpoints <path>[,<path>...]] [tools|deny-tools <endpoint>:<tool>[,<endpoint>:<tool>...]]
 ```
 
 It is site-wide and must come above any listener that uses it. A listener lists it as
@@ -284,6 +285,16 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   http github.com@deploy rules git credential gh-git repos example-org/config protect main,release/*
   http github.com@work   rules git credential gh-git repos example-org/app
   ```
+- **`endpoints`** (the `mcp` preset, required there): the MCP servers' paths on the host, each
+  matched exactly. Nothing else on the host is reachable, OAuth discovery included: the
+  credential comes from Envoy. **`tools`** lets only the named tools be called on an endpoint;
+  **`deny-tools`** refuses the named ones. An endpoint takes one list or none. See
+  [docs/presets.md](docs/presets.md#mcp).
+  ```
+  http mcp.example.com rules mcp credential mcp-token endpoints /alpha/mcp,/beta/mcp
+       tools /alpha/mcp:search,/alpha/mcp:read_page deny-tools /beta/mcp:delete_thing
+  ```
+  (one line in the site file; split here for reading)
 - **A credential per repo**: a listener may list several definitions of one host if each has
   `repos` (or `repos-read`) and no repo is in two of them. Each repo's requests carry its own definition's
   credential (say an organisation's App for its repos and a personal token for your own).
@@ -405,6 +416,7 @@ headers Envoy strips from box requests, and the limits are in [docs/presets.md](
 | `kubernetes-read` | A Kubernetes API server, read only, plus `kubectl auth can-i` and `whoami` | Every write, protocol upgrades, escaped paths, exec, attach, port-forward, `proxy` subresources |
 | `github-issues` | Reads; issue create, edit, close, reopen; comments, labels, assignees, reactions. GitHub numbers PRs as issues, so these also reach a PR's title, body, state, comments, labels and assignees | PR create, base, reviewers and code; merge, approve, auto-merge, settings, hooks, keys, deletes, Projects (unless `projects`) |
 | `github-api` | The same, plus PR create, edit (including base branch), close, reopen, draft state, reviewers | Merge, approve, auto-merge, settings, hooks, keys, deletes, Projects (unless `projects`) |
+| `mcp` | MCP servers (Streamable HTTP) at the line's `endpoints`: POST (JSON, up to 1 MiB), the GET event stream, DELETE; with `tools` or `deny-tools`, only the tools allowed | Every other path and method, query strings, OAuth discovery, the old HTTP+SSE transport |
 | `any` | Every method but TRACE | TRACE |
 
 With `git`, protect branches on the server (rulesets or branch protection), add `protect`, or
@@ -427,6 +439,9 @@ GitHub presets check every `POST /graphql` write against an allowlist.
   open a PR, even from an issues-only box. The presets do not refuse this: turn the agent off
   where the token reaches.
 - **`kubernetes-read` reads whatever the token's RBAC allows**, Secrets included if it may.
+- **`mcp` bounds endpoints and tool names, not what a tool does**: an allowed tool runs with the
+  credential's rights, on whatever arguments the box sends. Only `tools/call` is checked; other
+  methods (`resources/read`, `prompts/get`) pass on every listed endpoint.
 - **`forgejo`**: a push may create, force-push or delete any branch or tag the server doesn't
   protect; edits reach other people's issues, PRs and comments; set `DISABLE_QUERY_AUTH_TOKEN`
   on the server too.
@@ -544,7 +559,7 @@ path its rules don't allow), so boxed Claude can report the cause instead of gue
 | `/run/airlock-envoy-mint/` | root, 0755 (tmpfiles.d) | `keys/` (root:airlock-envoy-mint 0750, unlocked keys 0440) and `.lock` are root's; `tokens/` (airlock-envoy-mint:airlock-envoy 2750, tokens 0640), `minted/` and `installations/` (0700) the mint account's |
 | `/usr/local/sbin/airlock-envoy-apply`, `airlock-envoy-cred`, `airlock-envoy-mint` | root, 0755 | The apply tool, the credential helper, the minter |
 | `/etc/airlock-envoy/logrotate.conf` | root, 0644 | Log rotation, run by its own timer (not `/etc/logrotate.d`) |
-| `/usr/local/share/airlock-envoy/github-graphql.lua`, `git-protect.lua` | root, 0644 | The GitHub GraphQL write check; the push check of `protect` |
+| `/usr/local/share/airlock-envoy/github-graphql.lua`, `git-protect.lua`, `mcp-tools.lua` | root, 0644 | The GitHub GraphQL write check; the push check of `protect`; the MCP tool check |
 | `/var/lib/airlock-envoy/logrotate.status` | root | Log rotation's state |
 | `/etc/airlock-envoy/envoy-web.yaml` | root:airlock-envoy, 0640 | The web Envoy's config, while a listener lists `web` |
 | `/etc/systemd/system/airlock-envoy-web.service.d/site.conf` | root, 0644 | Web's kernel filter: the site's `internal-net`, the resolvers allowed |

@@ -448,8 +448,8 @@ httpget() {  # httpget <socket> <url>: a plain-HTTP request through a box socket
     until grep -q ":0C38 00000000:0000 0A" /proc/net/tcp; do sleep 0.01; done
     curl -s -x http://127.0.0.1:3128 "$1"; kill %1; wait' "$1" "$2" 2>/dev/null
 }
-ck "plain HTTP: airlock-envoy-cred root 0755, the GraphQL check installed, credentials and ca dirs root:airlock-envoy 0750" \
-   '[ "$(x stat -c %U:%G:%a /usr/local/sbin/airlock-envoy-cred)" = root:root:755 ] && x test -r /usr/local/share/airlock-envoy/github-graphql.lua && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/credentials)" = root:airlock-envoy:750 ] && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/ca)" = root:airlock-envoy:750 ]'
+ck "plain HTTP: airlock-envoy-cred root 0755, the GraphQL and MCP checks installed, credentials and ca dirs root:airlock-envoy 0750" \
+   '[ "$(x stat -c %U:%G:%a /usr/local/sbin/airlock-envoy-cred)" = root:root:755 ] && x test -r /usr/local/share/airlock-envoy/github-graphql.lua && x test -r /usr/local/share/airlock-envoy/mcp-tools.lua && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/credentials)" = root:airlock-envoy:750 ] && [ "$(x stat -c %U:%G:%a /etc/airlock-envoy/ca)" = root:airlock-envoy:750 ]'
 site "http httpbin.org rules any credential t-cred" "extra @anthropic example.com:443 http://httpbin.org" "client extra client"
 cfg="$(x sha256sum /etc/airlock-envoy/envoy.yaml)"
 out="$(x airlock-envoy-apply 2>&1)" && rc=0 || rc=$?

@@ -116,10 +116,11 @@ fi
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
 declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=() HTTP_RREPOS=() HTTP_PROTECT=()
+declare -A HTTP_ENDPOINTS=() HTTP_TOOLS=() HTTP_DTOOLS=()
 declare -A CLIENT=() CLIENT_AT=() CLIENT_UID=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
 SOCKETS=()   # the listeners with a client, in file order: each gets a box socket
-PRESETS="any forgejo git git-read github-api github-issues kubernetes-read victoria-logs victoria-metrics"
+PRESETS="any forgejo git git-read github-api github-issues kubernetes-read mcp victoria-logs victoria-metrics"
 
 valid_dest() {
   local h p o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -180,11 +181,12 @@ parse() {  # parse <source label>, text on stdin
     n=$((n + 1))
     line=${line%%#*}
     charset_ok=1
-    # Project IDs, repo and branch names (an http line's "projects", "repos", "repos-read" and
-    # "protect" values) may be mixed case and hold _, / and *; parse_http checks them.
+    # Project IDs, repo and branch names, MCP endpoints and tools (an http line's "projects",
+    # "repos", "repos-read", "protect", "endpoints", "tools" and "deny-tools" values) may be
+    # mixed case and hold _, / and *; parse_http checks them.
     chk=$line
     if [[ "$line" =~ ^[[:blank:]]*http[[:blank:]] ]]; then
-      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos|repos-read|protect)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
+      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos|repos-read|protect|endpoints|tools|deny-tools)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
     fi
     # User names may have an underscore; the client line checks its words itself.
     [[ ! "$line" =~ ^[[:blank:]]*client[[:blank:]] ]] || chk=${chk//_/}
@@ -283,7 +285,8 @@ parse() {  # parse <source label>, text on stdin
 }
 
 # http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
-#   [repos <owner>/<repo>[,...]] [repos-read <owner>/<repo>[,...]] [protect <branch>[,...]]:
+#   [repos <owner>/<repo>[,...]] [repos-read <owner>/<repo>[,...]] [protect <branch>[,...]]
+#   [endpoints <path>[,...]] [tools <endpoint>:<tool>[,...]] [deny-tools <endpoint>:<tool>[,...]]:
 # how the box reaches a host by plain HTTP. Envoy answers the box, checks method and path
 # against the preset, adds the credential, and is the TLS client to the host (its certificate
 # checked, Host and SNI fixed). The host may be an IPv4 address (a Kubernetes API server, say):
@@ -300,9 +303,12 @@ parse() {  # parse <source label>, text on stdin
 # protect (the git and forgejo presets) refuses a push that would create, update or delete one
 # of those branches (<name>, or <prefix>/* for every branch under it), checked on the push's
 # ref updates before anything goes upstream (install/git-protect.lua).
+# endpoints (the mcp rules, required there) are the MCP servers' paths on the host, each exact.
+# tools lets only those tools be called on an endpoint, deny-tools refuses those; an endpoint
+# takes one list or none (install/mcp-tools.lua checks each POST body).
 parse_http() {  # parse_http <where> <words...>
-  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" rrepos="" protect="" id r a b list; local -a ids; shift
-  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...] [repos-read <owner>/<repo>,...] [protect <branch>,...]"
+  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" rrepos="" protect="" endpoints="" tools="" dtools="" id r a b list; local -a ids; shift
+  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...] [repos-read <owner>/<repo>,...] [protect <branch>,...] [endpoints <path>,...] [tools|deny-tools <endpoint>:<tool>,...]"
   hp=$1; shift
   if [[ "$hp" == *@* ]]; then
     variant=${hp#*@} hp=${hp%%@*}
@@ -350,7 +356,31 @@ parse_http() {  # parse_http <where> <words...>
         done
         [ "${#ids[@]}" -le 32 ] || die "$where: over 32 protected branches"
         shift 2 ;;
-      *) die "$where: unknown http option '$1' (rules, credential, ca, projects, repos, repos-read, protect)" ;;
+      endpoints) [ $# -ge 2 ] || die "$where: endpoints needs paths"
+        [ -z "$endpoints" ] || die "$where: endpoints given twice"
+        [[ "$2" != *, ]] || die "$where: bad endpoint '' (a trailing comma)"
+        IFS=, read -ra ids <<< "$2"
+        for r in "${ids[@]}"; do
+          valid_endpoint "$r" || die "$where: bad endpoint '$r' (want an exact path: /, then letters, digits, . _ ~ - and / between parts, no . or .. part, up to 200 characters)"
+          case " $endpoints " in *" $r "*) die "$where: endpoint $r given twice" ;; esac
+          endpoints="${endpoints:+$endpoints }$r"
+        done
+        [ "${#ids[@]}" -le 32 ] || die "$where: over 32 endpoints"
+        shift 2 ;;
+      tools|deny-tools) [ $# -ge 2 ] || die "$where: $1 needs <endpoint>:<tool> entries"
+        if [ "$1" = tools ]; then list=$tools; else list=$dtools; fi
+        [ -z "$list" ] || die "$where: $1 given twice"
+        [[ "$2" != *, ]] || die "$where: bad $1 entry '' (a trailing comma)"
+        IFS=, read -ra ids <<< "$2"
+        for r in "${ids[@]}"; do
+          [[ "$r" == /*:* ]] && valid_endpoint "${r%:*}" && [[ "${r##*:}" =~ ^[A-Za-z0-9_.-]{1,128}$ ]] \
+            || die "$where: bad $1 entry '$r' (want <endpoint>:<tool>, a tool name of 1 to 128 letters, digits, _ . -)"
+          case " $list " in *" $r "*) ;; *) list="${list:+$list }$r" ;; esac
+        done
+        [ "${#ids[@]}" -le 128 ] || die "$where: over 128 $1 entries"
+        if [ "$1" = tools ]; then tools=$list; else dtools=$list; fi
+        shift 2 ;;
+      *) die "$where: unknown http option '$1' (rules, credential, ca, projects, repos, repos-read, protect, endpoints, tools, deny-tools)" ;;
     esac
   done
   case " $PRESETS " in *" $rules "*) ;; *) die "$where: unknown rules '$rules' (one of: $PRESETS)" ;; esac
@@ -366,6 +396,19 @@ parse_http() {  # parse_http <where> <words...>
     git-read) [ -z "$protect" ] || die "$where: protect with the git-read rules: they refuse every push already" ;;
     *) [ -z "$protect" ] || die "$where: protect only with the git or forgejo rules (the only ones that push)" ;;
   esac
+  if [ "$rules" = mcp ]; then
+    [ -n "$endpoints" ] || die "$where: the mcp rules need endpoints (the MCP servers' exact paths)"
+    for r in $tools $dtools; do
+      case " $endpoints " in *" ${r%:*} "*) ;; *) die "$where: ${r%:*} (in tools or deny-tools) is not one of the line's endpoints" ;; esac
+    done
+    for r in $tools; do
+      for a in $dtools; do
+        [ "${r%:*}" != "${a%:*}" ] || die "$where: endpoint ${r%:*} has both tools and deny-tools: one list per endpoint (allow these, or refuse these)"
+      done
+    done
+  else
+    [ -z "$endpoints$tools$dtools" ] || die "$where: endpoints, tools and deny-tools only with the mcp rules"
+  fi
   # Projects writes go through GraphQL, which repos refuses: one line can't have both.
   [ -z "$repos$rrepos" ] || [ -z "$projects" ] || die "$where: repos (or repos-read) and projects can't be on one line (repos refuses GraphQL, which Projects writes need)"
   read -ra ids <<< "$repos $rrepos"   # read, not a bare expansion: <owner>/* must not glob
@@ -377,6 +420,7 @@ parse_http() {  # parse_http <where> <words...>
     ! repo_clash "$a" "$b" || die "$where: repo $a (repos) and $b (repos-read) overlap: each repo in one list"
   done; done
   HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos HTTP_RREPOS[$k]=$rrepos HTTP_PROTECT[$k]=$protect
+  HTTP_ENDPOINTS[$k]=$endpoints HTTP_TOOLS[$k]=$tools HTTP_DTOOLS[$k]=$dtools
   HTTP_HOSTS+=("$k")
 }
 # A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (owners
@@ -396,6 +440,14 @@ valid_branch() {
   [ -n "$b" ] && [ "${#1}" -le 200 ] && [[ "$b" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] && [[ "$b" != *..* ]] || return 1
   IFS=/ read -ra part <<< "$b"
   for b in "${part[@]}"; do [[ "$b" != .* && "${b,,}" != *.lock && "$b" != -* ]] || return 1; done
+}
+# An MCP endpoint: an exact path, plain characters (letters, digits, . _ ~ - and / between parts),
+# no . or .. part (normalization would change it), an optional trailing slash; / alone is one.
+valid_endpoint() {
+  local part
+  [ "${#1}" -le 200 ] && [[ "$1" =~ ^/([A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?)?$ ]] || return 1
+  IFS=/ read -ra part <<< "${1#/}"
+  for part in "${part[@]}"; do [[ "$part" != . && "$part" != .. ]] || return 1; done
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
 # Two definitions of one host on one listener: the same rules, or the two GitHub presets
@@ -627,9 +679,10 @@ listing() {
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
     for d in ${HDESTS[$l]:-}; do
-      printf '%s http://%s:%s%s rules %s%s%s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
+      printf '%s http://%s:%s%s rules %s%s%s%s%s%s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
         "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_CA[$d]:+ ca ${HTTP_CA[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}" \
-        "${HTTP_REPOS[$d]:+ repos ${HTTP_REPOS[$d]// /,}}" "${HTTP_RREPOS[$d]:+ repos-read ${HTTP_RREPOS[$d]// /,}}" "${HTTP_PROTECT[$d]:+ protect ${HTTP_PROTECT[$d]// /,}}"
+        "${HTTP_REPOS[$d]:+ repos ${HTTP_REPOS[$d]// /,}}" "${HTTP_RREPOS[$d]:+ repos-read ${HTTP_RREPOS[$d]// /,}}" "${HTTP_PROTECT[$d]:+ protect ${HTTP_PROTECT[$d]// /,}}" \
+        "${HTTP_ENDPOINTS[$d]:+ endpoints ${HTTP_ENDPOINTS[$d]// /,}}" "${HTTP_TOOLS[$d]:+ tools ${HTTP_TOOLS[$d]// /,}}" "${HTTP_DTOOLS[$d]:+ deny-tools ${HTTP_DTOOLS[$d]// /,}}"
     done
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
     [ -z "${CLIENT[$l]:-}" ] || printf '%s client %s\n' "$l" "${CLIENT[$l]}"
@@ -1097,6 +1150,7 @@ EOF
                 match: { prefix: "/", headers: [{ name: "upgrade", present_match: true }] }
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: no protocol upgrades here\\n" } }
 EOF
+  if [ "$rules" = mcp ]; then mcp_routes "$1"; return; fi
   for k in "$@"; do
   id=$(hid "$k") rules=${HTTP_RULES[$k]} cred=${HTTP_CRED[$k]} projects=${HTTP_PROJECTS[$k]} repos=${HTTP_REPOS[$k]} rrepos=${HTTP_RREPOS[$k]}
   # A clone or push can take long (the idle timeout still applies); anything else gets a cap
@@ -1152,6 +1206,93 @@ EOF
                 match: { prefix: "/" }
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: refused by the $rules rules (listener $l): this method and path are not allowed on $h (what each preset allows: airlock-envoy docs/presets.md)\\n" } }
 EOF
+}
+# The mcp rules: each endpoint exactly (no query string), and nothing else on the host.
+#   POST    JSON-RPC messages: a JSON body with a Content-Length up to MCP_MAX_BODY (no chunked or
+#           compressed bodies), which with tools or deny-tools goes through the tool check
+#           (install/mcp-tools.lua, behind a rate limit and a buffer of that size). The answer,
+#           JSON or an event stream, streams back: no request timeout, 10 minutes idle (a tool
+#           call that answers in plain JSON sends nothing until it is done), 30 at most.
+#   GET     the server's event stream: no timeout or cap, closed after 15 minutes with nothing sent.
+#   DELETE  the end of a session: the plain-HTTP limits.
+MCP_MAX_BODY=1048576
+mcp_routes() {  # mcp_routes <definition>, inside http_vhost
+  local k=$1 h=${HTTP_HOST[$1]} id ep i=0 mode list t rc up why inj
+  id=$(hid "$k") rc=$(route_cred "$k" x)
+  up="cluster: \"http-$id\", host_rewrite_literal: \"$h\""
+  why="airlock-envoy: refused by the mcp rules (listener $l)"
+  inj=""
+  [ -z "$rc" ] || inj="                  \"inject-$rc\": { \"@type\": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }"
+  cat <<EOF
+              - name: "$id-query"
+                match: { prefix: "/", headers: [{ name: ":path", string_match: { contains: "?" } }] }
+                direct_response: { status: 403, body: { inline_string: "$why: no query string on $h\\n" } }
+EOF
+  for ep in ${HTTP_ENDPOINTS[$k]}; do
+    i=$((i + 1)) mode="" list=""
+    for t in ${HTTP_TOOLS[$k]}; do [ "${t%:*}" != "$ep" ] || { mode=allow list="${list:+$list }${t##*:}"; }; done
+    for t in ${HTTP_DTOOLS[$k]}; do [ "${t%:*}" != "$ep" ] || { mode=deny list="${list:+$list }${t##*:}"; }; done
+    cat <<EOF
+              - name: "$id-ep$i-post"
+                match:
+                  path: "$ep"
+                  headers:
+                  - { name: ":method", string_match: { exact: POST } }
+                  - { name: content-type, string_match: { safe_regex: { regex: "(?i)application/json[ \\\\t]*(;.*)?" } } }
+                  - { name: content-length, range_match: { start: 0, end: $((MCP_MAX_BODY + 1)) } }
+                  - { name: content-encoding, present_match: false }
+                route: { $up, timeout: 0s, idle_timeout: 600s, max_stream_duration: { max_stream_duration: 1800s } }
+EOF
+    [ -z "$mode" ] || echo "                metadata: { filter_metadata: { mcp-tools: { mode: \"$mode\", tools: \"$list\", endpoint: \"$ep\" } } }"
+    if [ -n "$mode$rc" ]; then
+      echo "                typed_per_filter_config:"
+      [ -z "$mode" ] || mcp_route_filters
+      [ -z "$inj" ] || echo "$inj"
+    fi
+    cat <<EOF
+              - name: "$id-ep$i-post-too-large"
+                match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: POST } }, { name: content-length, range_match: { start: $((MCP_MAX_BODY + 1)), end: 9223372036854775807 } }] }
+                direct_response: { status: 413, body: { inline_string: "$why: a body over $MCP_MAX_BODY bytes on $h$ep\\n" } }
+              - name: "$id-ep$i-post-refused"
+                match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: POST } }] }
+                direct_response: { status: 403, body: { inline_string: "$why: a POST to an MCP endpoint takes a JSON body (Content-Type application/json, not compressed) with a Content-Length, on $h$ep\\n" } }
+              - name: "$id-ep$i-stream"
+                match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: GET } }] }
+                route: { $up, timeout: 0s, idle_timeout: 900s }
+EOF
+    [ -z "$inj" ] || printf '                typed_per_filter_config:\n%s\n' "$inj"
+    cat <<EOF
+              - name: "$id-ep$i-delete"
+                match: { path: "$ep", headers: [{ name: ":method", string_match: { exact: DELETE } }] }
+                route: { $up, timeout: 120s, idle_timeout: 300s, max_stream_duration: { max_stream_duration: 300s } }
+EOF
+    [ -z "$inj" ] || printf '                typed_per_filter_config:\n%s\n' "$inj"
+    cat <<EOF
+              - name: "$id-ep$i-method"
+                match: { path: "$ep" }
+                direct_response: { status: 403, body: { inline_string: "$why: only POST, GET and DELETE on an MCP endpoint ($h$ep)\\n" } }
+EOF
+  done
+  cat <<EOF
+              - name: "$id-refused"
+                match: { prefix: "/" }
+                direct_response: { status: 403, body: { inline_string: "$why: not an endpoint of this line on $h (its endpoints: ${HTTP_ENDPOINTS[$k]// /, })\\n" } }
+EOF
+}
+# The tool check's filters on a route: a rate limit per listener (10 a second, bursts of 20, one
+# bucket for all its checked endpoints), the body buffered up to MCP_MAX_BODY, then the check.
+mcp_route_filters() {
+  cat <<'EOF'
+                  mcp-ratelimit: { "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }
+                  mcp-buffer: { "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }
+                  mcp-tools: { "@type": type.googleapis.com/envoy.config.route.v3.FilterConfig, config: {} }
+EOF
+}
+mcp_lua_file() {  # the MCP tool check: next to this script in a checkout, else where install put it
+  local f
+  f="$(dirname "$(readlink -f "$0")")/mcp-tools.lua"
+  [ -r "$f" ] || f=/usr/local/share/airlock-envoy/mcp-tools.lua
+  printf '%s' "$f"
 }
 # Under protect, each pack route (pack, or pack-<n> per repo) splits in two: push-guard first
 # (git-receive-pack, the only way a box changes a ref: no preset allows a ref, contents or
@@ -1243,6 +1384,33 @@ EOF
               "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
               max_request_bytes: 65536
           - name: github-graphql
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+              default_source_code:
+                inline_string: |
+EOF
+    sed 's/^/                  /' "$f"
+  fi
+  # The MCP tool check, for a listener with an endpoint that has tools or deny-tools.
+  if [ -n "$(for d in ${HDESTS[$1]:-}; do printf '%s' "${HTTP_TOOLS[$d]}${HTTP_DTOOLS[$d]}"; done)" ]; then
+    f="$(mcp_lua_file)"
+    [ -r "$f" ] || die "tools and deny-tools need $f (install/install-service.sh installs it)"
+    cat <<EOF
+          - name: mcp-ratelimit
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+              stat_prefix: mcp
+              token_bucket: { max_tokens: 20, tokens_per_fill: 10, fill_interval: 1s }
+              filter_enabled: { runtime_key: mcp_ratelimit_enabled, default_value: { numerator: 100, denominator: HUNDRED } }
+              filter_enforced: { runtime_key: mcp_ratelimit_enforced, default_value: { numerator: 100, denominator: HUNDRED } }
+          - name: mcp-buffer
+            disabled: true
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.buffer.v3.Buffer
+              max_request_bytes: $MCP_MAX_BODY
+          - name: mcp-tools
             disabled: true
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua

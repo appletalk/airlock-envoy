@@ -431,6 +431,51 @@ refuses "protect: over 32"              "over 32 protected"      "http x.example
 lists "protect: lowercased, deduplicated, prefix/* kept, with repos and per variant" \
   'b http://x.example:443 variant a rules git repos o/a protect main,release/*\nb http://x.example:443 variant b rules git repos o/b\nb http://f.example:443 rules forgejo protect staging\nb client t' \
   'http x.example@a rules git repos o/a protect Main,release/*,MAIN\nhttp x.example@b rules git repos o/b\nhttp f.example rules forgejo protect Staging\nb http://x.example@a http://x.example@b http://f.example\nclient b t\n'
+# mcp: exact endpoints, required; tools or deny-tools per endpoint, never both.
+refuses "mcp: no endpoints"             "the mcp rules need endpoints" 'http m.example rules mcp\n'
+refuses "mcp: endpoints with other rules" "only with the mcp rules" 'http m.example rules any endpoints /mcp\n'
+refuses "mcp: tools with other rules"   "only with the mcp rules" 'http m.example rules any tools /mcp:a\n'
+refuses "mcp: endpoints given twice"    "endpoints given twice" 'http m.example rules mcp endpoints /a endpoints /b\n'
+refuses "mcp: an endpoint twice"        "endpoint /a given twice" 'http m.example rules mcp endpoints /a,/a\n'
+refuses "mcp: a trailing comma"         "bad endpoint ''"       'http m.example rules mcp endpoints /a,\n'
+refuses "mcp: a relative endpoint"      "bad endpoint 'mcp'"    'http m.example rules mcp endpoints mcp\n'
+refuses "mcp: a .. part"                "bad endpoint '/a/../b'" 'http m.example rules mcp endpoints /a/../b\n'
+refuses "mcp: a . part"                 "bad endpoint '/a/./b'" 'http m.example rules mcp endpoints /a/./b\n'
+refuses "mcp: an empty part"            "bad endpoint '/a//b'"  'http m.example rules mcp endpoints /a//b\n'
+refuses "mcp: a query"                  "bad endpoint '/a?b'"   'http m.example rules mcp endpoints /a?b\n'
+refuses "mcp: an escape"                "bad endpoint '/a%%2fb'" 'http m.example rules mcp endpoints /a%%2fb\n'
+refuses "mcp: a wildcard"               "bad endpoint '/a/*'"   'http m.example rules mcp endpoints /a/*\n'
+refuses "mcp: over 200 characters"      "bad endpoint"          "http m.example rules mcp endpoints /$(head -c 200 /dev/zero | tr '\0' a)\\n"
+refuses "mcp: over 32 endpoints"        "over 32 endpoints"     "http m.example rules mcp endpoints $(for i in $(seq 33); do printf '/e%s,' "$i"; done | sed 's/,$//')\\n"
+refuses "mcp: a tool on no endpoint"    "/b (in tools or deny-tools) is not one of the line's endpoints" 'http m.example rules mcp endpoints /a tools /b:x\n'
+refuses "mcp: a tool without endpoint"  "bad tools entry 'x'"   'http m.example rules mcp endpoints /a tools x\n'
+refuses "mcp: a bad tool name"          "bad deny-tools entry '/a:x~y'" 'http m.example rules mcp endpoints /a deny-tools /a:x~y\n'
+refuses "mcp: a tool name with /"       "bad deny-tools entry '/a:x/y'" 'http m.example rules mcp endpoints /a deny-tools /a:x/y\n'
+refuses "mcp: a tool name over 128"     "bad tools entry"       "http m.example rules mcp endpoints /a tools /a:$(head -c 129 /dev/zero | tr '\0' a)\\n"
+refuses "mcp: tools and deny-tools on one endpoint" "both tools and deny-tools" 'http m.example rules mcp endpoints /a tools /a:x deny-tools /a:y\n'
+refuses "mcp: deny-tools given twice"   "deny-tools given twice" 'http m.example rules mcp endpoints /a deny-tools /a:x deny-tools /a:y\n'
+lists "mcp: endpoints in order, tools per endpoint (case kept), / and a trailing slash" \
+  'b http://m.example:443 rules mcp credential t endpoints /Alpha/mcp,/beta/mcp/,/ tools /beta/mcp/:Read_A,/beta/mcp/:read.b deny-tools /Alpha/mcp:write-x\nb client t' \
+  'http m.example rules mcp credential t endpoints /Alpha/mcp,/beta/mcp/,/ tools /beta/mcp/:Read_A,/beta/mcp/:read.b,/beta/mcp/:Read_A deny-tools /Alpha/mcp:write-x\nb http://m.example\nclient b t\n'
+# What mcp renders: the query refusal first, then per endpoint POST (with the check only where
+# the endpoint has a list), its two refusals, GET, DELETE and the other methods, then the
+# refusal of every other path; the check's filters only on a listener that has a list.
+printf 'http m.example rules mcp credential t endpoints /a/mcp,/b/mcp deny-tools /a/mcp:w\nhttp n.example rules mcp endpoints /mcp\nb http://m.example\nc http://n.example\nclient b t\nclient c u\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+mfail=""
+order="$(grep -o 'name: "m.example-[a-z0-9-]*"' <<< "$r" | sed 's/^name: "m.example-//; s/"$//' | tr '\n' ' ')"
+[ "$order" = "query ep1-post ep1-post-too-large ep1-post-refused ep1-stream ep1-delete ep1-method ep2-post ep2-post-too-large ep2-post-refused ep2-stream ep2-delete ep2-method refused " ] || mfail+=" order:$order"
+sed -n '/name: "m.example-ep1-post"/,/name: "m.example-ep1-post-too-large"/p' <<< "$r" | grep -q 'mcp-tools: { mode: "deny", tools: "w", endpoint: "/a/mcp" }' || mfail+=" ep1-meta"
+sed -n '/name: "m.example-ep2-post"/,/name: "m.example-ep2-post-too-large"/p' <<< "$r" | grep -q 'mcp-' && mfail+=" ep2-checked"
+sed -n '/name: "m.example-ep1-post"/,/name: "m.example-ep1-post-too-large"/p' <<< "$r" | grep -q '"inject-t"' || mfail+=" ep1-cred"
+sed -n '/name: "n.example-ep1-post"/,/name: "n.example-ep1-post-too-large"/p' <<< "$r" | grep -q 'inject' && mfail+=" no-cred-injects"
+[ "$(sed -n '/^  - name: "b"$/,/^  - name: "c"$/p' <<< "$r" | grep -c 'name: mcp-tools$')" = 1 ] || mfail+=" filter-on-b"
+sed -n '/^  - name: "c"$/,$p' <<< "$r" | grep -q 'name: mcp-tools$' && mfail+=" filter-on-c"
+grep -A2 'name: "m.example-ep1-stream"' <<< "$r" | grep -q 'timeout: 0s, idle_timeout: 900s }' || mfail+=" get-timeouts"
+grep -A1 'name: "m.example-ep1-post-too-large"' <<< "$r" | grep -q 'start: 1048577' || mfail+=" too-large"
+grep -A2 'name: "m.example-refused"' <<< "$r" | grep -q 'not an endpoint of this line on m.example (its endpoints: /a/mcp, /b/mcp)' || mfail+=" refused-text"
+if [ -z "$mfail" ]; then echo "ok   mcp rendering: exact endpoints, the check only where listed, the refusals and timeouts"
+else echo "FAIL mcp rendering:$mfail"; fails=$((fails+1)); fi
 # What protect renders: per pack route, a push-guard route first (receive-pack, the check on)
 # and the pack route narrowed to fetch; one check filter per definition, before the
 # credential; the check listener, its cluster and the reply mapping only where used.

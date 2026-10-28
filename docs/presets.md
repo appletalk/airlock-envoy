@@ -79,6 +79,36 @@ A Kubernetes API server, read only.
 - **Refused** (in both GitHub presets): merge, approve, auto-merge, settings, hooks, keys,
   deletes, Projects (unless `projects` is set, below), anything else.
 
+### `mcp`
+
+MCP servers over the Streamable HTTP transport (one endpoint per server, JSON-RPC over POST),
+such as a gateway that checks a bearer token in front of several servers at their own paths.
+The line's `endpoints` name them, each an exact path.
+
+- **Allowed**, on each endpoint and nothing else:
+  - POST: JSON-RPC requests, notifications and responses. `Content-Type: application/json`, a
+    `Content-Length` up to 1 MiB, no `Content-Encoding`. The answer, JSON or an event stream,
+    streams back unbuffered and uncapped in size.
+  - GET: the server's event stream. A server without one answers 405, which passes through.
+  - DELETE: the end of a session.
+- **Refused** (403, with the reason, nothing upstream):
+  - every other path: a prefix or suffix of an endpoint, another case, a trailing slash the
+    line doesn't list, `/.well-known/*` (OAuth discovery: the credential comes from Envoy),
+    health paths;
+  - every other method on an endpoint;
+  - any query string;
+  - a POST with another content type, a compressed or chunked body, or no `Content-Length`;
+    over 1 MiB, 413.
+- **Headers**: `Mcp-Session-Id` passes both ways, and so do `MCP-Protocol-Version`, `Accept`,
+  `Content-Type` and `Last-Event-ID`. The credential replaces the box's `Authorization`, and the
+  steering headers are stripped as on every preset ([Request handling](#request-handling-all-presets)).
+- **Endpoints** are plain paths (letters, digits, `.`, `_`, `~`, `-`, and `/` between parts; no
+  `.` or `..` part), up to 32 a line. `/` alone is one, and so is a path with a trailing slash
+  (matched with it, exactly).
+- **Out of scope**: the older HTTP+SSE transport (GET `/sse` plus POST `/messages`). List its two
+  paths as endpoints and it may work, but its POST answers arrive on the GET stream, which the
+  tool check does not read.
+
 ### `any`
 
 Every method but TRACE (which echoes headers). Use it only for upstreams you trust not to
@@ -127,6 +157,42 @@ Limits:
   repo's, a private one's) on the pinned board.
 - GitHub adds items to boards by itself: org auto-add workflows, and an issue template with
   `projects:` (createIssue with an `issueTemplate`) can add items to boards the box never names.
+
+## The MCP tool check (`tools`, `deny-tools`)
+
+On an `mcp` line, an endpoint may take a list of tools: `tools <endpoint>:<tool>,...` lets only
+those be called there, `deny-tools <endpoint>:<tool>,...` refuses those. One list per endpoint;
+an endpoint without one passes any call. The check (`install/mcp-tools.lua`) reads each POST
+body to that endpoint:
+
+- One JSON-RPC message or a batch. For each `tools/call` (in any case), `params.name` must be
+  on the `tools` list (exactly, in its case) or off the `deny-tools` list (in any case, so a
+  server that matched names loosely can't be reached around it).
+- Every other method, notifications and responses pass. Which method decides: only
+  `tools/call` is checked.
+- A batch with one refused message is refused whole.
+- Also refused: a body that isn't strict JSON, a key twice in one message or its `params`, a
+  call without a string `params.name`, a tool name outside the MCP character set (1 to 128 of
+  `A-Z a-z 0-9 _ - .`), a batch of over 100 messages, nesting over 64 deep, and any error while
+  checking.
+- A refusal is a JSON-RPC error, HTTP 200, so the client shows the reason: one error with the
+  request's `id` (code -32001), or for a batch an array with an error for each request in it.
+  A body it can't read gets one error with a null `id` (code -32700).
+
+Why the name is checked in its exact case for `tools` but in any case for `deny-tools`: an
+allowlist that ignored case would let `READ_A` through for a server that holds both `read_a`
+and a different `READ_A`; a denylist that kept case would let `WRITE_THING` reach a server that
+dispatches names without regard to case.
+
+**Limits:**
+
+- Only the tool's name is checked, not its arguments: an allowed tool may still do anything
+  its arguments ask, with the credential's rights.
+- A deny list fails open: a tool the server adds later passes until it is listed. Prefer
+  `tools` where the set of tools is known.
+- `resources/read`, `prompts/get`, `completion/complete` and other methods are not checked.
+- Answers are not read: a server that starts a tool on its own (say from a sampling response)
+  is not bounded by this.
 
 ## Repo scoping (`repos`)
 
@@ -339,16 +405,38 @@ per listener:
 A worst-case body costs about 20 ms of CPU in Envoy, so one listener can keep about a fifth of
 one worker busy.
 
+The MCP tool check runs there too, with its own bounds per listener:
+
+| Limit | Value | Over it |
+|---|---|---|
+| POSTs to endpoints with `tools` or `deny-tools`, over all the listener's MCP hosts | 10 a second, bursts of 20 | 429 |
+| Body size (every MCP POST) | 1 MiB | 413 |
+| Messages in a batch | 100 | JSON-RPC error |
+| Nesting | 64 | JSON-RPC error |
+
+A worst-case 1 MiB body (small numbers in an array) costs about 80 ms on a workstation, so one
+listener can keep most of one worker busy for as long as it keeps sending. An endpoint without
+a list has no check and no rate limit: its body is never read.
+
 ### Stream timeouts
 
 | Routes | Request timeout | Whole-stream cap | Idle |
 |---|---|---|---|
 | Most plain-HTTP routes | 120 s | 5 minutes | 5 minutes |
 | `git` and `git-read`; `forgejo`'s git routes; `kubernetes-read`'s API reads | none | none | 5 minutes |
+| `mcp` POST | none | 30 minutes | 10 minutes |
+| `mcp` GET (the event stream) | none | none | 15 minutes |
+| `mcp` DELETE | 120 s | 5 minutes | 5 minutes |
 
 The cap means a body sent slowly can't hold a connection. Clones, pushes, watches and `logs -f`
 are exempt because they can legitimately take long; they still close after 5 minutes with nothing
 sent.
+
+MCP tool calls can run for minutes, and a call that answers in plain JSON sends nothing until it
+is done: its POST waits up to 10 minutes idle, and gets 30 in all. A call that answers as an
+event stream keeps its POST open while events flow. The GET stream may stay open as long as the
+server sends something every 15 minutes; a client reconnects with `Last-Event-ID` after it
+closes.
 
 ### What the presets don't bound
 
