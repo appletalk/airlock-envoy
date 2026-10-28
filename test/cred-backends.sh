@@ -32,8 +32,9 @@ sed -e "s#^DIR=/etc/airlock-envoy/credentials#DIR=$E/credentials#" -e "s#^CA_DIR
 # steps; and between moving the record aside and writing the file. Each saves what it sees.
 # shellcheck disable=SC2016  # the tool's own text
 sed -i -e 's#^      \[ ! -f "$PASS_DIR/.$name.set" \] || mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"$#      [ -z "${KILL_AT_SETBACK:-}" ] || { cat "$DIR/$name.yaml" > "$KILL_AT_SETBACK.file" 2>/dev/null; ls -A "$PASS_DIR" > "$KILL_AT_SETBACK.pass"; kill -KILL $$; }\n&#' \
-       -e 's#^    write "$DIR" "$name" "$value" "$fmt"; value="" secret=""$#    [ -z "${KILL_BEFORE_WRITE:-}" ] || { ls -A "$PASS_DIR" > "$KILL_BEFORE_WRITE"; kill -KILL $$; }\n&#' "$work/bin/airlock-envoy-cred"
-[ "$(grep -c 'KILL_AT_SETBACK\|KILL_BEFORE_WRITE' "$work/bin/airlock-envoy-cred")" = 2 ] || { echo "FAIL the kill points didn't take"; exit 1; }
+       -e 's#^    write "$DIR" "$name" "$value" "$fmt"; value="" secret=""$#    [ -z "${KILL_BEFORE_WRITE:-}" ] || { ls -A "$PASS_DIR" > "$KILL_BEFORE_WRITE"; kill -KILL $$; }\n&#' \
+       -e 's#^ *rm -f "$PASS_DIR/.$name.set"$#    [ -z "${KILL_BEFORE_RM:-}" ] || { cat "$SEC/$name.yaml" > "$KILL_BEFORE_RM"; kill -KILL $$; }\n&#' "$work/bin/airlock-envoy-cred"
+[ "$(grep -c 'KILL_AT_SETBACK\|KILL_BEFORE_WRITE\|KILL_BEFORE_RM' "$work/bin/airlock-envoy-cred")" = 4 ] || { echo "FAIL the kill points didn't take"; exit 1; }
 chmod +x "$work/bin/airlock-envoy-cred"
 # Each rewrite above must have taken: a missed one would test the real paths or owners.
 for pat in "APPLY_LOCK=$R/apply.lock" "DIR=$E/credentials" "PASS_DIR=$E/pass" "RUN=$R" "ENVOY_YAML=$E/envoy.yaml" "cat $work/clock/now" "cat $work/clock/boot"; do
@@ -303,7 +304,7 @@ rm -rf "$R/secrets"; out="$(root boot 2>&1)"
 mkdir -p "$work/pass.aside"; for f in "$E/pass"/*; do mv "$f" "$work/pass.aside/"; done
 [ ! -e "$E/mint/mint.conf" ] || mv "$E/mint/mint.conf" "$work/mint.conf.aside"; : > "$E/pass/.a b.set"; : > "$E/pass/.*.set"
 rm -rf "$R/secrets"; out="$(cd / && root boot 2>&1)"
-[ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && [ "$(ls "$R/secrets")" = "pc.yaml" ] && [[ "$out" != *"of a "* && "$out" != *"of etc"* ]] \
+[ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && ! ls "$R/secrets" | grep -qvx 'pc.yaml\|gh.yaml' && [[ "$out" != *"of a "* && "$out" != *"of etc"* ]] \
   && ok "boot with only a pending set: its file made; odd record names ignored" || fail "boot, pending only: $(ls "$R/secrets" 2>&1) / $out"
 rm -f "$E/pass/.a b.set" "$E/pass/.*.set"; mv "$work/pass.aside"/* "$E/pass/"; [ ! -e "$work/mint.conf.aside" ] || mv "$work/mint.conf.aside" "$E/mint/mint.conf"
 printf 'X\n' | root set pc >/dev/null 2>&1; [ -f "$E/pass/pc" ] || fail "no roll back after the write-order kill"
@@ -318,6 +319,20 @@ mv "$E/pass/pc" "$E/pass/.pc.set"
 out="$(printf 'X\n' | root set pc 2>&1)"; wait "$h"
 [[ "$out" == *"airlock-envoy-apply is running"* ]] && [ -f "$E/pass/.pc.set" ] && ok "recovery refused while an apply runs" || fail "recovery during an apply: $out"
 printf 'X\n' | root set pc >/dev/null 2>&1; [ -f "$E/pass/pc" ] || fail "no roll back after the apply"
+# Killed after locking the tmpfs copy and before dropping the record, on success: the copy is
+# already locked, and the record left makes the next set finish it.
+uses pc; cred unlock >/dev/null
+out="$(printf 'NEW\n' | APPLY_READS_FILE=pc KILL_BEFORE_RM="$work/k3" FAKE_UID=0 airlock-envoy-cred set pc --file 2>&1)"
+grep -q 'inline_string: "airlock-envoy-locked pc"' "$work/k3" && [ -f "$E/pass/.pc.set" ] \
+  && ok "set --file: the tmpfs copy locked before the record goes" || fail "success order: $(cat "$work/k3")"
+# ...and a reboot then: boot advises set --file (its apply did), and the next set finishes it.
+rm -rf "$R/secrets"; out="$(root boot 2>&1)"
+[[ "$out" == *"(its apply did)"* ]] && ok "boot after a set --file killed past its apply: says set --file finishes it" || fail "boot advice: $out"
+sed -i 's/inline_string: "[^"]*"/inline_string: "token OLD-LIVE"/' "$R/secrets/pc.yaml"   # as if still unlocked
+out="$(printf 'NEW\n' | KILL_BEFORE_RM="$work/k4" FAKE_UID=0 airlock-envoy-cred set pc --file 2>&1)"
+grep -q 'inline_string: "airlock-envoy-locked pc"' "$work/k4" && ok "finishing a killed set --file: the tmpfs copy locked before the record goes" || fail "finish order: $(cat "$work/k4")"
+printf 'NEW\n' | root set pc --file >/dev/null 2>&1; [ ! -e "$E/pass/.pc.set" ] && [ "$(secret_of "$E/credentials/pc.yaml")" = "token NEW" ] || fail "finishing after the finish-order kill"
+rm -f "$E/credentials/pc.yaml"; printf 'X\n' | root add pc --pass work/pc --format token >/dev/null; uses gh
 # One set --file at a time.
 ( exec 5> "$R/.set.lock"; flock 5; sleep 2 ) & h=$!; sleep 0.3
 out="$(printf 'X\n' | root set pc --file 2>&1)"; wait "$h"
@@ -469,6 +484,12 @@ root add-app a2 --app-id 1 --installation-id 2 --key pass:work/app-key >/dev/nul
   && ok "add-app with a pass key: the entry named, no key on disk" || fail "add-app pass"
 ! root add a2 --pass work/gh >/dev/null 2>&1 && ok "add: an App's name refused" || fail "add over an App"
 printf 'token tok-aaaaaaaaaaaa-rw app a2 repos tools perms contents=write format basic\n' > "$E/mint/mint.conf"
+# A pass credential removed and a reboot before the apply: the config still reads its tmpfs
+# file, and boot makes it (locked), so Envoy starts.
+root add gone --pass work/gh >/dev/null; uses gh gone; root remove gone >/dev/null
+rm -rf "$R/secrets"; root boot >/dev/null 2>&1
+[ "$(secret_of "$R/secrets/gone.yaml")" = "airlock-envoy-locked gone" ] && ok "boot: a file the config reads for a removed credential made locked" || fail "boot after remove: $(ls "$R/secrets" 2>&1)"
+uses gh
 # remove: an App no applied line uses, once nothing minted with it is left to revoke.
 ! root remove a2 >/dev/null 2>&1 && [ -f "$E/mint/apps/a2" ] && ok "remove: an App in use refused" || fail "remove of an App in use"
 mkdir -p "$R/mint/minted" "$R/mint/installations"; printf 'a1 ghs_left' > "$R/mint/minted/tok-bbbbbbbbbbbb-rw"; printf '7 1  https://api.github.com\n' > "$R/mint/installations/a1"

@@ -214,6 +214,13 @@ write() {
 is_pass() { [ -f "$PASS_DIR/$1" ]; }
 # A pass credential a set --file moved aside and never finished (killed): its name.
 # Only names a credential can have: what callers split on is never a space or a glob.
+# The tmpfs files the applied config reads (a credential removed, or moved aside, since the apply
+# still has one): their names.
+config_sec_names() {
+  [ -r "$ENVOY_YAML" ] || return 0
+  grep -o "path: \"$SEC/[a-z][a-z0-9-]*\.yaml\"" "$ENVOY_YAML" | sed 's#.*/\([a-z][a-z0-9-]*\)\.yaml"$#\1#' | sort -u
+  return 0
+}
 pending_sets() {
   local f; shopt -s nullglob dotglob
   for f in "$PASS_DIR"/.*.set; do f=${f##*/.}; f=${f%.set}; [[ "$f" =~ ^[a-z][a-z0-9-]{0,62}$ ]] && echo "$f"; done
@@ -363,7 +370,7 @@ case "$cmd" in
     [ -n "$input" ] || die "nothing on stdin: nothing was changed" ;;
 esac
 case "$cmd" in
-  boot) [ -n "$(pass_names)$(pending_sets)" ] || [ -d "$SEC" ] || [ -s "$MINT_CONF" ] || exit 0 ;;&
+  boot) [ -n "$(pass_names)$(pending_sets)$(config_sec_names)" ] || [ -d "$SEC" ] || [ -s "$MINT_CONF" ] || exit 0 ;;&
   receive|receive-migrate|add|add-app|add-github-app|remove|lock|boot)
     run_dirs; exec 9> "$RUN/.lock"; flock 9 ;;
   expire)
@@ -604,6 +611,9 @@ case "$cmd" in
     # Before Envoy starts: every pass credential has a file (locked, after a reboot); an unlock
     # still within its deadline keeps its timer running, anything else locks.
     for n in $(pass_names); do [ -f "$SEC/$n.yaml" ] || write "$SEC" "$n" "$LOCKED $n" locked; done
+    # Every tmpfs file the applied config reads (a credential removed since, say): Envoy won't
+    # start on a missing one; locked until the next apply drops it.
+    for n in $(config_sec_names); do [ -f "$SEC/$n.yaml" ] || write "$SEC" "$n" "$LOCKED $n" locked; done
     # One a killed set --file left aside: the config may still read its tmpfs file (Envoy won't
     # start without it). Locked, and named, so the operator finishes it.
     # (A set --file in flight holds the set lock: its own apply restarts Envoy, and runs this.)
@@ -612,7 +622,7 @@ case "$cmd" in
       [ -f "$SEC/$n.yaml" ] || write "$SEC" "$n" "$LOCKED $n" locked
       ( exec 5> "$RUN/.set.lock"; flock -n 5 ) 2>/dev/null || continue
       if grep -qF "path: \"$DIR/$n.yaml\"" "$ENVOY_YAML" 2>/dev/null; then
-        echo "airlock-envoy-cred: set --file of $n did not finish (its apply did): sudo airlock-envoy-cred set $n --file finishes it" >&2
+        echo "airlock-envoy-cred: set --file of $n did not finish (its apply did): sudo airlock-envoy-cred set $n --file finishes it (it asks for the secret again)" >&2
       else
         echo "airlock-envoy-cred: set --file of $n did not finish: sudo airlock-envoy-cred set $n --file (or set $n, to keep it a pass credential)" >&2
       fi
@@ -631,7 +641,11 @@ case "$cmd" in
     if [ -f "$STATE" ]; then state_summary; else echo "no state (no pass credential since boot)"; fi
     shopt -s nullglob
     for f in "$DIR"/*.yaml; do printf 'credential %s file\n' "$(basename "$f" .yaml)"; done
-    for n in $(pending_sets); do printf 'credential %s: a set --file did not finish (set %s --file finishes it)\n' "$n" "$n"; done
+    for n in $(pending_sets); do
+      if grep -qF "path: \"$DIR/$n.yaml\"" "$ENVOY_YAML" 2>/dev/null; then
+        printf 'credential %s: a set --file did not finish, its apply did (set %s --file finishes it; it asks for the secret again)\n' "$n" "$n"
+      else printf 'credential %s: a set --file did not finish (set %s --file, or set %s to keep it a pass credential)\n' "$n" "$n" "$n"; fi
+    done
     for n in $(pass_names); do
       printf 'credential %s pass %s (%s)%s\n' "$n" "$(pass_field "$n" entry)" \
         "$(grep -q "inline_string: \"$LOCKED " "$SEC/$n.yaml" 2>/dev/null && echo locked || echo unlocked)" \
@@ -665,10 +679,12 @@ case "$cmd" in
     reads_file() { grep -qF "path: \"$DIR/$name.yaml\"" "$ENVOY_YAML" 2>/dev/null; }
     # The file first: killed half way, the .set record is still there for the next set.
     set_back() {
+      # Not while an operator's apply renders (it could read the file being removed): a bounded wait.
+      exec 6>> "$APPLY_LOCK"; flock -w 30 6 || true
       exec 9> "$RUN/.lock"; flock 9
       if reads_file; then write "$DIR" "$name" "$LOCKED $name" locked; else rm -f "$DIR/$name.yaml"; fi
       [ ! -f "$PASS_DIR/.$name.set" ] || mv -f "$PASS_DIR/.$name.set" "$PASS_DIR/$name"
-      exec 9>&-
+      exec 9>&- 6>&-
     }
     # An earlier set --file killed before it finished: if its apply got through (the config
     # reads the file), the move is finished; else it is a pass credential again. Not while its
@@ -681,7 +697,8 @@ case "$cmd" in
       setfmt=$(sed -n 's/^format //p' "$PASS_DIR/.$name.set")
       if reads_file && [ -f "$DIR/$name.yaml" ] && ! grep -q "inline_string: \"$LOCKED " "$DIR/$name.yaml"; then
         exec 9> "$RUN/.lock"; flock 9
-        write "$SEC" "$name" "$LOCKED $name" locked; rm -f "$PASS_DIR/.$name.set"
+        write "$SEC" "$name" "$LOCKED $name" locked
+        rm -f "$PASS_DIR/.$name.set"
         if [ -f "$STATE" ] && grep -q '^unlocked' "$STATE"; then sed -i "/^credential $name pass /d" "$STATE"; else write_state locked; fi
         exec 9>&-
         echo "airlock-envoy-cred: an earlier set --file of $name did not finish: finished now (the applied config reads the file)" >&2

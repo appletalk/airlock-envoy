@@ -96,8 +96,9 @@ gives exactly the value the file held, then applies the config (Envoy reads the 
 the tmpfs, locked, from then on), and only then removes the file: there is no window with
 neither, and none where Envoy keeps the old value with no expiry. If the apply fails, it stays
 a file credential (if the apply got as far as Envoy, the config reads the locked tmpfs file:
-apply again once the apply works). Then unlock. `remove <name>` (as root) locks a pass credential and forgets
-it; take it out of the site file and apply.
+apply again once the apply works). Then unlock. `remove <name>` (as root) locks a pass credential
+and forgets it; take it out of the site file and apply. (A reboot before that apply is fine: boot
+makes a locked file for every tmpfs path the applied config reads.)
 
 `set <name> --file` (as root) goes the other way, a pass credential back to a file one: it reads
 the secret as `set` does (the pass credential's format unless `--format`), writes the file,
@@ -108,7 +109,8 @@ deleted file); apply again. A second signal can't cut that rollback short. A `se
 outright is noticed by the next `set` of that name: if its apply got through (the config reads
 the file) the move is finished, else it is a pass credential again; not while an apply runs. A
 reboot in between leaves Envoy a locked placeholder where the config still reads the tmpfs, and
-`boot` and `status` name the `set` to run. One `set --file` runs at a time, and not during an apply. Without `--file`, `set` refuses a pass credential,
+`boot` and `status` name the `set` to run. One `set --file` runs at a time, and not during an
+apply. Without `--file`, `set` refuses a pass credential,
 since the secret then lives on disk, never locked.
 
 ## Expiry
