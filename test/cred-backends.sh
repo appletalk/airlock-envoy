@@ -304,7 +304,7 @@ rm -rf "$R/secrets"; out="$(root boot 2>&1)"
 mkdir -p "$work/pass.aside"; for f in "$E/pass"/*; do mv "$f" "$work/pass.aside/"; done
 [ ! -e "$E/mint/mint.conf" ] || mv "$E/mint/mint.conf" "$work/mint.conf.aside"; : > "$E/pass/.a b.set"; : > "$E/pass/.*.set"
 rm -rf "$R/secrets"; out="$(cd / && root boot 2>&1)"
-[ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && ! ls "$R/secrets" | grep -qvx 'pc.yaml\|gh.yaml' && [[ "$out" != *"of a "* && "$out" != *"of etc"* ]] \
+[ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && [ -z "$(find "$R/secrets" -type f ! -name pc.yaml ! -name gh.yaml)" ] && [[ "$out" != *"of a "* && "$out" != *"of etc"* ]] \
   && ok "boot with only a pending set: its file made; odd record names ignored" || fail "boot, pending only: $(ls "$R/secrets" 2>&1) / $out"
 rm -f "$E/pass/.a b.set" "$E/pass/.*.set"; mv "$work/pass.aside"/* "$E/pass/"; [ ! -e "$work/mint.conf.aside" ] || mv "$work/mint.conf.aside" "$E/mint/mint.conf"
 printf 'X\n' | root set pc >/dev/null 2>&1; [ -f "$E/pass/pc" ] || fail "no roll back after the write-order kill"
