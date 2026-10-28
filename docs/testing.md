@@ -7,6 +7,7 @@ the GraphQL check, the two `protect` suites and the credential and App suites, w
 |---|---|
 | `test/run-all.sh [distro...]` | Everything at once (below) |
 | `test/install-test.sh <distro> [envoy version]` | The whole install in a systemd-booted container |
+| `test/lint.sh` | shellcheck over every shell script (`SHELLCHECK=<path>` if not on `PATH`) |
 | `test/apply-parse.sh` | The site file parser, no Envoy needed |
 | `test/run-envoy.sh test/t2.conf` then `test/t2-checks.sh` | The CONNECT tunnel, from a box-shaped client |
 | `luajit test/graphql-check.lua` | The GitHub GraphQL write check (skipped without luajit) |
@@ -33,6 +34,20 @@ and the site checks, then prints each suite's result and time. About 20 s in all
 
 - `OLD_REPO` and `AIRLOCK_REPO` pass through to the install test.
 - `SHELLCHECK=<path>` if shellcheck is not on `PATH` (skipped, and said so, if not found).
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push to `main`, on pull requests and on demand. Its jobs:
+
+- **lint:** `test/lint.sh` with the pinned, verified shellcheck that claude-airlock's
+  `scripts/bootstrap-tools.sh` vendors. That is the same version a box has.
+- **checks:** every suite that needs no podman, with Envoy installed by `install/install-envoy.sh`.
+- **install:** the install test on Arch, Debian 13 and Ubuntu 22.04, 24.04 and 26.04, with
+  `AIRLOCK_REPO` set to a claude-airlock checkout.
+- **spike:** t2 and the site checks. The test client is built from claude-airlock's dev image.
+
+In CI, a suite that skips because a tool is missing (exit 3) fails its step. The site-details
+check is not run there, because its pattern list is private. Its own tests are.
 
 ## The install test
 

@@ -26,13 +26,6 @@ with_envoy() {  # with_envoy <name> <site file or ""> <checks script>
 order=()
 for d in "${distros[@]}"; do run "install-$d" test/install-test.sh "$d" & order+=("install-$d"); done
 # shellcheck disable=SC2329  # run via run()
-lint() {
-  local sc="${SHELLCHECK:-$(command -v shellcheck)}"
-  [ -n "$sc" ] || { echo "skipped: no shellcheck (set SHELLCHECK=)"; return 3; }
-  "$sc" install/*.sh install/airlock-envoy-apply install/airlock-envoy-cred test/*.sh test/client/entry.sh \
-    scripts/private-names-check hooks/* && echo "ok   shellcheck"
-}
-# shellcheck disable=SC2329  # run via run()
 names() {  # no site details in the tracked files (this repo is public; the patterns are private)
   local rc=0; scripts/private-names-check --tree HEAD || rc=$?
   [ "$rc" = 2 ] && { echo "skipped: no private pattern list (scripts/private-names-check)"; return 3; }
@@ -49,7 +42,7 @@ protect() {  # the push check of protected branches: its parser under LuaJIT, th
   command -v luajit >/dev/null || { echo "skipped: no luajit"; return 3; }
   luajit test/git-protect-check.lua && test/protect-e2e.sh
 }
-{ run shellcheck lint
+{ run shellcheck test/lint.sh
   run private-names names
   run private-names-check test/private-names-check-test.sh
   run apply-parse test/apply-parse.sh

@@ -1,0 +1,120 @@
+name: ci
+
+# The suites of docs/testing.md, split by what they need:
+#
+#   lint     shellcheck, the pinned and verified one claude-airlock vendors.
+#   checks   everything that needs no podman: the parser, the Lua checks, protect, credentials
+#            and App minting, the last four against a real Envoy installed by install-envoy.sh.
+#   install  the whole install in a systemd-booted container, per distribution.
+#   spike    t2 and the site checks from a box-shaped client, which builds on claude-airlock's
+#            dev image.
+#
+# The site-details check (scripts/private-names-check --tree HEAD) is not here: its pattern
+# list is private, so it runs before publishing instead. Its own tests run in checks.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The version test/install-test.sh installs and test/run-envoy.sh's image runs.
+  ENVOY_VERSION: 1.40.0
+
+defaults:
+  run:
+    working-directory: airlock-envoy
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: airlock-envoy
+      - uses: actions/checkout@v7
+        with:
+          repository: appletalk/claude-airlock
+          path: claude-airlock
+      # Lint findings depend on shellcheck's version: the runner's own is not the one a box has.
+      - name: Vendor pinned shellcheck
+        run: bash ../claude-airlock/scripts/bootstrap-tools.sh
+      - run: SHELLCHECK=../claude-airlock/.tooling/bin/shellcheck test/lint.sh
+
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: airlock-envoy
+      - name: Install test tools
+        run: sudo apt-get update && sudo apt-get install -y luajit socat acl python3-yaml
+      # The real installer, so its signature checks run too.
+      - name: Install Envoy ${{ env.ENVOY_VERSION }}
+        run: sudo install/install-envoy.sh "$ENVOY_VERSION" && envoy --version
+      # A suite that is missing a tool exits 3 (skipped): here that fails the step, as it should.
+      - run: test/apply-parse.sh
+      - run: test/private-names-check-test.sh
+      - run: luajit test/graphql-check.lua
+      - run: luajit test/git-protect-check.lua
+      - run: test/protect-e2e.sh
+      - run: test/cred-backends.sh
+      - run: test/cred-e2e.sh
+      - run: test/mint.sh
+      - run: test/mint-e2e.sh
+
+  install:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [arch, debian, ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: airlock-envoy
+      # For the install test's run of claude-airlock's own socket check.
+      - uses: actions/checkout@v7
+        with:
+          repository: appletalk/claude-airlock
+          path: claude-airlock
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman uidmap
+      - name: Install test (${{ matrix.distro }})
+        run: AIRLOCK_REPO="$GITHUB_WORKSPACE/claude-airlock" test/install-test.sh "${{ matrix.distro }}" "$ENVOY_VERSION"
+
+  spike:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: airlock-envoy
+      - uses: actions/checkout@v7
+        with:
+          repository: appletalk/claude-airlock
+          path: claude-airlock
+      # passt: run-envoy.sh runs Envoy on pasta.
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman passt uidmap
+      # The test client is claude-airlock's dev image plus socat.
+      - name: Build the test client
+        working-directory: claude-airlock
+        run: |
+          podman build -t claude-airlock:base image
+          podman build --target os -t claude-airlock:os image
+          podman build -t claude-airlock:dev image/dev
+          podman build -t localhost/airlock-envoy-spike-client:test "$GITHUB_WORKSPACE/airlock-envoy/test/client"
+      - name: t2
+        run: |
+          test/run-envoy.sh test/t2.conf
+          trap 'podman stop --ignore airlock-envoy-spike airlock-envoy-web-spike >/dev/null' EXIT
+          test/t2-checks.sh
+      - name: Site checks
+        run: |
+          test/run-envoy.sh test/site.conf
+          trap 'podman stop --ignore airlock-envoy-spike airlock-envoy-web-spike >/dev/null' EXIT
+          test/site-checks.sh
