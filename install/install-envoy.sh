@@ -41,8 +41,11 @@ gpg --batch --with-colons --fingerprint | awk -F: '$1 == "fpr" { print $10; exit
   || { echo "the bundled key is not $FPR" >&2; exit 1; }
 
 echo "==> Downloading Envoy $ver ($arch)"
-curl -q -fsSL --proto '=https' --tlsv1.2 -o "$work/checksums.txt.asc" "$url/checksums.txt.asc"
-curl -q -fsSL --proto '=https' --tlsv1.2 -o "$work/$bin" "$url/$bin"
+# A few tries for a network hiccup (an HTTP/2 framing error, a reset): what arrives is checked
+# against the signature and the checksums below either way.
+dl() { curl -q -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 --retry-all-errors -o "$1" "$2"; }
+dl "$work/checksums.txt.asc" "$url/checksums.txt.asc"
+dl "$work/$bin" "$url/$bin"
 
 # VALIDSIG <signing key fpr> ... <primary key fpr>: the primary must be the pinned key, and no
 # revoked, expired or bad signature may appear alongside it.
