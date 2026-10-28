@@ -94,7 +94,7 @@ exec 7>> "$R/apply.lock"; flock -n 7 || { echo "apply refused: another runs" >> 
 [ -z "\${SLOW_APPLY:-}" ] || sleep "\$SLOW_APPLY"
 [ -z "\${FAIL_APPLY:-}" ] || exit 1
 # Envoy restarted by the apply runs boot first (ExecStartPre): it must not wait on migrate.
-FAKE_UID=0 timeout 5 "$work/bin/airlock-envoy-cred" boot || { echo "boot from apply failed rc=\$?" >> "$work/apply.log"; exit 1; }
+FAKE_UID=0 timeout 5 "$work/bin/airlock-envoy-cred" boot 2>> "$work/apply.log" || { echo "boot from apply failed rc=\$?" >> "$work/apply.log"; exit 1; }
 exit 0
 EOF
 chmod +x "$work/bin/"*
@@ -299,6 +299,13 @@ grep -qx .pc.set "$work/k2" && [ ! -e "$E/credentials/pc.yaml" ] && ok "set --fi
 rm -rf "$R/secrets"; out="$(root boot 2>&1)"
 [ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && [[ "$out" == *"set --file of pc did not finish"* ]] && [[ "$(root status)" == *"pc: a set --file did not finish"* ]] \
   && ok "boot after a killed set --file: its tmpfs file made locked, the fix named" || fail "boot with a pending set: $out"
+# With that the only credential (boot's no-op gate must count it), and odd names in pass/ ignored.
+mkdir -p "$work/pass.aside"; for f in "$E/pass"/*; do mv "$f" "$work/pass.aside/"; done
+[ ! -e "$E/mint/mint.conf" ] || mv "$E/mint/mint.conf" "$work/mint.conf.aside"; : > "$E/pass/.a b.set"; : > "$E/pass/.*.set"
+rm -rf "$R/secrets"; out="$(cd / && root boot 2>&1)"
+[ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && [ "$(ls "$R/secrets")" = "pc.yaml" ] && [[ "$out" != *"of a "* && "$out" != *"of etc"* ]] \
+  && ok "boot with only a pending set: its file made; odd record names ignored" || fail "boot, pending only: $(ls "$R/secrets" 2>&1) / $out"
+rm -f "$E/pass/.a b.set" "$E/pass/.*.set"; mv "$work/pass.aside"/* "$E/pass/"; [ ! -e "$work/mint.conf.aside" ] || mv "$work/mint.conf.aside" "$E/mint/mint.conf"
 printf 'X\n' | root set pc >/dev/null 2>&1; [ -f "$E/pass/pc" ] || fail "no roll back after the write-order kill"
 # Not while an apply runs: it could render the name from the record moved aside.
 ( exec 6>> "$R/apply.lock"; flock 6; sleep 2 ) & h=$!; sleep 0.3
@@ -323,6 +330,7 @@ out="$(printf 'NEW\n' | root set pc --file 2>&1)"
   && [ "$(secret_of "$R/secrets/pc.yaml")" = "airlock-envoy-locked pc" ] && grep -q "pc.yaml" "$work/apply.log" && [[ "$out" == *"file credential now (token)"* ]] \
   && ok "set --file: applied with the file in place, then the pass credential forgotten and locked; the format kept" || fail "set --file: $out / $(cat "$work/apply.log")"
 ! grep -q 'fds:.* 5 \| 6 ' "$work/apply.log" && ok "set --file: the apply gets none of root's lock fds" || fail "lock fds in the apply: $(grep -o 'fds:.*' "$work/apply.log")"
+! grep -q 'did not finish' "$work/apply.log" && ok "set --file: the boot its own apply runs doesn't call it unfinished" || fail "boot during set --file: $(grep 'did not finish' "$work/apply.log")"
 ! grep -q '^credential pc pass' "$R/state" && ok "set --file of an unlocked credential: the operator's state no longer lists it as pass" || fail "stale state: $(cat "$R/state")"
 printf 'X\n' | root add pc2 --pass work/pc >/dev/null; printf 'NEW2\n' | root set pc2 --file --format raw >/dev/null
 [ "$(secret_of "$E/credentials/pc2.yaml")" = "NEW2" ] && ok "set --file --format: the format given wins" || fail "set --file --format"

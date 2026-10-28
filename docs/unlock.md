@@ -107,8 +107,8 @@ or, if the applied config already reads it, stays locked (Envoy keeps the last v
 deleted file); apply again. A second signal can't cut that rollback short. A `set --file` killed
 outright is noticed by the next `set` of that name: if its apply got through (the config reads
 the file) the move is finished, else it is a pass credential again; not while an apply runs. A
-reboot in between leaves Envoy a locked placeholder, and `boot` and `status` name the `set` to
-run. One `set --file` runs at a time, and not during an apply. Without `--file`, `set` refuses a pass credential,
+reboot in between leaves Envoy a locked placeholder where the config still reads the tmpfs, and
+`boot` and `status` name the `set` to run. One `set --file` runs at a time, and not during an apply. Without `--file`, `set` refuses a pass credential,
 since the secret then lives on disk, never locked.
 
 ## Expiry
