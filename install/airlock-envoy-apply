@@ -1128,7 +1128,9 @@ EOF
   # Forgejo reads a token from the query string or a form body before the Authorization header
   # Envoy sets, so a box holding another token could act as its owner: refused, with sudo.
   # query_parameters compares a name as sent, while Forgejo decodes it (%74oken is token), so a
-  # parameter name with any escape in it is refused too; values may stay escaped.
+  # parameter name with any escape in it is refused too; values may stay escaped. A raw ; as well:
+  # Envoy splits on & only, and a front proxy may turn ; into & (Traefik does by default), so
+  # ?a=1;token=x would reach the forge as a token. Clients escape ; in values.
   [ "$rules" != forgejo ] || cat <<EOF
               - name: "$id-query-token"
                 match: { prefix: "/", query_parameters: [{ name: "token", present_match: true }] }
@@ -1142,6 +1144,9 @@ EOF
               - name: "$id-query-escaped-name"
                 match: { prefix: "/", headers: [{ name: ":path", string_match: { safe_regex: { regex: "[^?]*\\\\?([^#]*&)?[^=&#]*%.*" } } }] }
                 direct_response: { status: 403, body: { inline_string: "airlock-envoy: no escaped parameter names here\\n" } }
+              - name: "$id-query-semicolon"
+                match: { prefix: "/", headers: [{ name: ":path", string_match: { safe_regex: { regex: "[^?]*\\\\?.*;.*" } } }] }
+                direct_response: { status: 403, body: { inline_string: "airlock-envoy: no ; in the query here\\n" } }
               - name: "$id-form-body"
                 match:
                   prefix: "/"

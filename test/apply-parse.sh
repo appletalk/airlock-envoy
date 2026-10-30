@@ -227,7 +227,7 @@ if [ -z "$rfail" ] && [ "$order" = "escaped-unreserved compare-across graphql-ot
    && grep -q 're2: { max_program_size: { error_level: 1000, warn_level: 1000 } }' <<< "$r" \
    && grep -A2 'name: "api.example.com-graphql-other"' <<< "$r" | grep -qF 'regex: "(?i)/graphql.*"' \
    && grep -A2 'name: "fj.example.com-wiki"' <<< "$r" | grep -qF 'regex: "/[^/]+/[^/]+\\.wiki(\\.git)?/.*"' \
-   && [ "$(grep -o 'name: "fj.example.com-[a-z-]*"' <<< "$r" | head -5 | tr '\n' ' ')" = 'name: "fj.example.com-query-token" name: "fj.example.com-query-access-token" name: "fj.example.com-query-sudo" name: "fj.example.com-query-escaped-name" name: "fj.example.com-form-body" ' ]; then
+   && [ "$(grep -o 'name: "fj.example.com-[a-z-]*"' <<< "$r" | head -5 | tr '\n' ' ')" = 'name: "fj.example.com-query-token" name: "fj.example.com-query-access-token" name: "fj.example.com-query-sudo" name: "fj.example.com-query-escaped-name" name: "fj.example.com-query-semicolon" ' ]; then
   echo "ok   repos: reads and writes only in the listed repos (any case, dots literal, .git optional for git, no escapes), only /user and /rate_limit outside them, GraphQL refused, deny routes kept first"
 else echo "FAIL repos rendering (route order: $order):$rfail"; fails=$((fails+1)); fi
 # Outside a repo only exact paths (a prefix /user would take /user/repos), and the two refusals

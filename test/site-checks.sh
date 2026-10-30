@@ -246,6 +246,7 @@ for c in "git info/refs:GET:/o/r.git/info/refs:404" "git receive-pack:POST:/o/r.
          "token in the query:GET:/api/v1/repos/o/r?token=x:403" "access_token in the query:POST:/o/r.git/git-receive-pack?access_token=x:403" \
          "sudo in the query:GET:/api/v1/user?sudo=someone:403" "wiki push:POST:/o/r.wiki.git/git-receive-pack:403" \
          "escaped token name in the query:GET:/api/v1/repos/o/r?%74oken=x:403" "escaped sudo name after another parameter:GET:/api/v1/user?a=1&su%64o=someone:403" \
+         "token after a ; in the query:GET:/api/v1/repos/o/r?a=1;token=x:403" "an escaped value passes:GET:/api/v1/repos/o/r?q=a%20b%74:404" \
          "wiki fetch:GET:/o/r.wiki/info/refs:403"; do
   IFS=: read -r cn cm cp cw <<< "$c"
   check 3130 "forgejo: $cn" "$P http=$cw exit=0" --path-as-is -X "$cm" "http://httpbin.org$cp"
