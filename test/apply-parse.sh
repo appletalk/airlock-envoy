@@ -546,7 +546,7 @@ cp install/*.lua "$work/jcopy/"
 printf 'http api.example.com rules github-api credential c-pass\nhttp git.example.com rules git credential c-g protect main\nhttp mcp.example.com rules mcp credential c-m endpoints /a/mcp deny-tools /a/mcp:x\nb http://api.example.com http://git.example.com http://mcp.example.com\nclient b t\n' > "$work/site"
 jfail=""
 r="$("$work/jcopy/apply" --render "$work/site")" || jfail+=" render"
-names="$(grep -B3 'lua\.v3\.Lua' <<< "$r" | sed -n 's/^ *- name: \(.*\)$/\1/p' | sort | tr '\n' ' ')"
+names="$(grep -B3 'lua\.v3\.Lua' <<< "$r" | sed -n 's/^ *- name: \(.*\)$/\1/p' | LC_ALL=C sort | tr '\n' ' ')"
 [ "$names" = "credential-locked git-protect github-graphql mcp-nobody mcp-tools " ] || jfail+=" filters($names)"
 firsts="$(awk '/lua\.v3\.Lua/ { w = 1; next } w && /inline_string: \|/ { s = 1; next }
   w && s { l = $0; sub(/^ +/, "", l); if (l == "" || l ~ /^--/) next; print l; w = s = 0 }' <<< "$r" | sed 's/ *--.*//' | sort -u)"
@@ -572,11 +572,13 @@ cp install/mcp-tools.lua "$work/jcopy/"
 # Only Lua code is searched: a host or tool name with "jit.on" in it renders.
 printf 'http jit.one.example.com rules mcp credential c-j endpoints /a/mcp tools /a/mcp:jit.on\nb http://jit.one.example.com\nclient b t\n' > "$work/site2"
 "$apply" --render "$work/site2" >/dev/null 2>&1 || jfail+=" site-name-jit-on-refused"
-# A render that fails part way prints nothing and leaves no file behind.
-mkdir -p "$work/jtmp"; mv "$work/jcopy/github-graphql.lua" "$work/jcopy/github-graphql.lua.off"
+# A render that fails part way prints nothing and leaves no file behind. The filter is broken in
+# place (no jit.off()), not moved away: apply falls back to an installed copy in
+# /usr/local/share/airlock-envoy, so on a host with airlock-envoy installed a missing file renders.
+mkdir -p "$work/jtmp"; printf 'function envoy_on_request(h) end\n' > "$work/jcopy/github-graphql.lua"
 out="$(TMPDIR="$work/jtmp" "$work/jcopy/apply" --render "$work/site" 2>/dev/null)" && jfail+=" broken-render-accepted"
 [ -z "$out" ] && [ -z "$(ls -A "$work/jtmp")" ] || jfail+=" broken-render-output-or-leftover"
-mv "$work/jcopy/github-graphql.lua.off" "$work/jcopy/github-graphql.lua"
+cp install/github-graphql.lua "$work/jcopy/"
 if [ -z "$jfail" ]; then echo "ok   Lua filters: all five start with jit.off(); apply refuses to render one without it (a file or its own code)"
 else echo "FAIL Lua jit.off:$jfail"; fails=$((fails+1)); fi
 
