@@ -6,6 +6,14 @@ boxes, built on Envoy.
 A box runs with `--network none`. Its only way out is a Unix socket that airlock mounts in.
 Envoy listens on that socket on the host, decides what may pass, and logs every decision.
 
+![A box with no network reaches out only through its Unix socket. airlock-envoy on the host sends each request one of three ways or refuses it.](docs/overview.svg)
+
+Each request leaves the box through its socket and takes one of three paths, or is refused
+with the reason: a tunnel to an exact host, plain HTTP to a service whose credential Envoy
+adds, or `web` to the public internet through a second Envoy that cannot dial private
+addresses. Service credentials stay with Envoy, never in the box (only the box's own Claude
+login rides its tunnel); the site file decides what each socket allows.
+
 Each socket belongs to one user and carries one allowlist. Envoy never decrypts TLS. It offers
 two modes:
 
