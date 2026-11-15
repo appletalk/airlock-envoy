@@ -2054,6 +2054,7 @@ EOF
 # start, blaming a filter that works: so the probe is the first candidate no resolver uses,
 # picked from the same resolv.conf read as the allows.
 WEB_PROBES=(127.0.0.2 127.0.0.3 127.0.0.4 127.0.0.5 127.255.255.254)
+WEB_RS=() WEB_RS_READ=   # set only by web_preflight, never from the environment
 web_probe() {  # the first probe candidate that isn't one of the addresses given; nothing if all are
   local p r
   for p in "${WEB_PROBES[@]}"; do
@@ -2064,9 +2065,12 @@ web_probe() {  # the first probe candidate that isn't one of the addresses given
 resolver_addrs() { local r; while read -r r; do echo "${r%%%*}"; done < <(resolvers); }   # scoped link-local: the address alone
 render_web_dropin() {
   local r probe rs=()
-  # One read for the allows and the probe: an apply's pre-flight read (WEB_RS), so resolv.conf
-  # changing in between can't fail the render halfway through; else a fresh one.
-  if [ -n "${WEB_RS_READ:-}" ]; then rs=("${WEB_RS[@]}"); else mapfile -t rs < <(resolver_addrs); fi
+  # One read for the allows and the probe. An apply renders from its pre-flight read (WEB_RS),
+  # so resolv.conf changing in between can't fail the render halfway through; the read-only
+  # modes read afresh.
+  if [ -n "$WEB_RS_READ" ]; then rs=("${WEB_RS[@]}")
+  elif [ "$mode" = apply ]; then die "internal: the web drop-in rendered without web_preflight"
+  else mapfile -t rs < <(resolver_addrs); fi
   probe="$(web_probe "${rs[@]}")"   # apply checks there is one before it changes anything
   [ -n "$probe" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf"
   echo "# Rendered by airlock-envoy-apply from the site file. Edit the site file, not this."
@@ -2076,6 +2080,11 @@ render_web_dropin() {
     if [[ "$r" == *:* ]]; then echo "IPAddressAllow=$r/128"; else echo "IPAddressAllow=$r/32"; fi
   done
   echo "Environment=AIRLOCK_ENVOY_WEB_PROBE=$probe"
+}
+web_preflight() {  # an apply's one resolv.conf read, checked before anything changes
+  mapfile -t WEB_RS < <(resolver_addrs); WEB_RS_READ=1
+  [ ${#WEB_RS[@]} -gt 0 ] || die "web: /etc/resolv.conf names no nameserver, so the web Envoy could resolve nothing"
+  [ -n "$(web_probe "${WEB_RS[@]}")" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf, so the web unit could not check its kernel filter; nothing was changed"
 }
 resolvers() {  # nameserver addresses in /etc/resolv.conf, all of them (Envoy's resolver reads it)
   local f=/etc/resolv.conf
@@ -2238,9 +2247,7 @@ if ! out="$(cd / && "${run_as[@]}" "$ENVOY" --mode validate -c "$work/validate.y
   die "Envoy rejected the rendered config; nothing was changed"
 fi
 if any_web; then
-  [ -n "$(resolvers)" ] || die "web: /etc/resolv.conf names no nameserver, so the web Envoy could resolve nothing"
-  mapfile -t WEB_RS < <(resolver_addrs); WEB_RS_READ=1
-  [ -n "$(web_probe "${WEB_RS[@]}")" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf, so the web unit could not check its kernel filter; nothing was changed"
+  web_preflight
   if [ "$mode" = apply ] && ! systemctl cat airlock-envoy-web.service >/dev/null 2>&1; then
     die "web: no airlock-envoy-web unit: run install/install-service.sh from this version first; nothing was changed"
   fi
