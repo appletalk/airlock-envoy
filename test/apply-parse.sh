@@ -805,6 +805,19 @@ elif grep -q "every filter probe address" <<< "$out" && ! grep -q '^Environment=
   echo "ok   web drop-in: every probe address a resolver: refused, and says why"
 else echo "FAIL web drop-in refusal message, got:"; echo "$out"; fails=$((fails+1)); fi
 
+# ...and apply refuses that before it changes anything: the pre-flight check sits before the
+# --check exit and before the first socket is stopped.
+# shellcheck disable=SC2016  # literal $ in the fixed-string patterns
+{
+  pf="$(grep -nF 'web_probe "${WEB_RS[@]}"' "$apply" | head -1 | cut -d: -f1)"
+  ce="$(grep -nF '[ "$mode" = check ] && {' "$apply" | head -1 | cut -d: -f1)"
+  st="$(grep -nF 'early+=("$l")' "$apply" | head -1 | cut -d: -f1)"   # the main flow's first socket stop
+}
+if [ -n "$pf" ] && [ -n "$ce" ] && [ -n "$st" ] && [ "$pf" -lt "$ce" ] && [ "$pf" -lt "$st" ] \
+   && sed -n "${pf}p" "$apply" | grep -q 'die "web: every filter probe address'; then
+  echo "ok   apply: no free probe address is refused in the pre-flight, before --check returns or a socket stops"
+else echo "FAIL apply: the probe pre-flight check is missing or after a change (lines: $pf $ce $st)"; fails=$((fails+1)); fi
+
 # The unit's start check itself, as systemd runs it ($$ unescaped), with timeout stubbed: what
 # it probes, that only EPERM passes, and that a probe that isn't a plain 127.x address is
 # refused before anything is sent.

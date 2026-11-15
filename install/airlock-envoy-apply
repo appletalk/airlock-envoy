@@ -2064,7 +2064,9 @@ web_probe() {  # the first probe candidate that isn't one of the addresses given
 resolver_addrs() { local r; while read -r r; do echo "${r%%%*}"; done < <(resolvers); }   # scoped link-local: the address alone
 render_web_dropin() {
   local r probe rs=()
-  mapfile -t rs < <(resolver_addrs)                  # one read, for the allows and the probe
+  # One read for the allows and the probe: an apply's pre-flight read (WEB_RS), so resolv.conf
+  # changing in between can't fail the render halfway through; else a fresh one.
+  if [ -n "${WEB_RS_READ:-}" ]; then rs=("${WEB_RS[@]}"); else mapfile -t rs < <(resolver_addrs); fi
   probe="$(web_probe "${rs[@]}")"   # apply checks there is one before it changes anything
   [ -n "$probe" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf"
   echo "# Rendered by airlock-envoy-apply from the site file. Edit the site file, not this."
@@ -2237,7 +2239,8 @@ if ! out="$(cd / && "${run_as[@]}" "$ENVOY" --mode validate -c "$work/validate.y
 fi
 if any_web; then
   [ -n "$(resolvers)" ] || die "web: /etc/resolv.conf names no nameserver, so the web Envoy could resolve nothing"
-  mapfile -t rs < <(resolver_addrs); [ -n "$(web_probe "${rs[@]}")" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf, so the web unit could not check its kernel filter; nothing was changed"
+  mapfile -t WEB_RS < <(resolver_addrs); WEB_RS_READ=1
+  [ -n "$(web_probe "${WEB_RS[@]}")" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf, so the web unit could not check its kernel filter; nothing was changed"
   if [ "$mode" = apply ] && ! systemctl cat airlock-envoy-web.service >/dev/null 2>&1; then
     die "web: no airlock-envoy-web unit: run install/install-service.sh from this version first; nothing was changed"
   fi
