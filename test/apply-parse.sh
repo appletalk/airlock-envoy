@@ -807,20 +807,38 @@ else echo "FAIL web drop-in refusal message, got:"; echo "$out"; fails=$((fails+
 
 # ...and apply refuses that before it changes anything: the pre-flight check sits before the
 # --check exit and before the first socket is stopped.
+# Pinned exactly (each part reports on its own): web_preflight's body as reviewed, called as the
+# first thing under "if any_web", before the --check exit and the main flow's first socket stop;
+# and the render reads resolv.conf only in its read-only branch, never in an apply.
+# shellcheck disable=SC2016  # the reviewed source text, literal
+WEB_PREFLIGHT_GOLDEN='web_preflight() {  # an apply'"'"'s one resolv.conf read, checked before its sockets and config change
+  mapfile -t WEB_RS < <(resolver_addrs); WEB_RS_READ=1
+  [ ${#WEB_RS[@]} -gt 0 ] || die "web: /etc/resolv.conf names no nameserver, so the web Envoy could resolve nothing"
+  [ -n "$(web_probe "${WEB_RS[@]}")" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf, so the web unit could not check its kernel filter; nothing was changed"
+}'
+pf_bad=""
+[ "$(sed -n '/^web_preflight() {/,/^}/p' "$apply")" = "$WEB_PREFLIGHT_GOLDEN" ] || pf_bad+=" body"
 # shellcheck disable=SC2016  # literal $ in the fixed-string patterns
 {
   pf="$(grep -nx '  web_preflight' "$apply" | cut -d: -f1)"
   ce="$(grep -nF '[ "$mode" = check ] && {' "$apply" | head -1 | cut -d: -f1)"
-  st="$(grep -nF 'early+=("$l")' "$apply" | head -1 | cut -d: -f1)"   # the main flow's first socket stop
+  st="$(grep -nF 'early+=("$l")' "$apply" | head -1 | cut -d: -f1)"
 }
+if [ -z "$pf" ] || [ "$(wc -l <<< "$pf")" != 1 ]; then pf_bad+=" call-count"
+else
+  [ "$(sed -n "$((pf-1))p" "$apply")" = "if any_web; then" ] || pf_bad+=" call-not-first-under-any_web"
+  { [ -n "$ce" ] && [ -n "$st" ] && [ "$pf" -lt "$ce" ] && [ "$pf" -lt "$st" ]; } || pf_bad+=" call-order($pf $ce $st)"
+fi
+body="$(sed -n '/^render_web_dropin() {/,/^}/p' "$apply")"
 # shellcheck disable=SC2016  # literal $ in the patterns
-if [ -n "$pf" ] && [ "$(wc -l <<< "$pf")" = 1 ] && [ -n "$ce" ] && [ -n "$st" ] && [ "$pf" -lt "$ce" ] && [ "$pf" -lt "$st" ] \
-   && [ "$(grep -c 'WEB_RS_READ=1' "$apply")" = 1 ] && grep -q '^web_preflight() {' "$apply" \
-   && [ "$(sed -n '/^web_preflight() {/,/^}/p' "$apply" | grep -cE \
-          '^  mapfile -t WEB_RS < <\(resolver_addrs\); WEB_RS_READ=1$|^  \[ \$\{#WEB_RS\[@\]\} -gt 0 \] \|\| die "web: /etc/resolv.conf names no nameserver|^  \[ -n "\$\(web_probe "\$\{WEB_RS\[@\]\}"\)" \] \|\| die "web: every filter probe address')" = 3 ] \
-   && sed -n '/^render_web_dropin() {/,/^}/p' "$apply" | grep -qx '  if \[ -n "\$WEB_RS_READ" \]; then rs=("\${WEB_RS\[@\]}")'; then
-  echo "ok   apply: web_preflight (the one resolv.conf read, its no-nameserver and free-probe checks) runs before --check returns or a socket stops; the render reuses that read"
-else echo "FAIL apply: web_preflight is missing, not the one read, or after a change (lines: $pf $ce $st)"; fails=$((fails+1)); fi
+{
+  [ "$(grep -c resolver_addrs <<< "$body")" = 1 ] && grep -qx '  else mapfile -t rs < <(resolver_addrs); fi' <<< "$body" || pf_bad+=" render-reads"
+  [ "$(grep -cE '(^|[^a-z_${])rs=|mapfile -t rs ' <<< "$body")" = 3 ] && grep -qx '  if \[ -n "\$WEB_RS_READ" \]; then rs=("\${WEB_RS\[@\]}")' <<< "$body" || pf_bad+=" render-rs"
+  grep -qx '  elif \[ "\$mode" = apply \]; then die "internal: the web drop-in rendered without web_preflight"' <<< "$body" || pf_bad+=" render-guard"
+}
+if [ -z "$pf_bad" ]; then
+  echo "ok   apply: web_preflight (one resolv.conf read, both checks) runs first under any_web, before --check returns or a socket stops; the render reuses that read"
+else echo "FAIL apply: web_preflight pin:$pf_bad"; fails=$((fails+1)); fi
 # ...and the read-only renders ignore WEB_RS* from the environment.
 printf 'nameserver 127.0.0.53\n' > "$work/resolv"
 got="$(WEB_RS_READ=1 WEB_RS=192.0.2.9 RESOLV_CONF="$work/resolv" "$apply" --render-web-dropin "$work/site" | grep '^IPAddressAllow=')"
