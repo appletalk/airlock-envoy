@@ -115,7 +115,10 @@ without a request).
    `private-address`) adds a layer in front.
 4. **No filter, no web.** systemd accepts `IPAddressDeny` and silently enforces nothing where
    cgroup BPF is missing (some containers, old kernels). So the unit's start fails unless a
-   connect to a denied address gets `EPERM`; `apply` then reports it and leaves web off. Only a
+   connect to a denied address gets `EPERM`; `apply` then reports it and leaves web off. The
+   address is loopback (`127.0.0.2`, or the next of `127.0.0.3`-`.5`, `127.255.255.254` when a
+   resolver sits there: an allowed resolver would let the datagram through), picked by `apply`
+   from the same `resolv.conf` read as the allows and written into the drop-in. Only a
    root-written drop-in setting `AIRLOCK_ENVOY_WEB_FILTER_CHECK=skip` overrides that, and the
    start logs the skip.
 

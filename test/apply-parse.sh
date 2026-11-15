@@ -782,10 +782,59 @@ want='[Service]
 IPAddressDeny=198.51.100.0/24
 IPAddressDeny=2001:db8:1::/48
 IPAddressAllow=127.0.0.53/32
-IPAddressAllow=fe80::1/128'
+IPAddressAllow=fe80::1/128
+Environment=AIRLOCK_ENVOY_WEB_PROBE=127.0.0.2'
 got="$(RESOLV_CONF="$work/resolv" "$apply" --render-web-dropin "$work/site" | grep -v '^#')"
-if [ "$got" = "$want" ]; then echo "ok   web drop-in: site networks denied, resolvers allowed exactly"
+if [ "$got" = "$want" ]; then echo "ok   web drop-in: site networks denied, resolvers allowed exactly, the filter probe on 127.0.0.2"
 else echo "FAIL web drop-in, got:"; echo "$got"; fails=$((fails+1)); fi
+
+# The unit's filter probe never lands on an allowed resolver: that datagram would go through
+# and every start would fail, blaming a filter that works.
+printf 'nameserver 127.0.0.2\nnameserver 127.0.0.3%%lo\nnameserver 10.0.0.1\n' > "$work/resolv"
+got="$(RESOLV_CONF="$work/resolv" "$apply" --render-web-dropin "$work/site" | grep -E '^(IPAddressAllow|Environment)=')"
+want='IPAddressAllow=127.0.0.2/32
+IPAddressAllow=127.0.0.3/32
+IPAddressAllow=10.0.0.1/32
+Environment=AIRLOCK_ENVOY_WEB_PROBE=127.0.0.4'
+if [ "$got" = "$want" ]; then echo "ok   web drop-in: resolvers on 127.0.0.2 and 127.0.0.3 (scoped): the probe moves to 127.0.0.4"
+else echo "FAIL web drop-in probe beside resolvers, got:"; echo "$got"; fails=$((fails+1)); fi
+printf 'nameserver %s\n' 127.0.0.2 127.0.0.3 127.0.0.4 127.0.0.5 127.255.255.254 > "$work/resolv"
+if out="$(RESOLV_CONF="$work/resolv" "$apply" --render-web-dropin "$work/site" 2>&1)"; then
+  echo "FAIL web drop-in rendered with every probe address a resolver:"; echo "$out"; fails=$((fails+1))
+elif grep -q "every filter probe address" <<< "$out" && ! grep -q '^Environment=' <<< "$out"; then
+  echo "ok   web drop-in: every probe address a resolver: refused, and says why"
+else echo "FAIL web drop-in refusal message, got:"; echo "$out"; fails=$((fails+1)); fi
+
+# The unit's start check itself, as systemd runs it ($$ unescaped), with timeout stubbed: what
+# it probes, that only EPERM passes, and that a probe that isn't a plain 127.x address is
+# refused before anything is sent.
+pre="$(sed -n "s/^ExecStartPre=\/bin\/bash -c '\(.*AIRLOCK_ENVOY_WEB_PROBE.*\)'$/\1/p" systemd/airlock-envoy-web.service | sed 's/[$][$]/$/g')"
+mkdir -p "$work/stub"
+cat > "$work/stub/timeout" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$STUB_LOG"
+[ "$STUB_EPERM" = 1 ] && echo "bash: connect: Operation not permitted"
+exit 0
+STUB
+chmod +x "$work/stub/timeout"
+probe_run() {  # probe_run <eperm 0|1> [probe]: rc, then what the stub was asked
+  : > "$work/stub.log"
+  env -i PATH="$work/stub:/usr/bin:/bin" STUB_LOG="$work/stub.log" STUB_EPERM="$1" ${2+AIRLOCK_ENVOY_WEB_PROBE="$2"} \
+    bash -c "$pre" > "$work/stub.out" 2>&1
+  echo "rc=$? $(grep -o '/dev/udp/[^ ]*' "$work/stub.log" | tr '\n' ' ')"
+}
+if [ -n "$pre" ] && [ "$(probe_run 1 127.0.0.4)" = "rc=0 /dev/udp/127.0.0.4/9 " ] && [ "$(probe_run 1)" = "rc=0 /dev/udp/127.0.0.2/9 " ] \
+   && [ "$(probe_run 0 127.0.0.4)" = "rc=1 /dev/udp/127.0.0.4/9 " ] && grep -q "UDP to 127.0.0.4:9 gave: sent" "$work/stub.out"; then
+  echo "ok   web unit: the filter check probes AIRLOCK_ENVOY_WEB_PROBE (else 127.0.0.2) and passes only on EPERM"
+else echo "FAIL web unit filter check probe address"; fails=$((fails+1)); fi
+bad=0
+for v in 10.0.0.1 1.2.3.4 "127.0.0.2 x" '127.0.0.2;id' '127.0.0.2/9' 127.0.0.2. .127.0.0.2 127..0.2 127.0.0 127.0.0.2.5 \
+         127 localhost x127.0.0.2 "\$(id)"; do
+  r="$(probe_run 1 "$v")"
+  if [ "$r" != "rc=1 " ] || ! grep -q "is not a 127.x.y.z address" "$work/stub.out"; then echo "  probe '$v': $r"; bad=1; fi
+done
+if [ "$bad" = 0 ]; then echo "ok   web unit: a probe that isn't a plain 127.x address fails the start, nothing sent"
+else echo "FAIL web unit accepted a bad probe address"; fails=$((fails+1)); fi
 
 # Box listeners: idle connections close after 60 s; the other ways to authenticate are
 # stripped with the rest (site-checks.sh sends them through a live Envoy).

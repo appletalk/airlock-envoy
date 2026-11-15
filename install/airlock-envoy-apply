@@ -2048,15 +2048,32 @@ EOF
 # deny list, and the resolvers this host uses (Envoy resolves names itself), each by exact
 # address. A resolver on a denied address (127.0.0.53, a corporate DNS on 10/8) is reachable
 # from web, on any port: keep that in mind for a resolver host that serves anything else.
+#
+# The unit's start check sends a UDP datagram to a denied loopback address and wants EPERM
+# back. A resolver allowed here on that address would let the datagram through and fail every
+# start, blaming a filter that works: so the probe is the first candidate no resolver uses,
+# picked from the same resolv.conf read as the allows.
+WEB_PROBES=(127.0.0.2 127.0.0.3 127.0.0.4 127.0.0.5 127.255.255.254)
+web_probe() {  # the first probe candidate that isn't one of the addresses given; nothing if all are
+  local p r
+  for p in "${WEB_PROBES[@]}"; do
+    for r in "$@"; do [ "$r" != "$p" ] || continue 2; done
+    echo "$p"; return
+  done
+}
+resolver_addrs() { local r; while read -r r; do echo "${r%%%*}"; done < <(resolvers); }   # scoped link-local: the address alone
 render_web_dropin() {
-  local r
+  local r probe rs=()
+  mapfile -t rs < <(resolver_addrs)                  # one read, for the allows and the probe
+  probe="$(web_probe "${rs[@]}")"   # apply checks there is one before it changes anything
+  [ -n "$probe" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf"
   echo "# Rendered by airlock-envoy-apply from the site file. Edit the site file, not this."
   echo "[Service]"
   for r in "${INTERNAL_NETS[@]}"; do echo "IPAddressDeny=$r"; done
-  while read -r r; do
-    r=${r%%%*}   # a scoped link-local resolver: systemd takes the address alone
+  for r in "${rs[@]}"; do
     if [[ "$r" == *:* ]]; then echo "IPAddressAllow=$r/128"; else echo "IPAddressAllow=$r/32"; fi
-  done < <(resolvers)
+  done
+  echo "Environment=AIRLOCK_ENVOY_WEB_PROBE=$probe"
 }
 resolvers() {  # nameserver addresses in /etc/resolv.conf, all of them (Envoy's resolver reads it)
   local f=/etc/resolv.conf
@@ -2220,6 +2237,7 @@ if ! out="$(cd / && "${run_as[@]}" "$ENVOY" --mode validate -c "$work/validate.y
 fi
 if any_web; then
   [ -n "$(resolvers)" ] || die "web: /etc/resolv.conf names no nameserver, so the web Envoy could resolve nothing"
+  mapfile -t rs < <(resolver_addrs); [ -n "$(web_probe "${rs[@]}")" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf, so the web unit could not check its kernel filter; nothing was changed"
   if [ "$mode" = apply ] && ! systemctl cat airlock-envoy-web.service >/dev/null 2>&1; then
     die "web: no airlock-envoy-web unit: run install/install-service.sh from this version first; nothing was changed"
   fi
