@@ -817,7 +817,11 @@ WEB_PREFLIGHT_GOLDEN='web_preflight() {  # an apply'"'"'s one resolv.conf read, 
   [ -n "$(web_probe "${WEB_RS[@]}")" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf, so the web unit could not check its kernel filter; nothing was changed"
 }'
 pf_bad=""
-[ "$(sed -n '/^web_preflight() {/,/^}/p' "$apply")" = "$WEB_PREFLIGHT_GOLDEN" ] || pf_bad+=" body"
+if [ "$(sed -n '/^web_preflight() {/,/^}/p' "$apply")" != "$WEB_PREFLIGHT_GOLDEN" ]; then
+  pf_bad+=" body"   # an intended edit: update WEB_PREFLIGHT_GOLDEN here too
+  echo "     web_preflight differs from WEB_PREFLIGHT_GOLDEN (test/apply-parse.sh); golden vs actual:"
+  diff <(printf '%s\n' "$WEB_PREFLIGHT_GOLDEN") <(sed -n '/^web_preflight() {/,/^}/p' "$apply") | sed 's/^/     /'
+fi
 # shellcheck disable=SC2016  # literal $ in the fixed-string patterns
 {
   pf="$(grep -nx '  web_preflight' "$apply" | cut -d: -f1)"
