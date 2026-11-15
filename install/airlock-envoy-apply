@@ -2081,7 +2081,7 @@ render_web_dropin() {
   done
   echo "Environment=AIRLOCK_ENVOY_WEB_PROBE=$probe"
 }
-web_preflight() {  # an apply's one resolv.conf read, checked before anything changes
+web_preflight() {  # an apply's one resolv.conf read, checked before its sockets and config change
   mapfile -t WEB_RS < <(resolver_addrs); WEB_RS_READ=1
   [ ${#WEB_RS[@]} -gt 0 ] || die "web: /etc/resolv.conf names no nameserver, so the web Envoy could resolve nothing"
   [ -n "$(web_probe "${WEB_RS[@]}")" ] || die "web: every filter probe address (${WEB_PROBES[*]}) is a resolver in /etc/resolv.conf, so the web unit could not check its kernel filter; nothing was changed"

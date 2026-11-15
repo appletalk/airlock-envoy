@@ -813,10 +813,13 @@ else echo "FAIL web drop-in refusal message, got:"; echo "$out"; fails=$((fails+
   ce="$(grep -nF '[ "$mode" = check ] && {' "$apply" | head -1 | cut -d: -f1)"
   st="$(grep -nF 'early+=("$l")' "$apply" | head -1 | cut -d: -f1)"   # the main flow's first socket stop
 }
+# shellcheck disable=SC2016  # literal $ in the patterns
 if [ -n "$pf" ] && [ "$(wc -l <<< "$pf")" = 1 ] && [ -n "$ce" ] && [ -n "$st" ] && [ "$pf" -lt "$ce" ] && [ "$pf" -lt "$st" ] \
    && [ "$(grep -c 'WEB_RS_READ=1' "$apply")" = 1 ] && grep -q '^web_preflight() {' "$apply" \
-   && sed -n '/^web_preflight() {/,/^}/p' "$apply" | grep -q 'mapfile -t WEB_RS < <(resolver_addrs); WEB_RS_READ=1$'; then
-  echo "ok   apply: web_preflight (the one resolv.conf read, and the checks) runs before --check returns or a socket stops"
+   && [ "$(sed -n '/^web_preflight() {/,/^}/p' "$apply" | grep -cE \
+          '^  mapfile -t WEB_RS < <\(resolver_addrs\); WEB_RS_READ=1$|^  \[ \$\{#WEB_RS\[@\]\} -gt 0 \] \|\| die "web: /etc/resolv.conf names no nameserver|^  \[ -n "\$\(web_probe "\$\{WEB_RS\[@\]\}"\)" \] \|\| die "web: every filter probe address')" = 3 ] \
+   && sed -n '/^render_web_dropin() {/,/^}/p' "$apply" | grep -qx '  if \[ -n "\$WEB_RS_READ" \]; then rs=("\${WEB_RS\[@\]}")'; then
+  echo "ok   apply: web_preflight (the one resolv.conf read, its no-nameserver and free-probe checks) runs before --check returns or a socket stops; the render reuses that read"
 else echo "FAIL apply: web_preflight is missing, not the one read, or after a change (lines: $pf $ce $st)"; fails=$((fails+1)); fi
 # ...and the read-only renders ignore WEB_RS* from the environment.
 printf 'nameserver 127.0.0.53\n' > "$work/resolv"
