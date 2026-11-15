@@ -213,12 +213,15 @@ ck "a second rotation compresses the first (delaycompress), the newest stays pla
 for _ in 1 2 3 4 5; do tunnel >/dev/null; sleep 1.2; rotate; done
 nrot="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}Z(\.gz)?$"')"
 ck "seven rotations, seven rotated files kept (no count limit): $nrot" '[ "$nrot" = 7 ]'
-# ...and by age: a rotated file made 31 days old goes at the next rotation, the others stay.
-x touch -d '31 days ago' "/var/log/airlock-envoy/$rot1.gz"
+# ...and by age: a rotated file made 181 days old goes at the next rotation; one made 179 days
+# old stays (so the test pins maxage from both sides), and so do the others.
+rot2="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -E "^access\.jsonl-[0-9]{8}T[0-9]{6}Z\.gz$" | grep -vxF "$0.gz" | head -1' "$rot1")"
+x touch -d '181 days ago' "/var/log/airlock-envoy/$rot1.gz"
+x touch -d '179 days ago' "/var/log/airlock-envoy/$rot2"
 tunnel >/dev/null; sleep 1.2; rotate
 nrot2="$(x sh -c 'ls /var/log/airlock-envoy/ | grep -cE "^access\.jsonl-[0-9]{8}T[0-9]{6}Z(\.gz)?$"')"
-ck "maxage 30: the 31-day-old rotated file is gone, the other seven stay (and the new one): $nrot2" \
-   '! x test -e "/var/log/airlock-envoy/$rot1.gz" && [ "$nrot2" = 7 ]'
+ck "maxage 180: the 181-day-old rotated file is gone, the 179-day-old '$rot2' and the others stay (and the new one): $nrot2" \
+   '! x test -e "/var/log/airlock-envoy/$rot1.gz" && [ -n "$rot2" ] && x test -e "/var/log/airlock-envoy/$rot2" && [ "$nrot2" = 7 ]'
 x rm -rf /etc/systemd/system/airlock-envoy-logrotate.service.d; x systemctl daemon-reload
 x systemctl start airlock-envoy-logrotate.timer
 # The relay restarts with Envoy; a burst of restarts must not fail it, or the box socket.

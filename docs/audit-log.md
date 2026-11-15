@@ -11,9 +11,11 @@ A log rotates once it passes 100 MiB or once a day (an empty one never) to
 (Envoy flushes once a second, so a few lines can still land in it); older ones are `.gz`.
 
 - **Retention is by age only:** a rotated file is removed at that log's next rotation once it
-  is older than 30 days (by its modification time), never to make room. A flood of refused
+  is older than 180 days (by its modification time), never to make room. A flood of refused
   requests rotates more often but can't push earlier evidence out; it costs disk instead (100
-  MiB is checked every 15 minutes, so a flood can outgrow it between checks). A separate
+  MiB is checked every 15 minutes, so a flood can outgrow it between checks). Kept 180 days,
+  a sustained flood adds up: at 100 MiB a rotation (roughly 10 MB compressed), 96 rotations a
+  day is about 1 GB a day per log. A separate
   filesystem for `/var/log/airlock-envoy`, or a disk-space alert, keeps a flood from filling
   `/var`.
 - **Reopen:** each run first asks both Envoys to reopen their logs, so a reopen that failed
