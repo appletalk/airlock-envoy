@@ -88,13 +88,19 @@ Site-wide lines, not listeners. They say what `web` treats as internal, beyond t
 - CIDRs are checked strictly: systemd skips an entry it can't parse, and a skipped deny would
   fail open.
 
+## `log-journal`
+
+`log-journal on` sends every access log line to the journal too, beside the files (default
+`off`). For a reader that should take Envoy's lines from the journal rather than from Envoy's
+own directory: [audit-log.md](audit-log.md#the-journal-copy).
+
 ## Syntax
 
 - Lowercase names, explicit ports, no wildcards, URLs, IPv6 destinations or Windows line endings.
 - `#` starts a comment.
 - Listener names: `a-z`, `0-9` and `-`, starting with a letter, up to 32 characters.
 - Reserved: `admin` (Envoy's admin socket), `client`, `http`, `internal-name`, `internal-net`,
-  and the built-in `anthropic`. `web` is a destination, not a listener name.
+  `log-journal`, and the built-in `anthropic`. `web` is a destination, not a listener name.
 - A bad line stops the apply with its line number.
 
 ## What an apply does

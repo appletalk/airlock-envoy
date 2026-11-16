@@ -27,7 +27,17 @@ A log rotates once it passes 100 MiB or once a day (an empty one never) to
   only what is due.
 - A reinstall enables the timer again.
 
-Nothing ships the logs anywhere yet.
+Nothing ships the logs anywhere.
+
+## The journal copy
+
+`log-journal on` in the site file sends every access log line to the journal as well, through
+Envoy's stdout: the same JSON, the files unchanged. The journal names the unit
+(`_SYSTEMD_UNIT=airlock-envoy.service` or `airlock-envoy-web.service`) and the uid itself, so a
+reader of the journal (a local log store, say: claude-airlock's agents `audit on`) knows the
+line came from Envoy without reading Envoy's directory, which Envoy's own account can write
+(a link planted there would steer whatever reads it). journald's rate limit per unit applies: in
+a flood it drops lines from the journal and logs that it did; the files keep every line.
 
 The web Envoy logs to `/var/log/airlock-envoy/web.jsonl`: profile, server name, chain and
 upstream address.

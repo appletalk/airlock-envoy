@@ -164,6 +164,7 @@ That gives alice a socket at `/run/airlock-envoy/alice/infra.sock`. A fuller exa
 | `internal-name <domain>...` | Site-wide: names (and subdomains) `web` treats as internal, beyond the built-ins. |
 | `internal-net <CIDR>...` | Site-wide: IPv4 or IPv6 ranges `web` refuses, beyond the built-ins. |
 | `http <host> rules <preset> ...` | Site-wide: defines a plain-HTTP destination. |
+| `log-journal on\|off` | Site-wide: every access log line also goes to the journal (default off). See [docs/audit-log.md](docs/audit-log.md#the-journal-copy). |
 
 Rules that matter most (full list in [docs/site-file.md](docs/site-file.md)):
 
@@ -178,7 +179,7 @@ Rules that matter most (full list in [docs/site-file.md](docs/site-file.md)):
 - **Name listeners after their user** (`alice-infra`, `agent-infra`) so the name in a box's
   config says whose it is.
 - **Strict syntax.** Lowercase names, explicit ports, no wildcards, URLs or Windows line
-  endings, and no IPv6 destinations. `admin`, `client`, `http`, `internal-name`, `internal-net` and `anthropic` are reserved as
+  endings, and no IPv6 destinations. `admin`, `client`, `http`, `internal-name`, `internal-net`, `log-journal` and `anthropic` are reserved as
   listener names, and `web` is a destination. A bad line stops the apply with its line number.
 
 ### Applying

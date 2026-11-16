@@ -118,7 +118,7 @@ declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
 declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=() HTTP_RREPOS=() HTTP_PROTECT=()
 declare -A HTTP_ENDPOINTS=() HTTP_TOOLS=() HTTP_DTOOLS=()
 declare -A CLIENT=() CLIENT_AT=() CLIENT_UID=()
-LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=()
+LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=() LOG_JOURNAL=off
 SOCKETS=()   # the listeners with a client, in file order: each gets a box socket
 PRESETS="any forgejo git git-read github-api github-issues kubernetes-read mcp victoria-logs victoria-metrics"
 
@@ -211,6 +211,9 @@ parse() {  # parse <source label>, text on stdin
           fi
         done
         continue ;;
+      log-journal)
+        [ "${#words[@]}" = 2 ] && [[ "${words[1]}" =~ ^(on|off)$ ]] || die "$src:$n: want: log-journal on|off"
+        LOG_JOURNAL=${words[1]}; continue ;;
       http) parse_http "$src:$n" "${words[@]:1}"; continue ;;
       client)
         [ "${#words[@]}" = 3 ] || die "$src:$n: want: client <listener> <user>"
@@ -1589,6 +1592,82 @@ lua_checked() {  # lua_checked <render function> <access log path>
   why="$(lua_jit_check <<< "$out")" || die "internal: a Lua filter without jit.off() first (Envoy would panic under MemoryDenyWriteExecute): $why"
   printf '%s\n' "$out"
 }
+# log_entries <indent> <log path> <anchor or ""> <fields>: an access_log list's items, the
+# json_format fields one "key: value" per line. The file at <log path> always; with log-journal on, the same
+# lines to stdout too (Envoy's unit sends them to the journal, where journald itself names the
+# unit and uid). An anchor names the file entry <anchor> and the stdout one <anchor>_journal.
+# The fields each listener kind logs.
+http_log_fields() {
+  cat <<EOF
+time: "%START_TIME%"
+listener: "$1"
+user: "${CLIENT[$1]}"
+connection: "%CONNECTION_ID%"
+method: "%REQ(:METHOD)%"
+authority: "%REQ(:AUTHORITY)%"
+path: "%REQ(:PATH)%"
+route: "%ROUTE_NAME%"
+status: "%RESPONSE_CODE%"
+flags: "%RESPONSE_FLAGS%"
+details: "%RESPONSE_CODE_DETAILS%"
+upstream: "%UPSTREAM_HOST%"
+bytes_in: "%BYTES_RECEIVED%"
+bytes_out: "%BYTES_SENT%"
+duration_ms: "%DURATION%"
+log_type: "%ACCESS_LOG_TYPE%"
+EOF
+}
+sni_log_fields() {
+  cat <<'EOF'
+time: "%START_TIME%"
+listener: "%DOWNSTREAM_LOCAL_ADDRESS%"
+connection: "%FILTER_STATE(airlock.connection:PLAIN)%"
+sni: "%REQUESTED_SERVER_NAME%"
+route: "%FILTER_CHAIN_NAME%"
+flags: "%RESPONSE_FLAGS%"
+details: "%CONNECTION_TERMINATION_DETAILS%"
+upstream: "%UPSTREAM_HOST%"
+bytes_in: "%BYTES_RECEIVED%"
+bytes_out: "%BYTES_SENT%"
+duration_ms: "%DURATION%"
+log_type: "%ACCESS_LOG_TYPE%"
+EOF
+}
+web_log_fields() {
+  cat <<EOF
+time: "%START_TIME%"
+listener: "$1"
+user: "${CLIENT[$1]}"
+sni: "%REQUESTED_SERVER_NAME%"
+route: "%FILTER_CHAIN_NAME%"
+flags: "%RESPONSE_FLAGS%"
+details: "%CONNECTION_TERMINATION_DETAILS%"
+upstream: "%UPSTREAM_HOST%"
+bytes_in: "%BYTES_RECEIVED%"
+bytes_out: "%BYTES_SENT%"
+duration_ms: "%DURATION%"
+EOF
+}
+log_entries() {
+  local ind=$1 lpath=$2 anchor=$3 fields=$4 kind f sfx
+  for kind in file stdout; do
+    [ "$kind" = file ] || [ "$LOG_JOURNAL" = on ] || continue
+    if [ -n "$anchor" ]; then
+      sfx=""; [ "$kind" = file ] || sfx=_journal
+      printf '%s- &%s\n%s  name: envoy.access_loggers.%s\n' "$ind" "$anchor$sfx" "$ind" "$kind"
+    else
+      printf '%s- name: envoy.access_loggers.%s\n' "$ind" "$kind"
+    fi
+    printf '%s  typed_config:\n' "$ind"
+    if [ "$kind" = file ]; then
+      printf '%s    "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog\n%s    path: %s\n' "$ind" "$ind" "$lpath"
+    else
+      printf '%s    "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog\n' "$ind"
+    fi
+    printf '%s    log_format:\n%s      json_format:\n' "$ind" "$ind"
+    while IFS= read -r f; do printf '%s        %s\n' "$ind" "$f"; done <<< "$fields"
+  done
+}
 render() { lua_checked render_config "$1"; }   # render <access log path>: the config, its Lua checked
 render_config() {  # render_config <access log path>
   local log=$1 l d k de first=1 rt=""
@@ -1674,28 +1753,7 @@ EOF
             flush_log_on_tunnel_successfully_established: true
             access_log_flush_interval: 60s
           access_log:
-          - name: envoy.access_loggers.file
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
-              path: $log
-              log_format:
-                json_format:
-                  time: "%START_TIME%"
-                  listener: "$l"
-                  user: "${CLIENT[$l]}"
-                  connection: "%CONNECTION_ID%"
-                  method: "%REQ(:METHOD)%"
-                  authority: "%REQ(:AUTHORITY)%"
-                  path: "%REQ(:PATH)%"
-                  route: "%ROUTE_NAME%"
-                  status: "%RESPONSE_CODE%"
-                  flags: "%RESPONSE_FLAGS%"
-                  details: "%RESPONSE_CODE_DETAILS%"
-                  upstream: "%UPSTREAM_HOST%"
-                  bytes_in: "%BYTES_RECEIVED%"
-                  bytes_out: "%BYTES_SENT%"
-                  duration_ms: "%DURATION%"
-                  log_type: "%ACCESS_LOG_TYPE%"
+$(log_entries "          " "$log" "" "$(http_log_fields "$l")")
           upgrade_configs:
           - upgrade_type: CONNECT
 $(protect_local_reply "$l")
@@ -1797,28 +1855,10 @@ EOF
 EOF
     if [ "$first" = 1 ]; then
       first=0
-      cat <<EOF
-    access_log:
-    - &sni_log
-      name: envoy.access_loggers.file
-      typed_config:
-        "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
-        path: $log
-        log_format:
-          json_format:
-            time: "%START_TIME%"
-            listener: "%DOWNSTREAM_LOCAL_ADDRESS%"
-            connection: "%FILTER_STATE(airlock.connection:PLAIN)%"
-            sni: "%REQUESTED_SERVER_NAME%"
-            route: "%FILTER_CHAIN_NAME%"
-            flags: "%RESPONSE_FLAGS%"
-            details: "%CONNECTION_TERMINATION_DETAILS%"
-            upstream: "%UPSTREAM_HOST%"
-            bytes_in: "%BYTES_RECEIVED%"
-            bytes_out: "%BYTES_SENT%"
-            duration_ms: "%DURATION%"
-            log_type: "%ACCESS_LOG_TYPE%"
-EOF
+      echo "    access_log:"
+      log_entries "    " "$log" sni_log "$(sni_log_fields)"
+    elif [ "$LOG_JOURNAL" = on ]; then
+      echo "    access_log: [*sni_log, *sni_log_journal]"
     else
       echo "    access_log: [*sni_log]"
     fi
@@ -1957,23 +1997,7 @@ EOF
     - name: envoy.filters.listener.tls_inspector
       typed_config: { "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector }
     access_log:
-    - name: envoy.access_loggers.file
-      typed_config:
-        "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
-        path: $log
-        log_format:
-          json_format:
-            time: "%START_TIME%"
-            listener: "$l"
-            user: "${CLIENT[$l]}"
-            sni: "%REQUESTED_SERVER_NAME%"
-            route: "%FILTER_CHAIN_NAME%"
-            flags: "%RESPONSE_FLAGS%"
-            details: "%CONNECTION_TERMINATION_DETAILS%"
-            upstream: "%UPSTREAM_HOST%"
-            bytes_in: "%BYTES_RECEIVED%"
-            bytes_out: "%BYTES_SENT%"
-            duration_ms: "%DURATION%"
+$(log_entries "    " "$log" "" "$(web_log_fields "$l")")
     filter_chains:
     - name: deny-internal-name
       filters:

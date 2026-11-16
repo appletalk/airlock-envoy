@@ -25,6 +25,8 @@ lists() {  # lists <name> <expected --list lines for the site's own listeners> <
 
 A='a api.anthropic.com:443\na platform.claude.com:443'
 refuses "uppercase host"               "only lowercase"        'a Example.com:443\n'
+refuses "log-journal without a value"  "want: log-journal on|off" 'log-journal\na example.com:443\n'
+refuses "log-journal maybe"            "want: log-journal on|off" 'log-journal maybe\na example.com:443\n'
 refuses "wildcard"                     "only lowercase"        'a *.example.com:443\n'
 refuses "CRLF line ending"             "only lowercase"        'a example.com:443\r\n'
 refuses "IPv6 literal"                 "only lowercase"        'a [fd00::1]:443\n'
@@ -749,6 +751,21 @@ printf 'http api.example.com rules github-api credential c1\nhttp g.example.com 
 fields="$({ "$apply" --render "$work/site"; "$apply" --render-web "$work/site"; } | grep -o '%REQ([^)]*)%\|%RESP([^)]*)%\|%REQ_WITHOUT_QUERY([^)]*)%\|%DOWNSTREAM_PEER[A-Z_]*%' | sort -u | tr '\n' ' ')"
 if [ "$fields" = "%REQ(:AUTHORITY)% %REQ(:METHOD)% %REQ(:PATH)% " ]; then echo "ok   logs name no request header (only method, authority, path)"
 else echo "FAIL logs name request fields beyond method, authority, path: $fields"; fails=$((fails+1)); fi
+# log-journal on: every access log goes to stdout too (the journal), with the same fields, the
+# header rule above included; off (the default): file only. Bad values refused.
+printf 'log-journal on\n' >> "$work/site"
+lj="$({ "$apply" --render "$work/site"; "$apply" --render-web "$work/site"; })"
+ljfields="$(grep -o '%REQ([^)]*)%\|%RESP([^)]*)%\|%REQ_WITHOUT_QUERY([^)]*)%\|%DOWNSTREAM_PEER[A-Z_]*%' <<< "$lj" | sort -u | tr '\n' ' ')"
+if [ "$ljfields" = "%REQ(:AUTHORITY)% %REQ(:METHOD)% %REQ(:PATH)% " ] \
+   && [ "$(grep -c 'envoy.access_loggers.stdout' <<< "$lj")" -ge 2 ] \
+   && [ "$(grep -c 'envoy.access_loggers.stdout' <<< "$lj")" = "$(grep -c 'envoy.access_loggers.file' <<< "$lj")" ] \
+   && grep -q 'access_log: \[\*sni_log, \*sni_log_journal\]' <<< "$lj"; then
+  echo "ok   log-journal on: a stdout logger beside every file logger, no request header in either"
+else echo "FAIL log-journal on rendering: $ljfields"; fails=$((fails+1)); fi
+sed -i '/^log-journal on$/d' "$work/site"
+if ! grep -q 'envoy.access_loggers.stdout' <<< "$({ "$apply" --render "$work/site"; "$apply" --render-web "$work/site"; })"; then
+  echo "ok   log-journal off (the default): no stdout logger"
+else echo "FAIL log-journal off: a stdout logger"; fails=$((fails+1)); fi
 r="$("$apply" --render "$work/site")"
 if [ "$(grep -c 'github-graphql: { "@type"' <<< "$r")" = 1 ] && grep -q 'filter_metadata: { github-graphql: { rules: "github-api", projects: "" } }' <<< "$r" \
    && grep -q 'max_request_bytes: 65536 }' <<< "$r" && grep -q 'token_bucket: { max_tokens: 20' <<< "$r" && grep -q 'name: strip-box-headers' <<< "$r" \
