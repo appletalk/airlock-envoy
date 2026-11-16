@@ -418,8 +418,8 @@ if [ -f "$DIR/credentials/t-cred.yaml" ]; then
 fi
 # A socket upstream: a fake store on run/store.sock (Envoy dials it per request) echoes what
 # reached it; a query passes with Host fixed, a write is the preset's 403 and never reaches it.
-rm -f "$DIR/store.sock" "$DIR/store.seen"
-python3 -I - "$DIR/store.sock" "$DIR/store.seen" <<"PY" & store=$!
+mkdir -p "$DIR/store"; rm -f "$DIR/store/store.sock" "$DIR/store/store.seen"
+python3 -I - "$DIR/store/store.sock" "$DIR/store/store.seen" <<"PY" & store=$!
 import http.server, socketserver, sys
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -433,16 +433,17 @@ class S(socketserver.UnixStreamServer):
         r, _ = super().get_request(); return r, ("local", 0)
 S(sys.argv[1], H).serve_forever()
 PY
-for _ in $(seq 50); do [ -S "$DIR/store.sock" ] && break; sleep 0.1; done
+trap 'kill "$store" 2>/dev/null' EXIT
+for _ in $(seq 50); do [ -S "$DIR/store/store.sock" ] && break; sleep 0.1; done
 r="$(podman run --rm --network none --userns keep-id --user "$(id -u):$(id -g)" -v "$DIR/t-http.sock:/run/proxy/t-http.sock${SOCK_MOUNT_OPTS-:z}" \
   --entrypoint sh localhost/airlock-envoy-spike-client:test -c 'socat -lf /dev/null TCP-LISTEN:3132,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/proxy/t-http.sock & sleep 0.2
-    curl -s -x http://127.0.0.1:3132 "http://store.test/select/logsql/query?query=x"
+    curl -s -x http://127.0.0.1:3132 -H "Host: store.test:80" "http://store.test/select/logsql/query?query=x"
     curl -s -o /dev/null -w "write=%{http_code}\n" -x http://127.0.0.1:3132 -d x http://store.test/insert/jsonline')"
 kill "$store" 2>/dev/null; wait "$store" 2>/dev/null
 if [[ "$r" == *"store saw GET /select/logsql/query?query=x host=store.test"* && "$r" == *"write=403"* ]] \
-   && ! grep -q insert "$DIR/store.seen" 2>/dev/null; then
-  echo "ok   socket upstream: a query reaches the local store (Host fixed), a write is refused before it"
+   && ! grep -q insert "$DIR/store/store.seen" 2>/dev/null; then
+  echo "ok   socket upstream: a query reaches the local store (Host set to the name), a write is refused before it"
 else echo "FAIL socket upstream: $r"; fails=$((fails + 1)); fi
-rm -f "$DIR/store.sock" "$DIR/store.seen"
+rm -f "$DIR/store/store.sock" "$DIR/store/store.seen"
 echo "failures: $fails"
 exit "$fails"

@@ -475,26 +475,30 @@ valid_sock() {
   IFS=/ read -ra part <<< "${1#/}"
   for part in "${part[@]}"; do [[ "$part" != . && "$part" != .. ]] || return 1; done
 }
-# Where a socket upstream may be: never in Envoy's own runtime directories (its admin socket, the
-# box sockets, the credentials' tmpfs), and only where no ordinary user could put a socket of
-# their own for Envoy to dial: each directory on the way that exists, links followed, owned by
-# root or a system account and writable by its owner alone; the socket itself, if it exists,
-# owned by root or a system account. (A directory not there yet is checked again at the next
-# apply; its parent already is.) The reason on stdout, return 1.
+# Where a socket upstream may be. Written as its real path: no link anywhere on it (Envoy follows
+# a link at each connection, so whoever owns the directory holding one could repoint it later)
+# and nothing under /proc, /sys or /dev (/proc/self/cwd means another directory to Envoy than to
+# this script). Never in Envoy's own runtime directories (its admin socket, the box sockets, the
+# credentials' tmpfs), nor where its unit can't see (ProtectHome, PrivateTmp). And only where no
+# ordinary user could put a socket of their own for Envoy to dial: each directory on the way that
+# exists owned by root or a system account and writable by its owner alone; the socket itself,
+# if it exists, owned by root or a system account. (A directory not there yet is checked again
+# at the next apply; its parent already is.) The reason on stdout, return 1.
 sock_trust() {
-  local p=$1 d r o m uid_min
+  local p=$1 d o m uid_min
   uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
   case "$uid_min" in ''|*[!0-9]*) uid_min=1000 ;; esac
-  for r in "$p" "$(readlink -m -- "$p")"; do
-    case "$r/" in /run/airlock-envoy*|/var/run/airlock-envoy*) echo "in airlock-envoy's own runtime directories"; return 1 ;; esac
-  done
-  r="$(readlink -m -- "$p")"
-  if [ -e "$r" ] || [ -L "$r" ]; then
-    [ -S "$r" ] || { echo "not a socket"; return 1; }
-    o="$(stat -c %u -- "$r")"
+  case "$p/" in
+    /proc/*|/sys/*|/dev/*) echo "under /proc, /sys or /dev: name the socket by its real path"; return 1 ;;
+    /run/airlock-envoy*|/var/run/airlock-envoy*) echo "in airlock-envoy's own runtime directories"; return 1 ;;
+  esac
+  [ "$(readlink -m -- "$p")" = "$p" ] || { echo "a link on the way (it resolves to $(readlink -m -- "$p")): name the real path, links can be repointed"; return 1; }
+  if [ -e "$p" ] || [ -L "$p" ]; then
+    [ -S "$p" ] || { echo "not a socket"; return 1; }
+    o="$(stat -c %u -- "$p")"
     [ "$o" -lt "$uid_min" ] || { echo "owned by uid $o, an ordinary user: only root or a system account's socket"; return 1; }
   fi
-  d=${r%/*}
+  d=${p%/*}
   while :; do
     [ -n "$d" ] || d=/
     if [ -e "$d" ]; then
@@ -505,6 +509,9 @@ sock_trust() {
     [ "$d" != / ] || break
     d=${d%/*}
   done
+  case "$p/" in
+    /home/*|/root/*|/run/user/*|/tmp/*|/var/tmp/*) echo "hidden from Envoy by its unit (ProtectHome, PrivateTmp): put the socket under /run, say"; return 1 ;;
+  esac
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
 # Two definitions of one host on one listener: the same rules, or the two GitHub presets

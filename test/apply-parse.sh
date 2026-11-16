@@ -134,11 +134,26 @@ refuses "socket through /var/run"      "airlock-envoy's own runtime" 'http x.exa
 mkdir -p "$work/userdir"; chmod 0755 "$work/userdir"
 if [ "$(id -u)" -ge 1000 ]; then
   refuses "socket in a user's directory" "an ordinary user" "http x.example rules any socket $work/userdir/a.sock\n"
-  ln -sfn /run/airlock-envoy-internal "$work/lnk"
-  refuses "socket through a link into Envoy's dir" "airlock-envoy's own runtime" "http x.example rules any socket $work/lnk/admin.sock\n"
+  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$work/userdir/s.sock"
+  refuses "a socket an ordinary user owns" "only root or a system account's socket" "http x.example rules any socket $work/userdir/s.sock\n"
+fi
+ln -sfn /run/airlock-envoy-internal "$work/lnk"; ln -sfn /run "$work/lnk2"
+refuses "socket through a link into Envoy's dir" "a link on the way" "http x.example rules any socket $work/lnk/admin.sock\n"
+refuses "socket through a link (repointable later)" "a link on the way" "http x.example rules any socket $work/lnk2/store/vl.sock\n"
+refuses "socket through /proc/self/cwd"  "under /proc"          'http x.example rules any socket /proc/self/cwd/run/airlock-envoy-internal/admin.sock\n'
+refuses "socket under /dev"              "under /proc"          'http x.example rules any socket /dev/log\n'
+refuses "socket under /home (hidden from Envoy)" "hidden from Envoy" 'http x.example rules any socket /home/x.sock\n'
+refuses "socket under /run/user (hidden from Envoy)" "hidden from Envoy" 'http x.example rules any socket /run/user/x.sock\n'
+if [ -L /var/run ]; then
+  refuses "socket through the /var/run link" "a link on the way" 'http x.example rules any socket /var/run/store/vl.sock\n'
+fi
+# A group-writable directory of root's, where one is on this host (mail spools often are).
+gw="$(for d in /var/mail /var/spool/mail /var/local /var/games; do [ -d "$d" ] && [ ! -L "$d" ] && [ "$(stat -c %u "$d")" = 0 ] && (( 8#$(stat -c %a "$d") & 020 )) && echo "$d" && break; done)"
+if [ -n "$gw" ]; then
+  refuses "socket in a group-writable dir ($gw)" "writable by others" "http x.example rules any socket $gw/x.sock\n"
 fi
 refuses "socket in a world-writable dir" "writable by others" 'http x.example rules any socket /tmp/a.sock\n'
-refuses "socket path a regular file"   "not a socket"          'http x.example rules any socket /etc/hostname\n'
+refuses "socket path a regular file"   "not a socket"          'http x.example rules any socket /etc/passwd\n'
 refuses "socket given twice"           "socket given twice"    'http x.example rules any socket /run/a.sock socket /run/b.sock\n'
 refuses "socket with a port"           "socket with a port"    'http x.example:8080 rules any socket /run/a.sock\n'
 refuses "socket with an address"       "socket with an address" 'http 10.99.0.1 rules any socket /run/a.sock\n'
@@ -147,6 +162,8 @@ refuses "socket with credential"       "socket with credential" 'http x.example 
 refuses "a slash outside http values"  "only lowercase"        'http x.example rules any socket /run/a.sock\na x.example/p:443\n'
 lists "socket: in --list without a port" 'a http://store.example rules victoria-logs socket /run/store_1/vl.sock\na client t' \
   'http store.example rules victoria-logs socket /run/store_1/vl.sock\na http://store.example\nclient a t\n'
+lists "socket: two definitions of one host share it" 'l http://x.example variant a rules git socket /run/x/a.sock repos o/a\nl http://x.example variant b rules git socket /run/x/a.sock repos o/b\nl client t' \
+  'http x.example@a rules git repos o/a socket /run/x/a.sock\nhttp x.example@b rules git repos o/b socket /run/x/a.sock\nl http://x.example@a http://x.example@b\nclient l t\n'
 refuses "socket, two definitions of one host differ" "another port, ca, socket" \
   'http x.example@a rules git repos o/a socket /run/a.sock\nhttp x.example@b rules git repos o/b socket /run/b.sock\nl http://x.example@a http://x.example@b\nclient l t\n'
 refuses "http defined twice"           "defined twice"         'http x.example rules any\nhttp x.example rules git\n'
@@ -1027,10 +1044,10 @@ ExecStopPost=/usr/bin/rm -f /run/airlock-envoy/$me/a.clients"
   else echo "FAIL socket drop-in for the built-in"; fails=$((fails+1)); fi
 else echo "skip socket drop-in: run as a login account (uid 1000 and up)"; fi
 
-# A file shaped like a real site renders to a config Envoy accepts, scoped routes at their
-# largest included: 64 repos with the longest names (40 + 100 characters).
+# A file shaped like a real site renders to a config Envoy accepts (a socket upstream too), scoped
+# routes at their largest included: 64 repos with the longest names (40 + 100 characters).
 long="$(for i in $(seq 10 73); do printf '%s,' "o$i$(printf 'x%.0s' $(seq 37))/r$i$(printf 'y%.0s' $(seq 97))"; done)"
-printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues repos %s\nhttp g.example.com rules git protect main,release/*\nhttp fj.example.com rules forgejo repos a/* protect main\nx http://fj.example.com\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\nclient x t\nclient y u\n' "${long%,}" > "$work/site"
+printf 'http api.example.com rules github-api\nhttp issues.example.com rules github-issues repos %s\nhttp g.example.com rules git protect main,release/*\nhttp fj.example.com rules forgejo repos a/* protect main\nhttp store.example rules victoria-logs socket /run/store/vl.sock\nx http://fj.example.com http://store.example\nx @anthropic metrics.example.net:443 logs.example.net:443 10.0.0.10:6443 http://api.example.com\ny example.org:8443 x-y.example.com:443 http://issues.example.com http://g.example.com\nclient x t\nclient y u\n' "${long%,}" > "$work/site"
 "$apply" --render "$work/site" > "$work/envoy.yaml"
 if envoy="$(command -v envoy)"; then
   # Envoy picks the format by extension, and validate mode opens the access log.
