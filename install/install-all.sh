@@ -8,11 +8,15 @@
 #
 # The steps:
 #   1. Envoy at the pinned version (ENVOY_VERSION)  (sudo install/install-envoy.sh <version>)
-#   2. the service, its units and the site file     (sudo install/install-service.sh: also
-#                                                     re-applies the site file and restarts Envoy
-#                                                     if its config changed)
+#   2. the service and its units, then an apply     (sudo install/install-service.sh: re-applies
+#                                                     /etc/airlock-envoy/site.conf and restarts
+#                                                     Envoy: open tunnels drop, box sockets stay)
 #   3. the result                                   (airlock-envoy-apply --status)
 # Then claude-airlock's make install, if this host runs it.
+#
+# The root steps install code, the release key and the built-in allowlist from this clone: run it
+# from a clone no airlock box mounts. Before the first sudo it checks the clone has no local
+# changes and stops if it has.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,14 +40,31 @@ ask() {
     case "$a" in ''|[yY]*) return 0 ;; [qQ]*) echo "stopped; rerun make install to go on"; exit 0 ;; *) echo "    skipped"; return 1 ;; esac
 }
 
+# Before the first root step: no local changes in the clone (they would be what root installs).
+checked=0
+clean_checkout() {
+    [ "$checked" = 0 ] || return 0
+    checked=1
+    echo "    (root installs from $REPO_DIR: use a clone no airlock box mounts)"
+    git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 || return 0
+    local dirty; dirty="$(git -C "$REPO_DIR" status --porcelain 2>/dev/null)" || dirty="(git status failed)"
+    if [ -n "$dirty" ]; then
+        echo "make install: $REPO_DIR has local changes; the root steps would install them. Commit, stash or check them out first:" >&2
+        printf '%s\n' "$dirty" | head -n 10 >&2
+        exit 1
+    fi
+}
+
 have="$("$ENVOY_BIN" --version 2>/dev/null | grep -oE '/[0-9]+\.[0-9]+\.[0-9]+/' | tr -d / || true)"
 if [ "$have" = "$ver" ]; then
     n=$((n + 1)); printf '\n==> %d. Envoy %s: already installed\n' "$n" "$ver"
 elif ask "Envoy ${have:-(none)} -> $ver, the pinned version (sudo install/install-envoy.sh $ver)"; then
+    clean_checkout
     sudo bash "$REPO_DIR/install/install-envoy.sh" "$ver"
 fi
 
-if ask "the service, its units and the site file (sudo install/install-service.sh; restarts Envoy if its config changed)"; then
+if ask "the service and its units, then an apply (sudo install/install-service.sh; restarts Envoy: open tunnels drop, box sockets stay)"; then
+    clean_checkout
     sudo bash "$REPO_DIR/install/install-service.sh"
 fi
 

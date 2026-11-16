@@ -30,7 +30,25 @@ ck "an older Envoy: install-envoy.sh with the pinned version, before the service
 ck "no terminal and no YES: refused before anything runs" '[ "$rc" != 0 ] && [[ "$out" == *"YES=1"* ]] && [ ! -s "$CALLS" ]'
 echo "x.y" > "$t/repo/ENVOY_VERSION"; out="$(YES=1 bash "$s" </dev/null 2>&1)"; rc=$?
 ck "a malformed ENVOY_VERSION is refused" '[ "$rc" != 0 ] && [[ "$out" == *"must look like"* ]]'
+echo 1.40.2 > "$t/repo/ENVOY_VERSION"
 ck "make install runs it, passing YES" 'grep -A1 "^install:" Makefile | grep -q "YES=\"\$(YES)\" bash install/install-all.sh"'
-ck "ENVOY_VERSION is a version" 'grep -qxE "[0-9]+\.[0-9]+\.[0-9]+" ENVOY_VERSION'
+ck "ENVOY_VERSION is a version, the same CI installs" 'grep -qxE "[0-9]+\.[0-9]+\.[0-9]+" ENVOY_VERSION && grep -qx "  ENVOY_VERSION: $(cat ENVOY_VERSION)" .github/workflows/ci.yml'
+# A terminal: n skips a step, q stops (script(1) gives it one; answers on stdin).
+if command -v script >/dev/null; then
+  : > "$CALLS"; out="$(HAVE=1.39.0 script -qec "bash $s" /dev/null <<< $'n\nq\n' 2>&1)"; rc=$?
+  ck "asks before each step: n skips the Envoy step, q stops before the service" \
+     '[ "$rc" = 0 ] && [[ "$out" == *"stopped; rerun make install"* ]] && [ ! -s "$CALLS" ]'
+  : > "$CALLS"; out="$(HAVE=1.39.0 script -qec "bash $s" /dev/null <<< $'y\nn\n' 2>&1)"; rc=$?
+  ck "y runs the Envoy step, n skips the service" \
+     'grep -q "^install-envoy.sh 1.40.2" "$CALLS" && ! grep -q "^install-service.sh" "$CALLS"'
+fi
+# A clone with local changes stops before the first sudo.
+git -C "$t/repo" init -q && git -C "$t/repo" add -A && git -C "$t/repo" -c user.email=t@example.org -c user.name=t commit -qm x
+echo "# edited" >> "$t/repo/install/install-service.sh"
+: > "$CALLS"; out="$(YES=1 bash "$s" </dev/null 2>&1)"; rc=$?
+ck "a clone with local changes stops before the first root step" \
+   '[ "$rc" != 0 ] && [[ "$out" == *"has local changes"* ]] && ! grep -q "^sudo" "$CALLS"'
+git -C "$t/repo" checkout -q install/install-service.sh
+ck "refuses to run as root (the check is first)" 'grep -q "run it as yourself" install/install-all.sh'
 [ "$fails" = 0 ] && echo "ok   install-all: all checks passed"
 exit $(( fails > 0 ))

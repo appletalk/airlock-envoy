@@ -26,8 +26,9 @@ permissions:
   contents: read
 
 env:
-  # The version test/install-test.sh installs by default. test/run-envoy.sh pins its own image
-  # (by digest): bump both together.
+  # The version test/install-test.sh installs by default: the same as the ENVOY_VERSION file
+  # (make install's pin; test/install-all.sh fails if they differ). test/run-envoy.sh pins its
+  # own image (by digest): bump all three together.
   ENVOY_VERSION: 1.40.2
 
 defaults:
