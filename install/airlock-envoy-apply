@@ -658,10 +658,12 @@ for l in "${LISTENERS[@]}"; do BUILT[$l]=1; done
 parse "$site_src" <<< "$site_text"
 
 # Who each socket is for. One user per listener, so a socket is never shared (each user's
-# boxes reach only their own listeners), and a credential is reachable by one user only.
+# boxes reach only their own listeners), and a credential is reachable by one user only. So is a
+# socket upstream (a local service, the audit store say): it has no credential to tie it to one
+# user, and a line on a shared listener (one others include) would hand it to all of them.
 check_clients() {
   local l d c k
-  local -A cred_of=()
+  local -A cred_of=() sock_of=()
   for l in "${!CLIENT[@]}"; do
     [ -n "${DESTS[$l]+x}" ] || die "${CLIENT_AT[$l]}: client for '$l', which is not a listener in this file"
   done
@@ -680,6 +682,17 @@ check_clients() {
       if [ -z "$k" ]; then cred_of[$c]="${CLIENT[$l]} $l"
       elif [ "${k%% *}" != "${CLIENT[$l]}" ]; then
         die "$site_src: credential $c is reachable by ${k%% *} (listener ${k#* }) and by ${CLIENT[$l]} (listener $l): a credential belongs to one user; give the other a variant (http <host>@<variant>) with a credential of its own"
+      fi
+    done
+  done
+  for l in "${SOCKETS[@]}"; do
+    for d in ${HDESTS[$l]:-}; do
+      c=${HTTP_SOCK[$d]}
+      [ -n "$c" ] || continue
+      k=${sock_of[$c]:-}
+      if [ -z "$k" ]; then sock_of[$c]="${CLIENT[$l]} $l"
+      elif [ "${k%% *}" != "${CLIENT[$l]}" ]; then
+        die "$site_src: socket $c (http://$d) is reachable by ${k%% *} (listener ${k#* }) and by ${CLIENT[$l]} (listener $l): a socket upstream belongs to one user; list it on that user's listeners only (not on one others include)"
       fi
     done
   done

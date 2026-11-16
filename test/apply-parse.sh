@@ -255,6 +255,14 @@ lists "socket: in --list without a port" 'a http://store.example rules victoria-
   'http store.example rules victoria-logs socket /run/store_1/vl.sock\na http://store.example\nclient a t\n'
 lists "socket: two definitions of one host share it" 'l http://x.example variant a rules git socket /run/x/a.sock repos o/a\nl http://x.example variant b rules git socket /run/x/a.sock repos o/b\nl client t' \
   'http x.example@a rules git repos o/a socket /run/x/a.sock\nhttp x.example@b rules git repos o/b socket /run/x/a.sock\nl http://x.example@a http://x.example@b\nclient l t\n'
+refuses "a socket host on two users' listeners" "a socket upstream belongs to one user" \
+  'http s.example rules victoria-logs socket /run/s/vl.sock\na http://s.example\nclient a t\nb http://s.example\nclient b u\n'
+refuses "a socket host through a shared include" "is reachable by t (listener a) and by u (listener b)" \
+  'http s.example rules victoria-logs socket /run/s/vl.sock\nshared http://s.example\na @shared\nclient a t\nb @shared\nclient b u\n'
+refuses "one socket under two names for two users" "socket /run/s/vl.sock (http://t.example)" \
+  'http s.example rules victoria-logs socket /run/s/vl.sock\nhttp t.example rules victoria-logs socket /run/s/vl.sock\na http://s.example\nclient a t\nb http://t.example\nclient b u\n'
+lists "a socket host on two listeners of one user" 'a http://s.example rules victoria-logs socket /run/s/vl.sock\na client t\nb http://s.example rules victoria-logs socket /run/s/vl.sock\nb client t' \
+  'http s.example rules victoria-logs socket /run/s/vl.sock\na http://s.example\nclient a t\nb http://s.example\nclient b t\n'
 refuses "socket, two definitions of one host differ" "another port, ca, socket" \
   'http x.example@a rules git repos o/a socket /run/a.sock\nhttp x.example@b rules git repos o/b socket /run/b.sock\nl http://x.example@a http://x.example@b\nclient l t\n'
 refuses "http defined twice"           "defined twice"         'http x.example rules any\nhttp x.example rules git\n'

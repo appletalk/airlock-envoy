@@ -267,6 +267,9 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   `Host` set to `<host>`, and the preset still checks each request. The name is only what
   the box asks for (`http://<host>/`); nothing resolves it. A socket host has no port, `ca` or
   `credential`. Envoy's account must be allowed to connect (the socket's owner or an ACL).
+  **One user only:** like a credential, a socket upstream may be reached by one user's
+  listeners alone (apply refuses it on two users' listeners, directly or through an include), so
+  the service is never handed to every user of a shared listener by one line.
   It is read when the request comes, so the service can start after Envoy, and a missing socket
   is a 503 for that request. In the client manifest its port shows as 443 and is not used.
   Headers the box sends that no rule removes (`Authorization` included) reach the service as
