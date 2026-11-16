@@ -5,7 +5,7 @@
 # shellcheck disable=SC2016,SC2034  # checks and stubs are single-quoted on purpose
 set -u
 cd "$(dirname "$0")/.." || exit
-t="$(mktemp -d /tmp/install-all-test.XXXXXX)"; trap 'rm -rf "$t"' EXIT
+t="$(mktemp -d "${TMPDIR:-/tmp}/install-all-test.XXXXXX")"; trap 'rm -rf "$t"' EXIT
 fails=0
 ck() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fails=$((fails+1)); fi; }
 mkdir -p "$t/repo/install" "$t/bin"
@@ -49,6 +49,11 @@ echo "# edited" >> "$t/repo/install/install-service.sh"
 ck "a clone with local changes stops before the first root step" \
    '[ "$rc" != 0 ] && [[ "$out" == *"has local changes"* ]] && ! grep -q "^sudo" "$CALLS"'
 git -C "$t/repo" checkout -q install/install-service.sh
+echo "# edited" >> "$t/repo/install/install-envoy.sh"
+: > "$CALLS"; out="$(HAVE=1.39.0 YES=1 bash "$s" </dev/null 2>&1)"; rc=$?
+ck "an Envoy bump from a clone with local changes stops before install-envoy.sh runs" \
+   '[ "$rc" != 0 ] && [[ "$out" == *"has local changes"* ]] && ! grep -q "^sudo" "$CALLS"'
+git -C "$t/repo" checkout -q install/install-envoy.sh
 ck "refuses to run as root (the check is first)" 'grep -q "run it as yourself" install/install-all.sh'
 [ "$fails" = 0 ] && echo "ok   install-all: all checks passed"
 exit $(( fails > 0 ))

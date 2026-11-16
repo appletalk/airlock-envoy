@@ -46,8 +46,10 @@ clean_checkout() {
     [ "$checked" = 0 ] || return 0
     checked=1
     echo "    (root installs from $REPO_DIR: use a clone no airlock box mounts)"
-    git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 || return 0
-    local dirty; dirty="$(git -C "$REPO_DIR" status --porcelain 2>/dev/null)" || dirty="(git status failed)"
+    if ! git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+        echo "    (not a git checkout: local changes can't be checked)"; return 0
+    fi
+    local dirty; dirty="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all 2>/dev/null)" || dirty="(git status failed)"
     if [ -n "$dirty" ]; then
         echo "make install: $REPO_DIR has local changes; the root steps would install them. Commit, stash or check them out first:" >&2
         printf '%s\n' "$dirty" | head -n 10 >&2
