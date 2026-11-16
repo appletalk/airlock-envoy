@@ -271,13 +271,22 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   is a 503 for that request. In the client manifest its port shows as 443 and is not used.
   Headers the box sends that no rule removes (`Authorization` included) reach the service as
   they are, as with any host without a credential: the service itself decides what they mean.
-  **Where the socket may be:** written as its real path (no link on the way: whoever owns a
-  directory holding one could repoint it; nothing under `/proc`, `/sys` or `/dev`); not in
-  Envoy's own runtime directories (`/run/airlock-envoy*`); not where Envoy's unit can't see
-  (`/home`, `/root`, `/run/user`, `/tmp`, `/var/tmp`); and only where no ordinary user could put
-  a socket of their own: every directory on the way owned by root or a system account and
-  writable by its owner alone, the socket (once there) owned by root or a system account. Apply
-  checks this each time, for directories that exist then.
+  **Where the socket may be:**
+  - not in Envoy's own directories (`/run/airlock-envoy/`, `/run/airlock-envoy-*`,
+    `/var/log/airlock-envoy`, which the web Envoy can write, `/etc/airlock-envoy`), under `/proc`
+    or `/sys`, or where Envoy's unit can't see (`/home`, `/root`, `/run/user`, `/tmp`,
+    `/var/tmp`, `/dev`);
+  - written as its real path: no link anywhere on it, a loop included (whoever owns the
+    directory holding a link could repoint it after the apply);
+  - only where no ordinary user could put a socket of their own: every directory on the way
+    owned by root or a system account (below `UID_MIN`, or systemd's `DynamicUser` range), not
+    by Envoy's own accounts, and writable by its owner alone; the socket, once there, owned by
+    such an account.
+
+  Apply checks each part as it runs, on that machine, as the user running it: a part it can't
+  look into refuses, and a directory not there yet is checked at the next apply. A system
+  socket such as the journal's or D-Bus's would pass these rules: don't name one (a box could
+  then write to it through the preset's allowed paths).
   ```
   http store.example socket /run/example-store/store.sock rules victoria-logs
   auditor @anthropic http://store.example

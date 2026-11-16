@@ -475,43 +475,53 @@ valid_sock() {
   IFS=/ read -ra part <<< "${1#/}"
   for part in "${part[@]}"; do [[ "$part" != . && "$part" != .. ]] || return 1; done
 }
-# Where a socket upstream may be. Written as its real path: no link anywhere on it (Envoy follows
-# a link at each connection, so whoever owns the directory holding one could repoint it later)
-# and nothing under /proc, /sys or /dev (/proc/self/cwd means another directory to Envoy than to
-# this script). Never in Envoy's own runtime directories (its admin socket, the box sockets, the
-# credentials' tmpfs), nor where its unit can't see (ProtectHome, PrivateTmp). And only where no
-# ordinary user could put a socket of their own for Envoy to dial: each directory on the way that
-# exists owned by root or a system account and writable by its owner alone; the socket itself,
-# if it exists, owned by root or a system account. (A directory not there yet is checked again
-# at the next apply; its parent already is.) The reason on stdout, return 1.
+# Where a socket upstream may be. Never in Envoy's own directories (its admin socket, the box
+# sockets, the credentials, the log directory the web Envoy can write), nor where its unit can't
+# see (ProtectHome, PrivateTmp, PrivateDevices), nor under /proc or /sys (/proc/self/cwd means
+# another directory to Envoy than to this script). Then each part of the path as written, from
+# / down, without following links (lstat: a link is seen even in a loop):
+# - no link anywhere: Envoy follows one at each connection, so whoever owns the directory holding
+#   it could repoint it after the apply;
+# - each directory owned by root or a system account (not by Envoy's own accounts: the web Envoy,
+#   which faces the internet, runs as one) and writable by its owner alone;
+# - the socket, once there, a socket owned by such an account;
+# - a part that can't be checked (not a directory, no permission to look) refuses; one that
+#   doesn't exist yet ends the walk (its parent is checked; the next apply checks it).
+# The verdict is the filesystem this runs on, as the user running it. The reason on stdout.
 sock_trust() {
-  local p=$1 d o m uid_min
+  local p=$1 q="" part o m t i out uid_min nogo=" "
+  local -a parts
   uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
   case "$uid_min" in ''|*[!0-9]*) uid_min=1000 ;; esac
+  for i in airlock-envoy airlock-envoy-mint; do o="$(id -u "$i" 2>/dev/null)" && nogo="$nogo$o "; done
   case "$p/" in
-    /proc/*|/sys/*|/dev/*) echo "under /proc, /sys or /dev: name the socket by its real path"; return 1 ;;
-    /run/airlock-envoy*|/var/run/airlock-envoy*) echo "in airlock-envoy's own runtime directories"; return 1 ;;
+    /proc/*|/sys/*) echo "under /proc or /sys: name the socket by its real path"; return 1 ;;
+    /run/airlock-envoy/*|/run/airlock-envoy-*|/var/run/airlock-envoy/*|/var/run/airlock-envoy-*|/var/log/airlock-envoy/*|/etc/airlock-envoy/*)
+      echo "in airlock-envoy's own directories"; return 1 ;;
+    /home/*|/root/*|/run/user/*|/tmp/*|/var/tmp/*|/dev/*)
+      echo "hidden from Envoy by its unit (ProtectHome, PrivateTmp, PrivateDevices): put the socket under /run, say"; return 1 ;;
   esac
-  [ "$(readlink -m -- "$p")" = "$p" ] || { echo "a link on the way (it resolves to $(readlink -m -- "$p")): name the real path, links can be repointed"; return 1; }
-  if [ -e "$p" ] || [ -L "$p" ]; then
-    [ -S "$p" ] || { echo "not a socket"; return 1; }
-    o="$(stat -c %u -- "$p")"
-    [ "$o" -lt "$uid_min" ] || { echo "owned by uid $o, an ordinary user: only root or a system account's socket"; return 1; }
-  fi
-  d=${p%/*}
-  while :; do
-    [ -n "$d" ] || d=/
-    if [ -e "$d" ]; then
-      o="$(stat -c %u -- "$d")" m="$(stat -c %a -- "$d")"
-      [ "$o" -lt "$uid_min" ] || { echo "$d is owned by uid $o, an ordinary user (it could put its own socket there)"; return 1; }
-      (( (8#$m & 022) == 0 )) || { echo "$d is writable by others (mode $m): anyone in it could put their own socket there"; return 1; }
+  # A system account: below UID_MIN, or systemd's DynamicUser range (not nobody).
+  sys_uid() { [ "$1" -lt "$uid_min" ] || { [ "$1" -ge 61184 ] && [ "$1" -le 65519 ] && [ "$1" != 65534 ]; }; }
+  IFS=/ read -ra parts <<< "${p#/}"
+  for i in "" "${!parts[@]}"; do
+    if [ -z "$i" ]; then q=/; else q="${q%/}/${parts[$i]}"; fi
+    if ! out="$(stat -c '%u %a %F' -- "$q" 2>&1)"; then
+      case "$out" in *"No such file or directory"*) return 0 ;; esac
+      echo "can't check $q as $(id -un) (${out##*: })"; return 1
     fi
-    [ "$d" != / ] || break
-    d=${d%/*}
+    read -r o m t <<< "$out"
+    [ "$t" != "symbolic link" ] || { echo "$q is a link: name the real path (a link can be repointed)"; return 1; }
+    case "$nogo" in *" $o "*) echo "$q belongs to one of airlock-envoy's own accounts"; return 1 ;; esac
+    if [ "$q" = "$p" ]; then
+      [ "$t" = socket ] || { echo "not a socket ($t)"; return 1; }
+      sys_uid "$o" || { echo "owned by uid $o, an ordinary user: only root or a system account's socket"; return 1; }
+    else
+      [ "$t" = directory ] || { echo "$q is not a directory ($t)"; return 1; }
+      sys_uid "$o" || { echo "$q is owned by uid $o, an ordinary user (it could put its own socket there)"; return 1; }
+      (( (8#$m & 022) == 0 )) || { echo "$q is writable by others (mode $m): anyone in it could put their own socket there"; return 1; }
+    fi
   done
-  case "$p/" in
-    /home/*|/root/*|/run/user/*|/tmp/*|/var/tmp/*) echo "hidden from Envoy by its unit (ProtectHome, PrivateTmp): put the socket under /run, say"; return 1 ;;
-  esac
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
 # Two definitions of one host on one listener: the same rules, or the two GitHub presets

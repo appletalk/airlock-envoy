@@ -128,32 +128,77 @@ refuses "socket, a trailing slash"     "bad socket path"       'http x.example r
 refuses "socket, a double slash"       "bad socket path"       'http x.example rules any socket /run//x.sock\n'
 refuses "socket, a space-free glob"    "bad socket path"       'http x.example rules any socket /run/*.sock\n'
 refuses "socket, over 107 characters"  "bad socket path"       "http x.example rules any socket /$(printf 'a%.0s' $(seq 107))\n"
-refuses "socket in Envoy's runtime dir"  "airlock-envoy's own runtime" 'http x.example rules any socket /run/airlock-envoy-internal/admin.sock\n'
-refuses "socket in the box sockets' dir" "airlock-envoy's own runtime" 'http x.example rules any socket /run/airlock-envoy/t/a.sock\n'
-refuses "socket through /var/run"      "airlock-envoy's own runtime" 'http x.example rules any socket /var/run/airlock-envoy-web/admin.sock\n'
-mkdir -p "$work/userdir"; chmod 0755 "$work/userdir"
-if [ "$(id -u)" -ge 1000 ]; then
-  refuses "socket in a user's directory" "an ordinary user" "http x.example rules any socket $work/userdir/a.sock\n"
-  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$work/userdir/s.sock"
-  refuses "a socket an ordinary user owns" "only root or a system account's socket" "http x.example rules any socket $work/userdir/s.sock\n"
-fi
-ln -sfn /run/airlock-envoy-internal "$work/lnk"; ln -sfn /run "$work/lnk2"
-refuses "socket through a link into Envoy's dir" "a link on the way" "http x.example rules any socket $work/lnk/admin.sock\n"
-refuses "socket through a link (repointable later)" "a link on the way" "http x.example rules any socket $work/lnk2/store/vl.sock\n"
+refuses "socket in Envoy's runtime dir"  "airlock-envoy's own" 'http x.example rules any socket /run/airlock-envoy-internal/admin.sock\n'
+refuses "socket in the box sockets' dir" "airlock-envoy's own" 'http x.example rules any socket /run/airlock-envoy/t/a.sock\n'
+refuses "socket through /var/run"      "airlock-envoy's own"  'http x.example rules any socket /var/run/airlock-envoy-web/admin.sock\n'
+refuses "socket in Envoy's log dir (the web Envoy writes it)" "airlock-envoy's own" 'http x.example rules any socket /var/log/airlock-envoy/x.sock\n'
+refuses "socket in Envoy's config dir" "airlock-envoy's own"   'http x.example rules any socket /etc/airlock-envoy/credentials/x.sock\n'
 refuses "socket through /proc/self/cwd"  "under /proc"          'http x.example rules any socket /proc/self/cwd/run/airlock-envoy-internal/admin.sock\n'
-refuses "socket under /dev"              "under /proc"          'http x.example rules any socket /dev/log\n'
-refuses "socket under /home (hidden from Envoy)" "hidden from Envoy" 'http x.example rules any socket /home/x.sock\n'
-refuses "socket under /run/user (hidden from Envoy)" "hidden from Envoy" 'http x.example rules any socket /run/user/x.sock\n'
+refuses "socket under /sys"              "under /proc"          'http x.example rules any socket /sys/x.sock\n'
+for h in /home/x.sock /root/x.sock /run/user/1000/x.sock /tmp/a.sock /var/tmp/a.sock /dev/log; do
+  refuses "socket at $h (hidden from Envoy)" "hidden from Envoy" "http x.example rules any socket $h\n"
+done
 if [ -L /var/run ]; then
-  refuses "socket through the /var/run link" "a link on the way" 'http x.example rules any socket /var/run/store/vl.sock\n'
+  refuses "socket through the /var/run link" "is a link" 'http x.example rules any socket /var/run/store/vl.sock\n'
 fi
+refuses "socket below a file"          "is not a directory"    'http x.example rules any socket /etc/passwd/x.sock\n'
+refuses "socket path a regular file"   "not a socket"          'http x.example rules any socket /etc/passwd\n'
 # A group-writable directory of root's, where one is on this host (mail spools often are).
 gw="$(for d in /var/mail /var/spool/mail /var/local /var/games; do [ -d "$d" ] && [ ! -L "$d" ] && [ "$(stat -c %u "$d")" = 0 ] && (( 8#$(stat -c %a "$d") & 020 )) && echo "$d" && break; done)"
 if [ -n "$gw" ]; then
   refuses "socket in a group-writable dir ($gw)" "writable by others" "http x.example rules any socket $gw/x.sock\n"
-fi
-refuses "socket in a world-writable dir" "writable by others" 'http x.example rules any socket /tmp/a.sock\n'
-refuses "socket path a regular file"   "not a socket"          'http x.example rules any socket /etc/passwd\n'
+else echo "skip socket in a group-writable dir: none on this host (the walk's mode check is tested below)"; fi
+# The walk itself, in scratch directories under $work. $work is in /tmp, which the real check
+# refuses as hidden, under a sticky world-writable /tmp, in directories this (ordinary) user
+# owns: so each case runs a copy of the apply patched just enough to reach what it tests, and
+# each patch is checked to have applied.
+walkcopy() {  # walkcopy <name> <sed expressions...>: a patched copy of install/ at $work/<name>
+  local n=$1 e; shift
+  rm -rf "${work:?}/$n"; mkdir -p "$work/$n"; cp -r install "$work/$n/"
+  for e in "$@"; do
+    sed -i "$e" "$work/$n/install/airlock-envoy-apply"
+  done
+  echo "$work/$n/install/airlock-envoy-apply"
+}
+HIDDEN_OFF='s#^    /home/\*|/root/\*|/run/user/\*|/tmp/\*|/var/tmp/\*|/dev/\*)$#    /hidden-off/*)#'
+# shellcheck disable=SC2016  # sed/grep patterns, matched literally
+STICKY_OK='s#(( (8\#$m \& 022) == 0 ))#(( (8\#$m \& 022) == 0 || (8\#$m \& 01000) ))#'
+# shellcheck disable=SC2016  # sed/grep patterns, matched literally
+ME_SYSTEM='s#^  case "$uid_min" in .*#&; uid_min=$(( $(id -u) + 1 ))#'
+# shellcheck disable=SC2016  # sed/grep patterns, matched literally
+DIRS_PASS='s#^      sys_uid "$o" || { echo "$q is owned by uid#      true || { echo "$q is owned by uid#'
+real_apply=$apply
+d="$work/w"; mkdir -p "$d/grp" "$d/open"; chmod 0775 "$d/grp"; chmod 0777 "$d/open"
+ln -sfn /run "$d/lnk"; ln -sfn "$d/loop2" "$d/loop1"; ln -sfn "$d/loop1" "$d/loop2"; ln -sfn "$d/loop1" "$d/last.sock"; ln -sfn "$d/nothere" "$d/dangling"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$d/s.sock"
+apply="$(walkcopy walk-links "$HIDDEN_OFF" "$STICKY_OK" "$ME_SYSTEM")"
+# shellcheck disable=SC2016  # sed/grep patterns, matched literally
+if grep -q hidden-off "$apply" && grep -q '01000' "$apply" && grep -q 'uid_min=$(( $(id -u) + 1 ))' "$apply"; then
+  refuses "walk: a link on the way (repointable later)" "$d/lnk is a link" "http x.example rules any socket $d/lnk/store/vl.sock\n"
+  refuses "walk: a link loop on the way" "$d/loop1 is a link" "http x.example rules any socket $d/loop1/x.sock\n"
+  refuses "walk: the socket itself a link" "$d/last.sock is a link" "http x.example rules any socket $d/last.sock\n"
+  refuses "walk: a dangling link on the way" "$d/dangling is a link" "http x.example rules any socket $d/dangling/x.sock\n"
+  refuses "walk: a group-writable directory" "$d/grp is writable by others (mode 775)" "http x.example rules any socket $d/grp/x.sock\n"
+  refuses "walk: a world-writable directory" "$d/open is writable by others (mode 777)" "http x.example rules any socket $d/open/x.sock\n"
+  if [ "$(id -u)" != 0 ]; then
+    mkdir -p "$d/shut"; chmod 0000 "$d/shut"
+    refuses "walk: a directory this user can't look into" "can't check $d/shut/x.sock as $(id -un) (Permission denied)" "http x.example rules any socket $d/shut/x.sock\n"
+    chmod 0700 "$d/shut"
+  fi
+  lists "walk: a socket in good directories passes" "a http://x.example rules any socket $d/s.sock\na client t" "http x.example rules any socket $d/s.sock\na http://x.example\nclient a t\n"
+else echo "FAIL walk tests: a patch did not apply to the copy"; fails=$((fails+1)); fi
+if [ "$(id -u)" -ge 1000 ]; then
+  apply="$(walkcopy walk-owner "$HIDDEN_OFF" "$STICKY_OK")"
+  if grep -q hidden-off "$apply"; then
+    refuses "walk: a directory an ordinary user owns" "is owned by uid $(id -u), an ordinary user (it could put" "http x.example rules any socket $d/x.sock\n"
+  else echo "FAIL walk owner test: a patch did not apply"; fails=$((fails+1)); fi
+  apply="$(walkcopy walk-sock "$HIDDEN_OFF" "$STICKY_OK" "$DIRS_PASS")"
+# shellcheck disable=SC2016  # sed/grep patterns, matched literally
+  if grep -q hidden-off "$apply" && grep -q '      true || { echo "$q is owned' "$apply"; then
+    refuses "walk: a socket an ordinary user owns" "owned by uid $(id -u), an ordinary user: only root or a system account's socket" "http x.example rules any socket $d/s.sock\n"
+  else echo "FAIL walk socket-owner test: a patch did not apply"; fails=$((fails+1)); fi
+else echo "skip walk owner tests: run as a login account (uid 1000 and up)"; fi
+apply=$real_apply
 refuses "socket given twice"           "socket given twice"    'http x.example rules any socket /run/a.sock socket /run/b.sock\n'
 refuses "socket with a port"           "socket with a port"    'http x.example:8080 rules any socket /run/a.sock\n'
 refuses "socket with an address"       "socket with an address" 'http 10.99.0.1 rules any socket /run/a.sock\n'
