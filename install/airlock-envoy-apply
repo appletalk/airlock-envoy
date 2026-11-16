@@ -32,6 +32,7 @@
 #               which may have none: it is then a definition only, with no socket (as is the
 #               built-in anthropic). A credential may be reachable by one user's listeners
 #               only: for a second user, define a variant (http <host>@<variant>) with its own.
+#               So may a socket upstream (http <host> socket <path>), by its path.
 #
 #   host:port   CONNECT to exactly this host and port, and only TLS whose server name (SNI) is
 #               that host passes: another site on the same address is not reachable

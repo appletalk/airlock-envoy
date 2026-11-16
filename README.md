@@ -184,6 +184,9 @@ Rules that matter most (full list in [docs/site-file.md](docs/site-file.md)):
   `/etc/passwd`): box sockets start at boot, before a directory service answers.
 - **A credential belongs to one user.** If listeners of two users would reach the same
   credential, apply refuses. Give the second user a variant (`http <host>@<variant> ...`).
+- **So does a socket upstream.** If listeners of two users would reach the same socket
+  (`http <host> socket <path>`, under any name), apply refuses: list it on that user's own
+  listeners, not on one others include.
 - **Name listeners after their user** (`alice-infra`, `agent-infra`) so the name in a box's
   config says whose it is.
 - **Strict syntax.** Lowercase names, explicit ports, no wildcards, URLs or Windows line

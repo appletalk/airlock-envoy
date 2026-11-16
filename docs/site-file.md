@@ -71,6 +71,12 @@ config says whose it is.
 (directly or through an include), apply refuses. Give the second user a variant
 (`http <host>@<variant> ... credential <its own>`).
 
+**So does a socket upstream.** If listeners of two users would reach the same socket
+(`http <host> socket <path>`, directly or through an include, under one host name or several),
+apply refuses. A socket host has no credential to tie it to a user, so this is what keeps a
+local service meant for one user (an audit store for an auditor) from reaching every user of a
+shared listener. List it on that user's own listeners.
+
 The audit log names the user (`user`) on every request line.
 
 ## `internal-name` and `internal-net`

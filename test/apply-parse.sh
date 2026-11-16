@@ -261,6 +261,8 @@ refuses "a socket host through a shared include" "is reachable by t (listener a)
   'http s.example rules victoria-logs socket /run/s/vl.sock\nshared http://s.example\na @shared\nclient a t\nb @shared\nclient b u\n'
 refuses "one socket under two names for two users" "socket /run/s/vl.sock (http://t.example)" \
   'http s.example rules victoria-logs socket /run/s/vl.sock\nhttp t.example rules victoria-logs socket /run/s/vl.sock\na http://s.example\nclient a t\nb http://t.example\nclient b u\n'
+lists "a socket host through a definition-only listener, one user" 'sh http://s.example rules victoria-logs socket /run/s/vl.sock\na http://s.example rules victoria-logs socket /run/s/vl.sock\na client t' \
+  'http s.example rules victoria-logs socket /run/s/vl.sock\nsh http://s.example\na @sh\nclient a t\n'
 lists "a socket host on two listeners of one user" 'a http://s.example rules victoria-logs socket /run/s/vl.sock\na client t\nb http://s.example rules victoria-logs socket /run/s/vl.sock\nb client t' \
   'http s.example rules victoria-logs socket /run/s/vl.sock\na http://s.example\nclient a t\nb http://s.example\nclient b t\n'
 refuses "socket, two definitions of one host differ" "another port, ca, socket" \
