@@ -168,7 +168,7 @@ ME_SYSTEM='s#^  case "$uid_min" in .*#&; uid_min=$(( $(id -u) + 1 ))#'
 # shellcheck disable=SC2016  # sed/grep patterns, matched literally
 DIRS_PASS='s#^      sys_uid "$o" || { echo "$q is owned by uid#      true || { echo "$q is owned by uid#'
 real_apply=$apply
-d="$work/w"; mkdir -p "$d/grp" "$d/open"; chmod 0775 "$d/grp"; chmod 0777 "$d/open"
+d="$work/w"; mkdir -p "$d/grp" "$d/open"; chmod 0711 "$work"; chmod 0755 "$d"; chmod 0775 "$d/grp"; chmod 0777 "$d/open"
 ln -sfn /run "$d/lnk"; ln -sfn "$d/loop2" "$d/loop1"; ln -sfn "$d/loop1" "$d/loop2"; ln -sfn "$d/loop1" "$d/last.sock"; ln -sfn "$d/nothere" "$d/dangling"
 python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$d/s.sock"
 apply="$(walkcopy walk-links "$HIDDEN_OFF" "$STICKY_OK" "$ME_SYSTEM")"
@@ -181,7 +181,7 @@ if grep -q hidden-off "$apply" && grep -q '01000' "$apply" && grep -q 'uid_min=$
   refuses "walk: a group-writable directory" "$d/grp is writable by others (mode 775)" "http x.example rules any socket $d/grp/x.sock\n"
   refuses "walk: a world-writable directory" "$d/open is writable by others (mode 777)" "http x.example rules any socket $d/open/x.sock\n"
   if [ "$(id -u)" != 0 ]; then
-    mkdir -p "$d/shut"; chmod 0000 "$d/shut"
+    mkdir -p "$d/shut"; chmod 0001 "$d/shut"   # Envoy (others) may pass; this user (the owner) may not look
     refuses "walk: a directory this user can't look into" "can't check $d/shut/x.sock as $(id -un) (Permission denied)" "http x.example rules any socket $d/shut/x.sock\n"
     chmod 0700 "$d/shut"
   fi
@@ -190,15 +190,55 @@ else echo "FAIL walk tests: a patch did not apply to the copy"; fails=$((fails+1
 if [ "$(id -u)" -ge 1000 ]; then
   apply="$(walkcopy walk-owner "$HIDDEN_OFF" "$STICKY_OK")"
   if grep -q hidden-off "$apply"; then
-    refuses "walk: a directory an ordinary user owns" "is owned by uid $(id -u), an ordinary user (it could put" "http x.example rules any socket $d/x.sock\n"
+    refuses "walk: a directory an ordinary user owns" "is owned by uid $(id -u), an ordinary user or nobody (it could put" "http x.example rules any socket $d/x.sock\n"
   else echo "FAIL walk owner test: a patch did not apply"; fails=$((fails+1)); fi
   apply="$(walkcopy walk-sock "$HIDDEN_OFF" "$STICKY_OK" "$DIRS_PASS")"
 # shellcheck disable=SC2016  # sed/grep patterns, matched literally
   if grep -q hidden-off "$apply" && grep -q '      true || { echo "$q is owned' "$apply"; then
-    refuses "walk: a socket an ordinary user owns" "owned by uid $(id -u), an ordinary user: only root or a system account's socket" "http x.example rules any socket $d/s.sock\n"
+    refuses "walk: a socket an ordinary user owns" "owned by uid $(id -u), an ordinary user or nobody: only root or a system account's socket" "http x.example rules any socket $d/s.sock\n"
   else echo "FAIL walk socket-owner test: a patch did not apply"; fails=$((fails+1)); fi
 else echo "skip walk owner tests: run as a login account (uid 1000 and up)"; fi
 apply=$real_apply
+# Owners and filesystems this user can't make: a copy whose stat and id answer from a table
+# (path -> "uid mode gid type", "fs <path> <type>"; airlock-envoy is uid and gid 990).
+cat > "$work/fakes.sh" <<'FAKE'
+stat() {
+  local a f=0 p=""
+  for a; do case "$a" in -f) f=1 ;; -c|--) ;; %*) ;; *) p=$a ;; esac; done
+  if [ "$f" = 1 ]; then awk -v p="$p" '$1 == "fs" && $2 == p { print $3; found=1 } END { if (!found) print "ext2/ext3" }' "$FAKE_STAT"; return 0; fi
+  awk -v p="$p" -F'|' '$1 == p { print $2; found=1 } END { exit !found }' "$FAKE_STAT" && return 0
+  echo "stat: cannot statx '$p': No such file or directory" >&2; return 1
+}
+id() { case "$*" in "-u airlock-envoy"|"-g airlock-envoy") echo 990 ;; "-u airlock-envoy-mint") echo 991 ;; *) command id "$@" ;; esac; }
+FAKE
+apply="$(walkcopy walk-fake "1r $work/fakes.sh")"
+fake() {  # fake <name> <expected message part or "ok"> <socket path> <table lines...>
+  local n=$1 want=$2 sp=$3; shift 3
+  printf '%s\n' "/|0 755 0 directory" "/srv|0 755 0 directory" "$@" > "$work/fake.tab"
+  if [ "$want" = ok ]; then
+    FAKE_STAT="$work/fake.tab" lists "fake: $n" "a http://x.example rules any socket $sp\na client t" "http x.example rules any socket $sp\na http://x.example\nclient a t\n"
+  else
+    FAKE_STAT="$work/fake.tab" refuses "fake: $n" "$want" "http x.example rules any socket $sp\n"
+  fi
+}
+export FAKE_STAT
+if grep -q '^stat() {' "$apply"; then
+  fake "a directory of airlock-envoy's" "belongs to one of airlock-envoy's own accounts" /srv/s/x.sock "/srv/s|990 755 990 directory"
+  fake "a socket of airlock-envoy-mint's" "belongs to one of airlock-envoy's own accounts" /srv/s/x.sock "/srv/s|0 755 0 directory" "/srv/s/x.sock|991 600 991 socket"
+  fake "a directory of nobody's" "uid 65534, an ordinary user or nobody" /srv/s/x.sock "/srv/s|65534 755 65534 directory"
+  fake "DynamicUser's lowest uid" ok /srv/s/x.sock "/srv/s|61184 755 61184 directory" "/srv/s/x.sock|61184 600 61184 socket"
+  fake "DynamicUser's highest uid" ok /srv/s/x.sock "/srv/s|65519 711 65519 directory"
+  fake "above DynamicUser's range" "uid 65520, an ordinary user" /srv/s/x.sock "/srv/s|65520 755 65520 directory"
+  fake "below DynamicUser's range" "uid 61183, an ordinary user" /srv/s/x.sock "/srv/s|61183 755 61183 directory"
+  fake "a directory Envoy can't pass" "can't be passed by Envoy's account (mode 750)" /srv/s/x.sock "/srv/s|0 750 0 directory"
+  fake "a directory Envoy passes by its group" ok /srv/s/x.sock "/srv/s|0 750 990 directory"
+  fake "a FUSE filesystem on the way" "on a FUSE filesystem" /srv/s/x.sock "/srv/s|0 755 0 directory" "fs /srv/s fuseblk"
+else echo "FAIL fake-stat tests: the fakes did not go into the copy"; fails=$((fails+1)); fi
+apply=$real_apply
+refuses "the journal's socket"          "a system service's socket" 'http x.example rules any socket /run/systemd/journal/stdout\n'
+refuses "D-Bus's socket"                "a system service's socket" 'http x.example rules any socket /run/dbus/system_bus_socket\n'
+refuses "Envoy's logrotate state dir"   "airlock-envoy's own"       'http x.example rules any socket /var/lib/airlock-envoy/x.sock\n'
+refuses "the mint's config dir"         "airlock-envoy's own"       'http x.example rules any socket /etc/airlock-envoy-mint/x.sock\n'
 refuses "socket given twice"           "socket given twice"    'http x.example rules any socket /run/a.sock socket /run/b.sock\n'
 refuses "socket with a port"           "socket with a port"    'http x.example:8080 rules any socket /run/a.sock\n'
 refuses "socket with an address"       "socket with an address" 'http 10.99.0.1 rules any socket /run/a.sock\n'
