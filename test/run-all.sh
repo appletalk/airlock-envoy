@@ -64,6 +64,7 @@ protect() {  # the push check of protected branches: its parser under LuaJIT, th
   run private-names names
   run private-names-check test/private-names-check-test.sh
   run apply-parse test/apply-parse.sh
+  run install-all test/install-all.sh
   run graphql graphql
   run protect protect
   run mcp mcp
@@ -74,7 +75,7 @@ protect() {  # the push check of protected branches: its parser under LuaJIT, th
   with_envoy t2 test/t2.conf test/t2-checks.sh
   with_envoy site-checks test/site.conf test/site-checks.sh
 } &
-order=(shellcheck private-names private-names-check apply-parse graphql protect mcp cred-backends cred-e2e mint mint-e2e t2 site-checks "${order[@]}")
+order=(shellcheck private-names private-names-check apply-parse install-all graphql protect mcp cred-backends cred-e2e mint mint-e2e t2 site-checks "${order[@]}")
 wait
 failed=0
 for name in "${order[@]}"; do

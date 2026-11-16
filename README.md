@@ -70,6 +70,14 @@ Run these from a **clean clone that no airlock box mounts**. Both run as root an
 the release key and the built-in allowlist from the clone, so check `git status` first.
 
 ```
+make install                                  # both steps below, asking before each (YES=1: no questions)
+```
+
+`make install` installs Envoy at the version in `ENVOY_VERSION` (skipped when that version is
+already installed), then the service, then shows `airlock-envoy-apply --status`. Rerun it for
+every update: a version bump is a one-line change to `ENVOY_VERSION`. The two steps alone:
+
+```
 sudo install/install-envoy.sh 1.40.2          # binary -> /usr/local/libexec/airlock-envoy/envoy-1.40.2
 sudo install/install-service.sh               # system account, units, airlock-envoy-apply, config
 ```
