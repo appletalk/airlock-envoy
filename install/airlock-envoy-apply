@@ -690,6 +690,7 @@ listing() {
     [ -z "${WEB[$l]:-}" ] || printf '%s web\n' "$l"
     [ -z "${CLIENT[$l]:-}" ] || printf '%s client %s\n' "$l" "${CLIENT[$l]}"
   done
+  [ "$LOG_JOURNAL" = off ] || echo "log-journal on"
   if any_web; then
     for d in "${INTERNAL_NAMES[@]}"; do printf 'internal-name %s\n' "$d"; done
     for d in "${INTERNAL_NETS[@]}"; do printf 'internal-net %s\n' "$d"; done
