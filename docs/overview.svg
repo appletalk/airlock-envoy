@@ -54,7 +54,7 @@
 <text x="893" y="145" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#2563eb" text-anchor="middle">TLS end to end</text>
 <rect x="950" y="210" width="200" height="74" rx="14" fill="#d1fae5" stroke="#059669" stroke-width="2"/>
 <text x="1050.0" y="243.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#064e3b" text-anchor="middle">GitHub, git, k8s ...</text>
-<text x="1050.0" y="263.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">services that need a token</text>
+<text x="1050.0" y="263.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">a token, or a local socket</text>
 <path d="M810,247 L948,247" fill="none" stroke="#059669" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-green)"/>
 <text x="893" y="239" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#059669" text-anchor="middle">token added</text>
 <rect x="950" y="304" width="200" height="74" rx="14" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
@@ -69,6 +69,6 @@
 <text x="590.0" y="528.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="700" fill="#334155" text-anchor="middle">service credentials on the host</text>
 <text x="590.0" y="548.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">set, unlocked for the day, or minted</text>
 <rect x="804" y="504" width="340" height="56" rx="14" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="2"/>
-<text x="974.0" y="528.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="700" fill="#334155" text-anchor="middle">two audit logs</text>
-<text x="974.0" y="548.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">access.jsonl and web.jsonl</text>
+<text x="974.0" y="528.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="700" fill="#334155" text-anchor="middle">audit logs</text>
+<text x="974.0" y="548.5" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569" text-anchor="middle">two files, and the journal (log-journal on)</text>
 </svg>
