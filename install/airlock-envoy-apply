@@ -115,7 +115,7 @@ fi
 # ---- parse ----------------------------------------------------------------------------------
 
 declare -A DESTS=() INCLUDED_BY=() IN_ALL=() BUILT=() WEB=()
-declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=() HTTP_RREPOS=() HTTP_PROTECT=()
+declare -A HDESTS=() HTTP_RULES=() HTTP_CRED=() HTTP_PORT=() HTTP_HOST=() HTTP_PROJECTS=() HTTP_CA=() HTTP_REPOS=() HTTP_RREPOS=() HTTP_PROTECT=() HTTP_SOCK=()
 declare -A HTTP_ENDPOINTS=() HTTP_TOOLS=() HTTP_DTOOLS=()
 declare -A CLIENT=() CLIENT_AT=() CLIENT_UID=()
 LISTENERS=() ALL=() INTERNAL_NAMES=() INTERNAL_NETS=() HTTP_HOSTS=() LOG_JOURNAL=off
@@ -182,11 +182,11 @@ parse() {  # parse <source label>, text on stdin
     line=${line%%#*}
     charset_ok=1
     # Project IDs, repo and branch names, MCP endpoints and tools (an http line's "projects",
-    # "repos", "repos-read", "protect", "endpoints", "tools" and "deny-tools" values) may be
+    # "repos", "repos-read", "protect", "endpoints", "tools", "deny-tools" and "socket" values) may be
     # mixed case and hold _, / and *; parse_http checks them.
     chk=$line
     if [[ "$line" =~ ^[[:blank:]]*http[[:blank:]] ]]; then
-      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos|repos-read|protect|endpoints|tools|deny-tools)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
+      while [[ "$chk" =~ (^|[[:blank:]])(projects|repos|repos-read|protect|endpoints|tools|deny-tools|socket)[[:blank:]]+[^[:blank:]]+ ]]; do chk=${chk/"${BASH_REMATCH[0]}"/ }; done
     fi
     # User names may have an underscore; the client line checks its words itself.
     [[ ! "$line" =~ ^[[:blank:]]*client[[:blank:]] ]] || chk=${chk//_/}
@@ -274,8 +274,8 @@ parse() {  # parse <source label>, text on stdin
             || die "$src: listener $l lists $h twice (as http://$first and http://$k): use one, or give both repos or repos-read (each repo in one of them)"
           same_family "${HTTP_RULES[$first]}" "${HTTP_RULES[$k]}" \
             || die "$src: listener $l lists $h with rules ${HTTP_RULES[$first]} (http://$first) and ${HTTP_RULES[$k]} (http://$k): definitions of one host share their rules (github-api and github-issues may mix)"
-          [ "${HTTP_PORT[$first]} ${HTTP_CA[$first]} ${HTTP_CRED[$first]:+cred}" = "${HTTP_PORT[$k]} ${HTTP_CA[$k]} ${HTTP_CRED[$k]:+cred}" ] \
-            || die "$src: listener $l lists $h as http://$first and http://$k with another port, ca, or credential or none: definitions of one host share those (the credential may differ)"
+          [ "${HTTP_PORT[$first]} ${HTTP_CA[$first]} ${HTTP_SOCK[$first]} ${HTTP_CRED[$first]:+cred}" = "${HTTP_PORT[$k]} ${HTTP_CA[$k]} ${HTTP_SOCK[$k]} ${HTTP_CRED[$k]:+cred}" ] \
+            || die "$src: listener $l lists $h as http://$first and http://$k with another port, ca, socket, or credential or none: definitions of one host share those (the credential may differ)"
           repos_overlap "$l" "$h" "$k" ;;
         *) first_of[$h]=$k ;;
       esac
@@ -287,7 +287,7 @@ parse() {  # parse <source label>, text on stdin
   done
 }
 
-# http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
+# http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [socket <path>] [projects <id>[,<id>...]]
 #   [repos <owner>/<repo>[,...]] [repos-read <owner>/<repo>[,...]] [protect <branch>[,...]]
 #   [endpoints <path>[,...]] [tools <endpoint>:<tool>[,...]] [deny-tools <endpoint>:<tool>[,...]]:
 # how the box reaches a host by plain HTTP. Envoy answers the box, checks method and path
@@ -298,6 +298,8 @@ parse() {  # parse <source label>, text on stdin
 # is another definition of the same host (its own rules and credential, e.g. a second
 # identity), listed as http://<host>@<variant>; a listener uses one definition per host, or
 # several with repos or repos-read (each repo in one of them).
+# socket: the host is a local service on that Unix socket (a log store, say): plain HTTP to it,
+# no port, no ca, no credential; the name is only what the box asks for and Host is set to.
 # projects (GitHub presets only) lets Projects v2 item writes through for those project node
 # IDs and no others. repos (the git, forgejo and GitHub presets) narrows every repo route to
 # those repos (<owner>/<repo>, or <owner>/* for all of an owner's), and refuses GraphQL.
@@ -310,8 +312,8 @@ parse() {  # parse <source label>, text on stdin
 # tools lets only those tools be called on an endpoint, deny-tools refuses those; an endpoint
 # takes one list or none (install/mcp-tools.lua checks each POST body).
 parse_http() {  # parse_http <where> <words...>
-  local where=$1 hp host port variant="" k rules="" cred="" ca="" projects="" repos="" rrepos="" protect="" endpoints="" tools="" dtools="" id r a b list; local -a ids; shift
-  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>,...] [repos <owner>/<repo>,...] [repos-read <owner>/<repo>,...] [protect <branch>,...] [endpoints <path>,...] [tools|deny-tools <endpoint>:<tool>,...]"
+  local where=$1 hp host port variant="" k rules="" cred="" ca="" sock="" projects="" repos="" rrepos="" protect="" endpoints="" tools="" dtools="" id r a b list; local -a ids; shift
+  [ $# -ge 3 ] || die "$where: want: http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [socket <path>] [projects <id>,...] [repos <owner>/<repo>,...] [repos-read <owner>/<repo>,...] [protect <branch>,...] [endpoints <path>,...] [tools|deny-tools <endpoint>:<tool>,...]"
   hp=$1; shift
   if [[ "$hp" == *@* ]]; then
     variant=${hp#*@} hp=${hp%%@*}
@@ -326,6 +328,11 @@ parse_http() {  # parse_http <where> <words...>
       rules) [ $# -ge 2 ] || die "$where: rules needs a preset"; rules=$2; shift 2 ;;
       credential) [ $# -ge 2 ] || die "$where: credential needs a name"; cred=$2; shift 2 ;;
       ca) [ $# -ge 2 ] || die "$where: ca needs a name"; ca=$2; shift 2 ;;
+      socket) [ $# -ge 2 ] || die "$where: socket needs a path"
+        [ -z "$sock" ] || die "$where: socket given twice"
+        valid_sock "$2" || die "$where: bad socket path '$2' (want an absolute path of letters, digits, . _ - and /, no . or .. part, up to 107 characters)"
+        r="$(sock_trust "$2")" || die "$where: socket $2: $r"
+        sock=$2; shift 2 ;;
       projects) [ $# -ge 2 ] || die "$where: projects needs project IDs"
         [[ "$2" != *, ]] || die "$where: bad project ID '' (a trailing comma)"
         IFS=, read -ra ids <<< "$2"
@@ -383,12 +390,20 @@ parse_http() {  # parse_http <where> <words...>
         [ "${#ids[@]}" -le 128 ] || die "$where: over 128 $1 entries"
         if [ "$1" = tools ]; then tools=$list; else dtools=$list; fi
         shift 2 ;;
-      *) die "$where: unknown http option '$1' (rules, credential, ca, projects, repos, repos-read, protect, endpoints, tools, deny-tools)" ;;
+      *) die "$where: unknown http option '$1' (rules, credential, ca, socket, projects, repos, repos-read, protect, endpoints, tools, deny-tools)" ;;
     esac
   done
   case " $PRESETS " in *" $rules "*) ;; *) die "$where: unknown rules '$rules' (one of: $PRESETS)" ;; esac
   [ -z "$cred" ] || [[ "$cred" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad credential name '$cred'"
   [ -z "$ca" ] || [[ "$ca" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || die "$where: bad ca name '$ca'"
+  # A socket upstream is a local service, plain HTTP on this host: no port, no TLS to check, and
+  # no credential (none is sent in clear, even locally, until a use needs it).
+  if [ -n "$sock" ]; then
+    [[ "$hp" != *:* ]] || die "$where: socket with a port: a socket upstream has none (http $host socket ...)"
+    [[ ! "$host" =~ ^[0-9.]+$ ]] || die "$where: socket with an address: name the service (http <name> socket ...)"
+    [ -z "$ca" ] || die "$where: socket with ca: a socket upstream is plain HTTP, there is no certificate to check"
+    [ -z "$cred" ] || die "$where: socket with credential: not supported (a socket upstream gets no credential)"
+  fi
   case "$rules" in github-api|github-issues) ;; *) [ -z "$projects" ] || die "$where: projects only with the github-api or github-issues rules" ;; esac
   case "$rules" in git|git-read|forgejo|github-api|github-issues) ;; *) [ -z "$repos" ] || die "$where: repos only with the git, git-read, forgejo, github-api or github-issues rules" ;; esac
   case "$rules" in git|forgejo|github-api|github-issues) ;;
@@ -423,7 +438,7 @@ parse_http() {  # parse_http <where> <words...>
     ! repo_clash "$a" "$b" || die "$where: repo $a (repos) and $b (repos-read) overlap: each repo in one list"
   done; done
   HTTP_RULES[$k]=$rules HTTP_CRED[$k]=$cred HTTP_PORT[$k]=$port HTTP_HOST[$k]=$host HTTP_PROJECTS[$k]=$projects HTTP_CA[$k]=$ca HTTP_REPOS[$k]=$repos HTTP_RREPOS[$k]=$rrepos HTTP_PROTECT[$k]=$protect
-  HTTP_ENDPOINTS[$k]=$endpoints HTTP_TOOLS[$k]=$tools HTTP_DTOOLS[$k]=$dtools
+  HTTP_SOCK[$k]=$sock HTTP_ENDPOINTS[$k]=$endpoints HTTP_TOOLS[$k]=$tools HTTP_DTOOLS[$k]=$dtools
   HTTP_HOSTS+=("$k")
 }
 # A repos entry: <owner>/<repo> or <owner>/*, names as GitHub and Forgejo allow them (owners
@@ -451,6 +466,45 @@ valid_endpoint() {
   [ "${#1}" -le 200 ] && [[ "$1" =~ ^/([A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/?)?$ ]] || return 1
   IFS=/ read -ra part <<< "${1#/}"
   for part in "${part[@]}"; do [[ "$part" != . && "$part" != .. ]] || return 1; done
+}
+# A socket upstream's path: absolute, plain characters, no . or .. part, within a Unix socket
+# address (107 bytes and the NUL).
+valid_sock() {
+  local part
+  [ "${#1}" -le 107 ] && [[ "$1" =~ ^(/[A-Za-z0-9._-]+)+$ ]] || return 1
+  IFS=/ read -ra part <<< "${1#/}"
+  for part in "${part[@]}"; do [[ "$part" != . && "$part" != .. ]] || return 1; done
+}
+# Where a socket upstream may be: never in Envoy's own runtime directories (its admin socket, the
+# box sockets, the credentials' tmpfs), and only where no ordinary user could put a socket of
+# their own for Envoy to dial: each directory on the way that exists, links followed, owned by
+# root or a system account and writable by its owner alone; the socket itself, if it exists,
+# owned by root or a system account. (A directory not there yet is checked again at the next
+# apply; its parent already is.) The reason on stdout, return 1.
+sock_trust() {
+  local p=$1 d r o m uid_min
+  uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
+  case "$uid_min" in ''|*[!0-9]*) uid_min=1000 ;; esac
+  for r in "$p" "$(readlink -m -- "$p")"; do
+    case "$r/" in /run/airlock-envoy*|/var/run/airlock-envoy*) echo "in airlock-envoy's own runtime directories"; return 1 ;; esac
+  done
+  r="$(readlink -m -- "$p")"
+  if [ -e "$r" ] || [ -L "$r" ]; then
+    [ -S "$r" ] || { echo "not a socket"; return 1; }
+    o="$(stat -c %u -- "$r")"
+    [ "$o" -lt "$uid_min" ] || { echo "owned by uid $o, an ordinary user: only root or a system account's socket"; return 1; }
+  fi
+  d=${r%/*}
+  while :; do
+    [ -n "$d" ] || d=/
+    if [ -e "$d" ]; then
+      o="$(stat -c %u -- "$d")" m="$(stat -c %a -- "$d")"
+      [ "$o" -lt "$uid_min" ] || { echo "$d is owned by uid $o, an ordinary user (it could put its own socket there)"; return 1; }
+      (( (8#$m & 022) == 0 )) || { echo "$d is writable by others (mode $m): anyone in it could put their own socket there"; return 1; }
+    fi
+    [ "$d" != / ] || break
+    d=${d%/*}
+  done
 }
 hid() { printf '%s' "${1/@/_}"; }   # a definition's name in Envoy (vhost, routes, cluster)
 # Two definitions of one host on one listener: the same rules, or the two GitHub presets
@@ -682,8 +736,8 @@ listing() {
   for l in "${LISTENERS[@]}"; do
     for d in ${DESTS[$l]}; do printf '%s %s\n' "$l" "$d"; done
     for d in ${HDESTS[$l]:-}; do
-      printf '%s http://%s:%s%s rules %s%s%s%s%s%s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "${HTTP_PORT[$d]}" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
-        "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_CA[$d]:+ ca ${HTTP_CA[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}" \
+      printf '%s http://%s%s%s rules %s%s%s%s%s%s%s%s%s%s\n' "$l" "${HTTP_HOST[$d]}" "$([ -n "${HTTP_SOCK[$d]}" ] || printf ":%s" "${HTTP_PORT[$d]}")" "$([[ "$d" != *@* ]] || printf ' variant %s' "${d#*@}")" "${HTTP_RULES[$d]}" \
+        "${HTTP_CRED[$d]:+ credential ${HTTP_CRED[$d]}}" "${HTTP_CA[$d]:+ ca ${HTTP_CA[$d]}}${HTTP_SOCK[$d]:+ socket ${HTTP_SOCK[$d]}}" "${HTTP_PROJECTS[$d]:+ projects ${HTTP_PROJECTS[$d]// /,}}" \
         "${HTTP_REPOS[$d]:+ repos ${HTTP_REPOS[$d]// /,}}" "${HTTP_RREPOS[$d]:+ repos-read ${HTTP_RREPOS[$d]// /,}}" "${HTTP_PROTECT[$d]:+ protect ${HTTP_PROTECT[$d]// /,}}" \
         "${HTTP_ENDPOINTS[$d]:+ endpoints ${HTTP_ENDPOINTS[$d]// /,}}" "${HTTP_TOOLS[$d]:+ tools ${HTTP_TOOLS[$d]// /,}}" "${HTTP_DTOOLS[$d]:+ deny-tools ${HTTP_DTOOLS[$d]// /,}}"
     done
@@ -1522,6 +1576,18 @@ http_clusters() {
       case "$seen" in *" $d "*) continue ;; esac
       seen="$seen$d "
       h=${HTTP_HOST[$d]}
+      if [ -n "${HTTP_SOCK[$d]}" ]; then
+        cat <<EOF
+  # Plain HTTP from boxes, plain HTTP on to a local socket: nothing leaves the host.
+  - name: "http-$(hid "$d")"
+    type: STATIC
+    connect_timeout: 5s
+    load_assignment:
+      cluster_name: "http-$(hid "$d")"
+      endpoints: [{ lb_endpoints: [{ endpoint: { address: { pipe: { path: "${HTTP_SOCK[$d]}" } } } }] }]
+EOF
+        continue
+      fi
       ca=/etc/ssl/certs/ca-certificates.crt
       [ -z "${HTTP_CA[$d]}" ] || ca=$CA_DIR/${HTTP_CA[$d]}.pem
       if is_ip "$h"; then

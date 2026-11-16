@@ -120,6 +120,35 @@ refuses "http, ca without a name"      "ca needs a name"       'http x.example r
 refuses "an address both by plain HTTP and CONNECT" "lists 10.0.0.1 both" \
   'http 10.0.0.1:6443 rules kubernetes-read\na http://10.0.0.1 10.0.0.1:6443\nclient a t\n'
 refuses "http host with a path"        "only lowercase"        'http x.example/p rules any\n'
+refuses "socket without a path"        "socket needs a path"   'http x.example rules any socket\n'
+refuses "socket, a relative path"      "bad socket path"       'http x.example rules any socket run/x.sock\n'
+refuses "socket, a .. part"            "bad socket path"       'http x.example rules any socket /run/../etc/x.sock\n'
+refuses "socket, a . part"             "bad socket path"       'http x.example rules any socket /run/./x.sock\n'
+refuses "socket, a trailing slash"     "bad socket path"       'http x.example rules any socket /run/x/\n'
+refuses "socket, a double slash"       "bad socket path"       'http x.example rules any socket /run//x.sock\n'
+refuses "socket, a space-free glob"    "bad socket path"       'http x.example rules any socket /run/*.sock\n'
+refuses "socket, over 107 characters"  "bad socket path"       "http x.example rules any socket /$(printf 'a%.0s' $(seq 107))\n"
+refuses "socket in Envoy's runtime dir"  "airlock-envoy's own runtime" 'http x.example rules any socket /run/airlock-envoy-internal/admin.sock\n'
+refuses "socket in the box sockets' dir" "airlock-envoy's own runtime" 'http x.example rules any socket /run/airlock-envoy/t/a.sock\n'
+refuses "socket through /var/run"      "airlock-envoy's own runtime" 'http x.example rules any socket /var/run/airlock-envoy-web/admin.sock\n'
+mkdir -p "$work/userdir"; chmod 0755 "$work/userdir"
+if [ "$(id -u)" -ge 1000 ]; then
+  refuses "socket in a user's directory" "an ordinary user" "http x.example rules any socket $work/userdir/a.sock\n"
+  ln -sfn /run/airlock-envoy-internal "$work/lnk"
+  refuses "socket through a link into Envoy's dir" "airlock-envoy's own runtime" "http x.example rules any socket $work/lnk/admin.sock\n"
+fi
+refuses "socket in a world-writable dir" "writable by others" 'http x.example rules any socket /tmp/a.sock\n'
+refuses "socket path a regular file"   "not a socket"          'http x.example rules any socket /etc/hostname\n'
+refuses "socket given twice"           "socket given twice"    'http x.example rules any socket /run/a.sock socket /run/b.sock\n'
+refuses "socket with a port"           "socket with a port"    'http x.example:8080 rules any socket /run/a.sock\n'
+refuses "socket with an address"       "socket with an address" 'http 10.99.0.1 rules any socket /run/a.sock\n'
+refuses "socket with ca"               "socket with ca"        'http x.example rules any ca c socket /run/a.sock\n'
+refuses "socket with credential"       "socket with credential" 'http x.example rules any credential c socket /run/a.sock\n'
+refuses "a slash outside http values"  "only lowercase"        'http x.example rules any socket /run/a.sock\na x.example/p:443\n'
+lists "socket: in --list without a port" 'a http://store.example rules victoria-logs socket /run/store_1/vl.sock\na client t' \
+  'http store.example rules victoria-logs socket /run/store_1/vl.sock\na http://store.example\nclient a t\n'
+refuses "socket, two definitions of one host differ" "another port, ca, socket" \
+  'http x.example@a rules git repos o/a socket /run/a.sock\nhttp x.example@b rules git repos o/b socket /run/b.sock\nl http://x.example@a http://x.example@b\nclient l t\n'
 refuses "http defined twice"           "defined twice"         'http x.example rules any\nhttp x.example rules git\n'
 refuses "http:// with no http line"    "has no 'http x.example"  'a http://x.example\n'
 refuses "http:// before its http line" "has no 'http x.example"  'a http://x.example\nhttp x.example rules any\n'
@@ -680,6 +709,20 @@ if grep -q 'string_match: { exact: "port-test.invalid:8443" }' <<< "$r" \
    && ! grep -q 'port_value: 443 ' <<< "$c"; then
   echo "ok   a host entry on port 8443: exact host:port route, upstream dialled on 8443"
 else echo "FAIL host entry on another port"; fails=$((fails+1)); fi
+
+# A socket upstream: a pipe address, plain HTTP (no transport socket, no DNS), Host fixed, the
+# preset's routes as for any host; another host's TLS upstream unchanged beside it.
+printf 'http store.example rules victoria-logs socket /run/store/vl.sock\nhttp m.example.com rules victoria-metrics\nb http://store.example http://m.example.com\nclient b t\n' > "$work/site"
+r="$("$apply" --render "$work/site")"
+c="$(sed -n '/^  - name: "http-store.example"/,/^  - name: /p' <<< "$r" | sed '$d')"
+m="$(sed -n '/^  - name: "http-m.example.com"/,/^  - name: /p' <<< "$r")"
+if grep -q 'address: { pipe: { path: "/run/store/vl.sock" } }' <<< "$c" && grep -q 'type: STATIC' <<< "$c" \
+   && ! grep -qE 'transport_socket|socket_address|LOGICAL_DNS|sni' <<< "$c" \
+   && grep -q 'route: { cluster: "http-store.example", host_rewrite_literal: "store.example"' <<< "$r" \
+   && grep -q 'name: "store.example-refused"' <<< "$r" \
+   && grep -q 'UpstreamTlsContext' <<< "$m" && grep -q 'address: "m.example.com", port_value: 443' <<< "$m"; then
+  echo "ok   socket: a pipe upstream with plain HTTP and the preset's routes; a TLS host beside it unchanged"
+else echo "FAIL socket upstream render"; echo "$c"; fails=$((fails+1)); fi
 
 # forgejo: git routes have no request timeout or stream cap (long), the API routes do.
 printf 'http g.example.com rules forgejo credential fj\nb http://g.example.com\nclient b t\n' > "$work/site"

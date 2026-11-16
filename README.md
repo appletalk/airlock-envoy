@@ -245,8 +245,8 @@ client dev alice
 ### The `http` line
 
 ```
-http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [projects <id>[,<id>...]]
-     [repos <owner>/<repo>[,<owner>/<repo>...]] [repos-read <owner>/<repo>[,<owner>/<repo>...]]
+http <host>[:port][@variant] rules <preset> [credential <name>] [ca <name>] [socket <path>]
+     [projects <id>[,<id>...]] [repos <owner>/<repo>[,<owner>/<repo>...]] [repos-read <owner>/<repo>[,<owner>/<repo>...]]
      [protect <branch>[,<branch>...]]
      [endpoints <path>[,<path>...]] [tools|deny-tools <endpoint>:<tool>[,<endpoint>:<tool>...]]
 ```
@@ -262,6 +262,17 @@ It is site-wide and must come above any listener that uses it. A listener lists 
   a listener whose ca isn't set. The ca is the whole trust anchor: anything it signs for that
   address passes. (A k3s server CA also signs the node's kubelet certificate; Envoy never dials
   that, being pinned to the API port.)
+- **`socket <path>`**: the host is a service on this machine behind a Unix socket (a local log
+  store, say), so it needs no network port at all. Envoy speaks plain HTTP to the socket, with
+  `Host` set to `<host>`, and the preset still checks each request. The name is only what
+  the box asks for (`http://<host>/`); nothing resolves it. A socket host has no port, `ca` or
+  `credential`. Envoy's account must be allowed to connect (the socket's owner or an ACL).
+  It is read when the request comes, so the service can start after Envoy, and a missing socket
+  is a 503 for that request. In the client manifest its port shows as 443 and is not used.
+  ```
+  http audit.store socket /run/example-store/store.sock rules victoria-logs
+  auditor @anthropic http://audit.store
+  ```
 - **Variants**: `http <host>@<variant> ...` is a second definition of the same host, with its
   own rules, credential and projects (a second identity, or narrower rules for one profile). A
   listener uses one definition per host, or several with `repos` or `repos-read` (below).
