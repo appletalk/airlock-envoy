@@ -205,11 +205,14 @@ cat > "$work/fakes.sh" <<'FAKE'
 stat() {
   local a f=0 p=""
   for a; do case "$a" in -f) f=1 ;; -c|--) ;; %*) ;; *) p=$a ;; esac; done
-  if [ "$f" = 1 ]; then awk -v p="$p" '$1 == "fs" && $2 == p { print $3; found=1 } END { if (!found) print "ext2/ext3" }' "$FAKE_STAT"; return 0; fi
+  if [ "$f" = 1 ]; then
+    [ "$(awk -v p="$p" '$1 == "fs" && $2 == p { print $3 }' "$FAKE_STAT")" != ERROR ] || return 1
+    awk -v p="$p" '$1 == "fs" && $2 == p { print $3; found=1 } END { if (!found) print "ext2/ext3" }' "$FAKE_STAT"; return 0
+  fi
   awk -v p="$p" -F'|' '$1 == p { print $2; found=1 } END { exit !found }' "$FAKE_STAT" && return 0
   echo "stat: cannot statx '$p': No such file or directory" >&2; return 1
 }
-id() { case "$*" in "-u airlock-envoy"|"-g airlock-envoy") echo 990 ;; "-u airlock-envoy-mint") echo 991 ;; *) command id "$@" ;; esac; }
+id() { case "$*" in "-u airlock-envoy"|"-g airlock-envoy") echo 990 ;; "-G airlock-envoy") echo "990 995" ;; "-u airlock-envoy-mint") echo 991 ;; *) command id "$@" ;; esac; }
 FAKE
 apply="$(walkcopy walk-fake "1r $work/fakes.sh")"
 fake() {  # fake <name> <expected message part or "ok"> <socket path> <table lines...>
@@ -232,6 +235,9 @@ if grep -q '^stat() {' "$apply"; then
   fake "below DynamicUser's range" "uid 61183, an ordinary user" /srv/s/x.sock "/srv/s|61183 755 61183 directory"
   fake "a directory Envoy can't pass" "can't be passed by Envoy's account (mode 750)" /srv/s/x.sock "/srv/s|0 750 0 directory"
   fake "a directory Envoy passes by its group" ok /srv/s/x.sock "/srv/s|0 750 990 directory"
+  fake "a directory Envoy passes by a supplementary group" ok /srv/s/x.sock "/srv/s|0 750 995 directory"
+  fake "a directory of a group Envoy isn't in" "can't be passed by Envoy's account (mode 750)" /srv/s/x.sock "/srv/s|0 750 996 directory"
+  fake "a filesystem it can't tell" "can't tell the filesystem of /srv/s" /srv/s/x.sock "/srv/s|0 755 0 directory" "fs /srv/s ERROR"
   fake "a FUSE filesystem on the way" "on a FUSE filesystem" /srv/s/x.sock "/srv/s|0 755 0 directory" "fs /srv/s fuseblk"
 else echo "FAIL fake-stat tests: the fakes did not go into the copy"; fails=$((fails+1)); fi
 apply=$real_apply

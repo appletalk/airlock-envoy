@@ -485,7 +485,8 @@ valid_sock() {
 # - each directory owned by root or a system account (not by Envoy's own accounts: the web Envoy,
 #   which faces the internet, runs as one) and writable by its owner alone;
 # - the socket, once there, a socket owned by such an account;
-# - each directory one Envoy's account can pass through (others' x, or group x with its group),
+# - each directory one Envoy's account can pass through (others' x, or group x with one of its
+#   groups; ACLs aren't read, so a grant by ACL alone is refused: it fails closed),
 #   so a path it could never reach is refused now, not a 503 at each request;
 # - no FUSE filesystem on the way (a user's FUSE mount reports whatever owner it likes);
 # - a part that can't be checked (not a directory, no permission to look) refuses; one that
@@ -498,7 +499,7 @@ sock_trust() {
   uid_min="$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null)"
   case "$uid_min" in ''|*[!0-9]*) uid_min=1000 ;; esac
   for i in airlock-envoy airlock-envoy-mint; do o="$(id -u "$i" 2>/dev/null)" && nogo="$nogo$o "; done
-  egid="$(id -g airlock-envoy 2>/dev/null)" || egid=""
+  egid=" $(id -G airlock-envoy 2>/dev/null) "   # all its groups: the unit gets its supplementary ones too
   case "$p/" in
     /proc/*|/sys/*) echo "under /proc or /sys: name the socket by its real path"; return 1 ;;
     /run/airlock-envoy/*|/run/airlock-envoy-*|/var/run/airlock-envoy/*|/var/run/airlock-envoy-*|/var/log/airlock-envoy/*|/etc/airlock-envoy/*|/etc/airlock-envoy-*|/var/lib/airlock-envoy/*|/var/lib/airlock-envoy-*)
@@ -527,9 +528,9 @@ sock_trust() {
       [ "$t" = directory ] || { echo "$q is not a directory ($t)"; return 1; }
       sys_uid "$o" || { echo "$q is owned by uid $o, an ordinary user or nobody (it could put its own socket there)"; return 1; }
       (( (8#$m & 022) == 0 )) || { echo "$q is writable by others (mode $m): anyone in it could put their own socket there"; return 1; }
-      (( 8#$m & 001 )) || { [ -n "$egid" ] && [ "$g" = "$egid" ] && (( 8#$m & 010 )); } \
+      (( 8#$m & 001 )) || { [[ "$egid" == *" $g "* ]] && (( 8#$m & 010 )); } \
         || { echo "$q can't be passed by Envoy's account (mode $m): it would refuse every connection"; return 1; }
-      fs="$(stat -f -c %T -- "$q" 2>/dev/null)" || fs=""
+      fs="$(stat -f -c %T -- "$q" 2>/dev/null)" || { echo "can't tell the filesystem of $q"; return 1; }
       case "$fs" in fuse*) echo "$q is on a FUSE filesystem (its owner says what it likes)"; return 1 ;; esac
     fi
   done

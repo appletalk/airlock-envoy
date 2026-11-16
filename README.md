@@ -283,8 +283,11 @@ It is site-wide and must come above any listener that uses it. A listener lists 
     owned by root or a system account (below `UID_MIN`, or systemd's `DynamicUser` range; not
     nobody), not by Envoy's own accounts, and writable by its owner alone; the socket, once
     there, owned by such an account;
-  - every directory one Envoy can pass through (others' `x`, or group `x` with Envoy's group),
-    and none on a FUSE filesystem (its owner reports whatever it likes).
+  - every directory one Envoy can pass through (others' `x`, or group `x` with one of Envoy's
+    groups; ACLs aren't read, so access granted only by an ACL is refused), and none on a FUSE
+    filesystem (its owner reports whatever it likes). The socket's own permissions aren't
+    checked (an ACL for Envoy's account is the usual grant): if Envoy can't connect, each
+    request gets a 503.
 
   Apply checks each part as it runs, on that machine, as the user running it: a part it can't
   look into refuses, and a directory not there yet is checked at the next apply.
