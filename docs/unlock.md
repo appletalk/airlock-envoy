@@ -143,10 +143,14 @@ expire_at 06:00
 an unlock at 04:30 or at 23:00 ends at 06:00 tomorrow, and one at 01:00 (still the previous
 working day) ends at 06:00 that morning. Without `day_starts`, the 04:30 unlock would end at
 06:00 the same morning. `expire_at` may not be earlier than `day_starts` (an unlock just before
-`day_starts` would end in the past), so the longest such unlock is 24 hours plus their gap; set
-`max_lifetime` at least that high (26h here), since it still caps every unlock. On the night the
-clocks fall back the working day is 25 hours long, so an unlock in its first hour ends at the
-`max_lifetime` cap, up to an hour before `expire_at`.
+`day_starts` would end in the past), and `max_lifetime` must be at least 24 hours plus their gap
+(26h here), or early unlocks would end before `expire_at` and `day_starts` would do nothing; both
+are refused. With the 26h ceiling that keeps `expire_at` within 2 hours after `day_starts`, so
+`day_starts` can't stretch an evening `expire_at` (18:00) through the night. `--for` still
+shortens an unlock. On the night the clocks fall back the working day is 25 hours long, so an
+unlock in its first hour ends at the `max_lifetime` cap, up to an hour before `expire_at`.
+
+A comment may follow a value on the same line (`max_lifetime 26h  # note`), as in the examples.
 
 The deadline is kept on two clocks. A timer (`airlock-envoy-cred-expire.timer`, every 30 s,
 started by `unlock` and stopped by `lock`) locks when either the wall clock reaches the deadline

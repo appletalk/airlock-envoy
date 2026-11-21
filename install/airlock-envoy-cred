@@ -335,9 +335,11 @@ deadline() {  # deadline [<--for seconds>]
   n=$(now)
   if [ -f "$UNLOCK_CONF" ]; then
     while read -r key val || [ -n "${key:-}" ]; do
+      # A comment may follow a value (`max_lifetime 10h  # note`).
+      val=${val%%#*}; val=${val%"${val##*[![:space:]]}"}
       case "$key" in
         ''|'#'*) ;;
-        max_lifetime) life=$(duration "$val"); [ "$life" -le 93600 ] || die "$UNLOCK_CONF: max_lifetime over 26h" ;;
+        max_lifetime) life=$(duration "$val") || return 1; [ "$life" -le 93600 ] || die "$UNLOCK_CONF: max_lifetime over 26h" ;;
         expire_at) [[ "$val" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "$UNLOCK_CONF: bad expire_at '$val' (HH:MM)"; at=$val ;;
         day_starts) [[ "$val" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "$UNLOCK_CONF: bad day_starts '$val' (HH:MM)"; day=$val ;;
         *) die "$UNLOCK_CONF: unknown setting '$key' (max_lifetime, expire_at, day_starts)" ;;
@@ -347,6 +349,12 @@ deadline() {  # deadline [<--for seconds>]
   if [ -n "$day" ]; then
     [ -n "$at" ] || die "$UNLOCK_CONF: day_starts needs expire_at"
     [[ ! "$at" < "$day" ]] || die "$UNLOCK_CONF: expire_at $at is before day_starts $day"
+    # max_lifetime must reach expire_at from day_starts (24h plus their gap), or expire_at would
+    # be cut by the cap for early unlocks and day_starts would quietly do nothing; with the 26h
+    # ceiling that keeps expire_at within 2h of day_starts, so day_starts can't stretch an
+    # evening expire_at (18:00) through the night.
+    d=$(( ( (10#${at%:*} - 10#${day%:*}) * 60 + 10#${at#*:} - 10#${day#*:} ) * 60 + 86400 ))
+    [ "$life" -ge "$d" ] || die "$UNLOCK_CONF: day_starts $day with expire_at $at needs max_lifetime of at least $((d / 3600))h$( [ $((d % 3600)) = 0 ] || echo " $((d % 3600 / 60))m") (24h plus their gap, at most 26h: expire_at at most 2h after day_starts)"
   fi
   if [ -n "${1:-}" ] && [ "$1" -lt "$life" ]; then life=$1; fi
   t=$((n + life))
@@ -354,13 +362,16 @@ deadline() {  # deadline [<--for seconds>]
     # The working day: today from day_starts on, else yesterday; it ends at expire_at the day
     # after (date steps a calendar day, across DST too; HH:MM strings compare in time order).
     d=$(date -d "@$n" +%F)
-    [[ ! "$(date -d "@$n" +%H:%M)" < "$day" ]] || d=$(date -d "$d 12:00 1 day ago" +%F)   # not "- 1 day": date reads that "-" as a zone offset
-    val=$(at_on "$(date -d "$d 12:00 + 1 day" +%F)" "$at") || return 1
+    [[ ! "$(date -d "@$n" +%H:%M)" < "$day" ]] || d=$(date -d "$d 12:00 1 day ago" +%F)   # no "+"/"-": date reads "12:00 -1" as a zone offset
+    val=$(at_on "$(date -d "$d 12:00 1 day" +%F)" "$at") || return 1
+    # Only in the hour the clocks fall back: an HH:MM in the repeated hour resolves to its first
+    # pass, which can be behind us; take the next day's, as the expire_at rule does.
+    [ "$val" -gt "$n" ] || val=$(at_on "$(date -d "$d 12:00 2 days" +%F)" "$at") || return 1
     [ "$val" -ge "$t" ] || t=$val
   elif [ -n "$at" ]; then
     # The day of n, local time; then the next day (date steps a calendar day, across DST too).
     val=$(at_on "$(date -d "@$n" +%F)" "$at") || return 1
-    [ "$val" -gt "$n" ] || val=$(at_on "$(date -d "$(date -d "@$n" +%F) 12:00 + 1 day" +%F)" "$at") || return 1
+    [ "$val" -gt "$n" ] || val=$(at_on "$(date -d "$(date -d "@$n" +%F) 12:00 1 day" +%F)" "$at") || return 1
     [ "$val" -ge "$t" ] || t=$val
   fi
   echo "$t"
