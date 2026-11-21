@@ -34,8 +34,9 @@
 #   airlock-envoy-cred unlock [--for <n>h|<n>m]
 #       as the operator, on the host (never in a box: it needs your pass store and sudo): read
 #       the pass entries of the pass credentials the applied config uses, and hand them to
-#       Envoy until /etc/airlock-envoy/unlock.conf's max_lifetime (default 10h, at most 24h),
-#       its next expire_at (HH:MM, local time) or --for, whichever comes first. Unlocking
+#       Envoy until /etc/airlock-envoy/unlock.conf's max_lifetime (default 10h, at most 26h),
+#       its next expire_at (HH:MM, local time; with day_starts, the expire_at of the day after
+#       the working day) or --for, whichever comes first. Unlocking
 #       again needs the secrets again, and restarts the clock.
 #   airlock-envoy-cred lock            lock every pass credential now (sudo as needed)
 #   airlock-envoy-cred status          each pass credential: locked or unlocked, until when
@@ -324,23 +325,39 @@ lock_all() {  # lock_all [nowait]: nowait from boot (Envoy's start must not wait
   systemctl stop "$TIMER" 2>/dev/null || true
 }
 # The unlock's end: unlock.conf's max_lifetime (or --for, never longer), and the next
-# expire_at strictly after now, whichever is first.
+# expire_at strictly after now, whichever is first. With day_starts, the expire_at is the one on
+# the day after the working day: a working day begins at day_starts, so with day_starts 04:00
+# and expire_at 06:00 an unlock at 04:30 or 23:00 ends at 06:00 tomorrow, one at 01:00 at 06:00
+# that morning. expire_at may not be before day_starts (an unlock just before day_starts would
+# end in the past), so the longest such unlock is 24h plus their gap.
 deadline() {  # deadline [<--for seconds>]
-  local life=36000 at="" key val t n
+  local life=36000 at="" day="" key val t n d
   n=$(now)
   if [ -f "$UNLOCK_CONF" ]; then
     while read -r key val || [ -n "${key:-}" ]; do
       case "$key" in
         ''|'#'*) ;;
-        max_lifetime) life=$(duration "$val"); [ "$life" -le 86400 ] || die "$UNLOCK_CONF: max_lifetime over 24h" ;;
+        max_lifetime) life=$(duration "$val"); [ "$life" -le 93600 ] || die "$UNLOCK_CONF: max_lifetime over 26h" ;;
         expire_at) [[ "$val" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "$UNLOCK_CONF: bad expire_at '$val' (HH:MM)"; at=$val ;;
-        *) die "$UNLOCK_CONF: unknown setting '$key' (max_lifetime, expire_at)" ;;
+        day_starts) [[ "$val" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "$UNLOCK_CONF: bad day_starts '$val' (HH:MM)"; day=$val ;;
+        *) die "$UNLOCK_CONF: unknown setting '$key' (max_lifetime, expire_at, day_starts)" ;;
       esac
     done < "$UNLOCK_CONF"
   fi
+  if [ -n "$day" ]; then
+    [ -n "$at" ] || die "$UNLOCK_CONF: day_starts needs expire_at"
+    [[ ! "$at" < "$day" ]] || die "$UNLOCK_CONF: expire_at $at is before day_starts $day"
+  fi
   if [ -n "${1:-}" ] && [ "$1" -lt "$life" ]; then life=$1; fi
   t=$((n + life))
-  if [ -n "$at" ]; then
+  if [ -n "$day" ]; then
+    # The working day: today from day_starts on, else yesterday; it ends at expire_at the day
+    # after (date steps a calendar day, across DST too; HH:MM strings compare in time order).
+    d=$(date -d "@$n" +%F)
+    [[ ! "$(date -d "@$n" +%H:%M)" < "$day" ]] || d=$(date -d "$d 12:00 1 day ago" +%F)   # not "- 1 day": date reads that "-" as a zone offset
+    val=$(at_on "$(date -d "$d 12:00 + 1 day" +%F)" "$at") || return 1
+    [ "$val" -ge "$t" ] || t=$val
+  elif [ -n "$at" ]; then
     # The day of n, local time; then the next day (date steps a calendar day, across DST too).
     val=$(at_on "$(date -d "@$n" +%F)" "$at") || return 1
     [ "$val" -gt "$n" ] || val=$(at_on "$(date -d "$(date -d "@$n" +%F) 12:00 + 1 day" +%F)" "$at") || return 1

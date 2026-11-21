@@ -119,8 +119,9 @@ since the secret then lives on disk, never locked.
 `/etc/airlock-envoy/unlock.conf` (optional):
 
 ```
-max_lifetime 10h    # the default; at most 24h
+max_lifetime 10h    # the default; at most 26h
 expire_at 18:00     # optional; local time
+day_starts 04:00    # optional, needs expire_at: see below
 ```
 
 An unlock ends at whichever comes first: unlock time plus `max_lifetime` (or `--for`), or the
@@ -128,6 +129,24 @@ next `expire_at` strictly after the unlock. An unlock at 19:00 with `expire_at 1
 hours later, at 05:00, because the next 18:00 is further away; one at exactly 18:00 rolls to
 the next day's. An `expire_at` that a day skips (the hour DST springs forward) is an hour later
 that day.
+
+**A consistent end with `day_starts`:** a working day begins at `day_starts`, and an unlock lasts
+until `expire_at` on the day after the working day it was made in, whatever the time of the
+unlock. With
+
+```
+max_lifetime 26h
+day_starts 04:00
+expire_at 06:00
+```
+
+an unlock at 04:30 or at 23:00 ends at 06:00 tomorrow, and one at 01:00 (still the previous
+working day) ends at 06:00 that morning. Without `day_starts`, the 04:30 unlock would end at
+06:00 the same morning. `expire_at` may not be earlier than `day_starts` (an unlock just before
+`day_starts` would end in the past), so the longest such unlock is 24 hours plus their gap; set
+`max_lifetime` at least that high (26h here), since it still caps every unlock. On the night the
+clocks fall back the working day is 25 hours long, so an unlock in its first hour ends at the
+`max_lifetime` cap, up to an hour before `expire_at`.
 
 The deadline is kept on two clocks. A timer (`airlock-envoy-cred-expire.timer`, every 30 s,
 started by `unlock` and stopped by `lock`) locks when either the wall clock reaches the deadline
@@ -178,8 +197,8 @@ git shows the body as `remote:` lines on a fetch; on a push it may show only
 ## Tests
 
 - `test/cred-backends.sh` (no root, no podman): add, entries, unlock, lock, the deadline rules
-  (default, `--for`, `max_lifetime`, `expire_at` including the 18:00 and 19:00 cases and a DST
-  gap), the deadline and timer before any secret, an expiry during an unlock, the verb lock, the
+  (default, `--for`, `max_lifetime` up to 26h, `expire_at` including the 18:00 and 19:00 cases and
+  a DST gap, `day_starts` around the clock and across both DST changes), the deadline and timer before any secret, an expiry during an unlock, the verb lock, the
   expiry on each clock and on a damaged state, all-or-nothing receive, migrate (applied before
   the file goes), `set --file` (the reverse, applied before the pass credential goes; a failed
   or interrupted apply rolling back, the file locked if Envoy reads it; one killed outright,

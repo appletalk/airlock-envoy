@@ -407,8 +407,10 @@ airlock-envoy-cred status
 ```
 
 `unlock` reads only the entries of the pass credentials the applied config uses, and hands them
-to Envoy (a tmpfs, root:airlock-envoy 0640) until `max_lifetime` (default 10h, at most 24h),
-the next `expire_at` (both in `/etc/airlock-envoy/unlock.conf`) or `--for`, whichever is first.
+to Envoy (a tmpfs, root:airlock-envoy 0640) until `max_lifetime` (default 10h, at most 26h),
+the next `expire_at` (both in `/etc/airlock-envoy/unlock.conf`; with `day_starts`, the
+`expire_at` after the working day, for the same end whenever you unlock) or `--for`, whichever
+is first.
 Locked, a request using one gets **423 Locked** from Envoy itself (`x-airlock-envoy: locked`,
 "credential <name> is locked on this host: ... do not retry"); nothing goes upstream. A box can
 never unlock: see [docs/unlock.md](docs/unlock.md) for the boundary, the expiry and the limits.
@@ -609,7 +611,7 @@ path its rules don't allow), so boxed Claude can report the cause instead of gue
 | `/etc/airlock-envoy/clients/` | root:airlock-envoy, 0750 | Each listener's client manifest, copied into its user's directory when its socket starts |
 | `/etc/airlock-envoy/site.conf.prev` | as `site.conf` | The site file a `--site` install replaced |
 | `/etc/airlock-envoy/pass/<name>` | root, 0600 (dir 0700) | A pass credential: its pass entry and format, no secret |
-| `/etc/airlock-envoy/unlock.conf` | yours to write (optional) | `max_lifetime`, `expire_at` for unlocks |
+| `/etc/airlock-envoy/unlock.conf` | yours to write (optional) | `max_lifetime`, `expire_at`, `day_starts` for unlocks |
 | `/run/airlock-envoy-cred/secrets/<name>.yaml` | root:airlock-envoy, 0640 (dir 0750; a tmpfs) | Each pass credential, unlocked or the locked marker |
 | `/run/airlock-envoy-cred/state`, `.lock` | root, 0644 / 0600 | Locked or unlocked, until when; one verb at a time |
 | `/etc/airlock-envoy-mint/`, `apps/` | root:airlock-envoy-mint, 0750 | GitHub Apps (`apps/<name>`, a file key `apps/<name>.pem`, 0640) and `mint.conf` (0640, written by apply) |

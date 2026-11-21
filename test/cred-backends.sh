@@ -155,11 +155,13 @@ cred unlock --for 30h >/dev/null
 [ "$(sed -n 's/^deadline //p' "$R/state")" = $((1000000 + 36000)) ] && ok "unlock --for can't lengthen past max_lifetime" || fail "--for 30h"
 ! cred unlock --for 0h >/dev/null 2>&1 && ! cred unlock --for 2d >/dev/null 2>&1 && ok "unlock --for: bad durations refused" || fail "bad --for"
 
-# unlock.conf: max_lifetime (at most 24h), expire_at (next one strictly after now, local time).
+# unlock.conf: max_lifetime (at most 26h), expire_at (next one strictly after now, local time), day_starts.
 printf 'max_lifetime 4h\n' > "$E/unlock.conf"; cred unlock >/dev/null
 [ "$(sed -n 's/^deadline //p' "$R/state")" = $((1000000 + 14400)) ] && ok "unlock.conf max_lifetime" || fail "max_lifetime 4h"
-printf 'max_lifetime 25h\n' > "$E/unlock.conf"
-! cred unlock >/dev/null 2>&1 && ok "unlock.conf: max_lifetime over 24h refused" || fail "25h accepted"
+printf 'max_lifetime 26h\n' > "$E/unlock.conf"; cred unlock >/dev/null
+[ "$(sed -n 's/^deadline //p' "$R/state")" = $((1000000 + 93600)) ] && ok "unlock.conf: max_lifetime 26h accepted" || fail "max_lifetime 26h"
+printf 'max_lifetime 27h\n' > "$E/unlock.conf"
+! cred unlock >/dev/null 2>&1 && ok "unlock.conf: max_lifetime over 26h refused" || fail "27h accepted"
 printf 'max_lifetime 10h\nexpire_at 18:00\n' > "$E/unlock.conf"
 date -d "2026-10-27 17:00" +%s > "$work/clock/now"; cred unlock >/dev/null
 [ "$(sed -n 's/^deadline //p' "$R/state")" = "$(date -d '2026-10-27 18:00' +%s)" ] && ok "expire_at: 17:00 unlock ends at 18:00" || fail "expire_at 17:00"
@@ -169,6 +171,21 @@ date -d "2026-10-27 18:00" +%s > "$work/clock/now"; printf 'max_lifetime 24h\nex
 [ "$(sed -n 's/^deadline //p' "$R/state")" = "$(date -d '2026-10-28 18:00' +%s)" ] && ok "expire_at: an unlock at 18:00 rolls to the next day" || fail "expire_at 18:00"
 printf 'expire_at 25:00\n' > "$E/unlock.conf"; ! cred unlock >/dev/null 2>&1 && ok "unlock.conf: bad expire_at refused" || fail "25:00"
 printf 'idle 2h\n' > "$E/unlock.conf"; ! cred unlock >/dev/null 2>&1 && ok "unlock.conf: unknown settings refused" || fail "idle accepted"
+# day_starts: the working day begins at day_starts; an unlock ends at expire_at the day after it.
+printf 'max_lifetime 26h\nday_starts 04:00\nexpire_at 06:00\n' > "$E/unlock.conf"
+for c in "2026-10-27 04:00|2026-10-28 06:00" "2026-10-27 04:30|2026-10-28 06:00" "2026-10-27 05:59|2026-10-28 06:00" \
+         "2026-10-27 06:00|2026-10-28 06:00" "2026-10-27 23:00|2026-10-28 06:00" "2026-10-28 01:00|2026-10-28 06:00" \
+         "2026-10-28 03:59|2026-10-28 06:00"; do
+  date -d "${c%|*}" +%s > "$work/clock/now"; cred unlock >/dev/null
+  [ "$(sed -n 's/^deadline //p' "$R/state")" = "$(date -d "${c#*|}" +%s)" ] && ok "day_starts 04:00, expire_at 06:00: unlock at ${c%|*} ends ${c#*|}" \
+    || fail "day_starts: ${c%|*} -> $(date -d "@$(sed -n 's/^deadline //p' "$R/state")" '+%F %H:%M')"
+done
+printf 'max_lifetime 10h\nday_starts 04:00\nexpire_at 06:00\n' > "$E/unlock.conf"
+date -d "2026-10-27 04:30" +%s > "$work/clock/now"; cred unlock >/dev/null
+[ "$(sed -n 's/^deadline //p' "$R/state")" = "$(date -d '2026-10-27 14:30' +%s)" ] && ok "day_starts: max_lifetime still caps it" || fail "day_starts cap"
+printf 'day_starts 04:00\n' > "$E/unlock.conf"; ! cred unlock >/dev/null 2>&1 && ok "unlock.conf: day_starts without expire_at refused" || fail "day_starts alone accepted"
+printf 'day_starts 06:00\nexpire_at 04:00\n' > "$E/unlock.conf"; ! cred unlock >/dev/null 2>&1 && ok "unlock.conf: expire_at before day_starts refused" || fail "expire_at < day_starts accepted"
+printf 'day_starts 4:00\nexpire_at 06:00\n' > "$E/unlock.conf"; ! cred unlock >/dev/null 2>&1 && ok "unlock.conf: bad day_starts refused" || fail "4:00 accepted"
 rm -f "$E/unlock.conf"
 
 # The expiry: locks at the deadline on either clock; nothing before.
@@ -416,6 +433,14 @@ TZ=America/New_York date -d "2026-03-08 01:00" +%s > "$work/clock/now"; TZ=Ameri
 [ "$(sed -n 's/^deadline //p' "$R/state")" = "$(TZ=America/New_York date -d '2026-03-08 03:30' +%s)" ] && ok "expire_at in a DST gap, the same day: an hour later" || fail "DST same day: $(head -1 "$R/state")"
 TZ=America/New_York date -d "2026-03-07 23:00" +%s > "$work/clock/now"; TZ=America/New_York cred unlock >/dev/null
 [ "$(sed -n 's/^deadline //p' "$R/state")" = "$(TZ=America/New_York date -d '2026-03-08 03:30' +%s)" ] && ok "expire_at in a DST gap, the next day: an hour later" || fail "DST next day: $(head -1 "$R/state")"
+# day_starts across DST (America/New_York: springs forward 2026-03-08, falls back 2026-11-01).
+printf 'max_lifetime 26h\nday_starts 04:00\nexpire_at 06:00\n' > "$E/unlock.conf"
+TZ=America/New_York date -d "2026-03-07 04:30" +%s > "$work/clock/now"; TZ=America/New_York cred unlock >/dev/null
+[ "$(sed -n 's/^deadline //p' "$R/state")" = "$(TZ=America/New_York date -d '2026-03-08 06:00' +%s)" ] && ok "day_starts, DST spring forward: still 06:00 the next day" || fail "day_starts spring: $(head -1 "$R/state")"
+TZ=America/New_York date -d "2026-10-31 05:00" +%s > "$work/clock/now"; TZ=America/New_York cred unlock >/dev/null
+[ "$(sed -n 's/^deadline //p' "$R/state")" = "$(TZ=America/New_York date -d '2026-11-01 06:00' +%s)" ] && ok "day_starts, DST fall back: 06:00 the next day (26h)" || fail "day_starts fall: $(head -1 "$R/state")"
+TZ=America/New_York date -d "2026-10-31 04:00" +%s > "$work/clock/now"; TZ=America/New_York cred unlock >/dev/null
+[ "$(sed -n 's/^deadline //p' "$R/state")" = "$(( $(TZ=America/New_York date -d '2026-10-31 04:00' +%s) + 93600 ))" ] && ok "day_starts, DST fall back at 04:00: 27h needed, the 26h cap ends it an hour early" || fail "day_starts fall cap: $(head -1 "$R/state")"
 rm -f "$E/unlock.conf"; echo 1000000 > "$work/clock/now"
 # A deadline that can't be worked out unlocks nothing (expire_at 23:30 on a day without it can't occur;
 # a broken date stands in for it).
